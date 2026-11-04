@@ -197,7 +197,7 @@ across a switch or NVR path. `[0014]`
 |---|---|---|
 | reference (John Chia) | `noname_ssc377qe_imx335` | 0006 |
 | UVision MC-A85 / Anpviz IPC-D3B83B-S: SSC378DE + GC8613, fixed 4K | `yma85_ssc378_gc8613` | 0018 |
-| Jennov JL12D2 PTZ / UVision MCL12D2: SSC377D + IMX335, 20x zoom | `mcl12d2_ssc377d_imx335` | 0019 |
+| Jennov JL12D2 PTZ / UVision MCL12D2: SSC377D + IMX335, ~13.5x optical zoom (sold as 20x) | `mcl12d2_ssc377d_imx335` | 0019 |
 | Anpviz IPC-B8A63WD-S / UVision MC-F46D: SSC377D + GC4653, 2560x1440 bullet | `ymf46d_ssc377d_gc4653` | 0020 |
 | N803 PTZ: SSC378QE + IMX415, 8 MP, 5x zoom, Pelco-D manual-focus head | `n803_ssc378qe_imx415` | 0021 |
 
@@ -233,7 +233,7 @@ Tooling and notes specific to this port, not candidates:
 | Camera | Streams | Highlights | Patch |
 |---|---|---|---|
 | MC-A85 (fixed 4K) | 3840x2160 + 1280x720 H.264 | OEM tuning, FlickerEx, luma day/night with IR ladder, IR + white lights | 0018 |
-| JL12D2 (PTZ, 20x) | 2592x1944 + 1280x960 (native 4:3) | autofocus, pan/tilt/zoom/presets over ONVIF and web UI, microSD | 0019 |
+| JL12D2 (PTZ, ~13.5x optical) | 2592x1944 + 1280x960 (native 4:3) | autofocus, pan/tilt/zoom/presets over ONVIF and web UI, microSD | 0019 |
 | YMF46D (bullet) | 2560x1440 + 960x540 (sub) | correct orientation, mic, IR + white lights, GPIO IR-cut, microSD automount | 0020 |
 | N803 (PTZ, 5x) | 3840x2160 + sub | Pelco-D pan/tilt/zoom/focus, limited autofocus, serial IR-cut, 256 MB DDR | 0021 |
 

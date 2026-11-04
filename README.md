@@ -73,7 +73,7 @@ to Thingino and back without opening the case.
 | Camera (OEM names) | SoC + sensor | Form factor | Streams |
 |---|---|---|---|
 | UVision MC-A85 / Anpviz IPC-D3B83B-S | SSC378DE + GC8613 | fixed 4K | 3840×2160 + 1280×720 H.264 |
-| Jennov JL12D2 / UVision MCL12D2 | SSC377D + IMX335 | PTZ, 20× optical zoom | 2592×1944 + 1280×960 (native 4:3) |
+| Jennov JL12D2 / UVision MCL12D2 | SSC377D + IMX335 | PTZ, ~13.5× optical (sold as 20×) | 2592×1944 + 1280×960 (native 4:3) |
 | Anpviz IPC-B8A63WD-S / UVision MC-F46D | SSC377D + GC4653 | bullet | 2560×1440 + 960×540 (sub) |
 | N803 | SSC378QE + IMX415 | PTZ, 5× zoom | 3840×2160 + sub; Pelco-D pan/tilt/zoom/focus, limited autofocus |
 | reference (John Chia's) | SSC377QE + IMX335 | — | board-less reference target |

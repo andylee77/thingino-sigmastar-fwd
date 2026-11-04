@@ -1,6 +1,6 @@
 # JL12D2 PTZ + autofocus serial protocol (for the Thingino port)
 
-How the stock JL12D2 / MCL12D2 (SSC377D + IMX335, 20x zoom pan/tilt) drives its
+How the stock JL12D2 / MCL12D2 (SSC377D + IMX335, ~13.5x optical zoom, pan/tilt) drives its
 pan/tilt/zoom/focus motor-and-lens controller, so the Thingino port can
 reproduce it and expose PTZ over ONVIF for Frigate.
 
