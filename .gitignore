@@ -1,0 +1,8 @@
+# Proprietary vendor sensor tuning blobs — never commit
+*.bin
+
+# Build / editor noise
+*.o
+*.swp
+*~
+.DS_Store

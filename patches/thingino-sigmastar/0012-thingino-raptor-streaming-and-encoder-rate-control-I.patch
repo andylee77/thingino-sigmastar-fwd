@@ -1,0 +1,1777 @@
+From 35baa053ec97df5656090016edb2a9711c46388c Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 08:19:15 -0500
+Subject: [PATCH 12/21] thingino-raptor: streaming and encoder rate-control,
+ Image Quality, motion gating
+
+---
+ ...ngs-for-the-largest-JPEG-not-the-ave.patch |  42 ++
+ ...rt-etc-default-raptor-to-the-daemons.patch |  33 ++
+ ...-reports-which-ISP-controls-the-HAL-.patch |  91 ++++
+ .../thingino-raptor/files/S32raptor-motion    |   4 +-
+ .../thingino-raptor/files/raptor-motion-watch |  22 +
+ .../files/raptor-sigmastar.webui.json         |   7 +
+ .../files/www/a/streamer-image.js             | 341 ++++++++++--
+ .../files/www/a/streamer-stream.js            | 488 ++++++++++++++++++
+ .../files/www/streamer-image.html             | 228 +++++---
+ .../files/www/streamer-main.html              | 163 +++---
+ .../files/www/streamer-substream.html         | 163 +++---
+ 11 files changed, 1299 insertions(+), 283 deletions(-)
+ create mode 100755 package/thingino-raptor/0009-rvd-size-JPEG-rings-for-the-largest-JPEG-not-the-ave.patch
+ create mode 100755 package/thingino-raptor/0010-S31raptor-export-etc-default-raptor-to-the-daemons.patch
+ create mode 100644 package/thingino-raptor/0011-rvd-get-isp-caps-reports-which-ISP-controls-the-HAL-.patch
+ create mode 100644 package/thingino-raptor/files/raptor-sigmastar.webui.json
+ create mode 100755 package/thingino-raptor/files/www/a/streamer-stream.js
+
+diff --git a/package/thingino-raptor/0009-rvd-size-JPEG-rings-for-the-largest-JPEG-not-the-ave.patch b/package/thingino-raptor/0009-rvd-size-JPEG-rings-for-the-largest-JPEG-not-the-ave.patch
+new file mode 100755
+index 000000000..9fe74781a
+--- /dev/null
++++ b/package/thingino-raptor/0009-rvd-size-JPEG-rings-for-the-largest-JPEG-not-the-ave.patch
+@@ -0,0 +1,42 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: Andy <andylee77@users.noreply.github.com>
++Date: Sun, 1 Nov 2026 13:30:00 -0500
++Subject: [PATCH] rvd: size JPEG rings for the largest JPEG, not the average
++
++A JPEG ring sized its data region at w*h/16 bytes a slot for quality 70-89,
++half a bit a pixel, with a 16 KB floor. rss_ring refuses any frame larger
++than the whole region with ENOSPC, so on a detailed outdoor scene the 640x360
++sub's JPEGs (over 64 KB at quality 75, about 2.2 bits a pixel) were dropped
++one after another: "stream2: publish_iov failed (-28)" every few seconds and
++a stalling MJPEG preview on a YMF46D. Size for 2.7 bits a pixel at 70-89
++(4 at 90+), with a 32 KB floor; the 4 MB cap stays.
++---
++ rvd/rvd_pipeline.c | 12 +++++++++---
++ 1 file changed, 9 insertions(+), 3 deletions(-)
++
++--- a/rvd/rvd_pipeline.c
+++++ b/rvd/rvd_pipeline.c
++@@ -1622,11 +1622,17 @@
++ 			uint32_t h = s->enc_cfg.height;
++ 			uint32_t q = (uint32_t)s->enc_cfg.init_qp;
++ 			uint32_t fps = s->enc_cfg.fps_num;
++-			uint32_t divisor = (q >= 90) ? 6 : (q >= 70) ? 16 : 24;
+++			/* Bytes per pixel a JPEG can reach at this quality. A frame
+++			 * larger than the whole data region is refused (ENOSPC), so
+++			 * the region must hold the worst case, not the average: a
+++			 * detailed outdoor scene at quality 75 measured over 64 KB at
+++			 * 640x360 -- 2.2 bits a pixel -- against the 0.5 the old
+++			 * w*h/16 allowed, and every such frame was dropped. */
+++			uint32_t divisor = (q >= 90) ? 2 : (q >= 70) ? 3 : 5;
++ 			uint32_t slots = (fps >= 9) ? 16 : (fps >= 3) ? 8 : 4;
++ 			uint32_t jpeg_max = w * h / divisor;
++-			if (jpeg_max < 16384)
++-				jpeg_max = 16384;
+++			if (jpeg_max < 32768)
+++				jpeg_max = 32768;
++ 			uint32_t data = jpeg_max * slots;
++ 			if (data > 4 * 1024 * 1024)
++ 				data = 4 * 1024 * 1024;
++-- 
++2.43.0
++
+diff --git a/package/thingino-raptor/0010-S31raptor-export-etc-default-raptor-to-the-daemons.patch b/package/thingino-raptor/0010-S31raptor-export-etc-default-raptor-to-the-daemons.patch
+new file mode 100755
+index 000000000..c0b51b4f8
+--- /dev/null
++++ b/package/thingino-raptor/0010-S31raptor-export-etc-default-raptor-to-the-daemons.patch
+@@ -0,0 +1,33 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: Andy <andylee77@users.noreply.github.com>
++Date: Sun, 1 Nov 2026 13:30:00 -0500
++Subject: [PATCH] S31raptor: export /etc/default/raptor to the daemons
++
++Some settings the daemons take are environment, not raptor.conf: the
++Infinity6C HAL reads the depth of its SCL->VENC ring from
++RSS_SCL_RING_DIV. Read /etc/default/raptor when it exists, exporting every
++assignment, so a camera profile can set them.
++---
++ config/S31raptor | 8 ++++++++
++ 1 file changed, 8 insertions(+)
++
++--- a/config/S31raptor
+++++ b/config/S31raptor
++@@ -5,6 +5,14 @@
++ RUNDIR=/var/run/rss
++ SHMDIR=/dev/shm
++ 
+++# Environment the daemons read at start, set per camera (for example
+++# RSS_SCL_RING_DIV for the Infinity6C HAL). Every assignment is exported.
+++if [ -r /etc/default/raptor ]; then
+++	set -a
+++	. /etc/default/raptor
+++	set +a
+++fi
+++
++ # Executables here run with "stop" before any daemon goes down and with
++ # "start" once the stack is up. They are for processes outside the stack that
++ # call into the video pipeline: those must be off it while rvd tears it down
++-- 
++2.43.0
++
+diff --git a/package/thingino-raptor/0011-rvd-get-isp-caps-reports-which-ISP-controls-the-HAL-.patch b/package/thingino-raptor/0011-rvd-get-isp-caps-reports-which-ISP-controls-the-HAL-.patch
+new file mode 100644
+index 000000000..44df98416
+--- /dev/null
++++ b/package/thingino-raptor/0011-rvd-get-isp-caps-reports-which-ISP-controls-the-HAL-.patch
+@@ -0,0 +1,91 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: Andy <andylee77@users.noreply.github.com>
++Date: Tue, 3 Nov 2026 18:45:01 -0500
++Subject: [PATCH] rvd: get-isp-caps reports which ISP controls the HAL has
++
++A backend that does not publish an ISP op answers "not supported" to its
++set- command, and nothing else tells a client which ones those are: get-isp
++reports 0 for a missing getter, which is also a real value. The web UI
++therefore offered knobs that did nothing (sharpness and white balance on the
++Infinity6C) and hid ones that worked.
++
++get-isp-caps answers one boolean per set- op, true when the HAL publishes it,
++plus "ivs" for the motion path. It reads the ops table only, so it is safe at
++any time, before the first frame included.
++---
++ raptorctl/raptorctl_dispatch.c |  1 +
++ raptorctl/raptorctl_help.c     |  1 +
++ rvd/rvd_ctrl.c                 | 33 +++++++++++++++++++++++++++++++++
++ 3 files changed, 35 insertions(+)
++
++diff --git a/raptorctl/raptorctl_dispatch.c b/raptorctl/raptorctl_dispatch.c
++index a98f8de..a6c744c 100644
++--- a/raptorctl/raptorctl_dispatch.c
+++++ b/raptorctl/raptorctl_dispatch.c
++@@ -145,6 +145,7 @@ static const struct cmd_def cmd_table[] = {
++ 	{"share", NULL, 0, args_none},
++ 	{"share-rotate", NULL, 0, args_none},
++ 	{"get-enc-caps", NULL, 0, args_none},
+++	{"get-isp-caps", NULL, 0, args_none},
++ 
++ 	/* Optional channel */
++ 	{"request-idr", NULL, 0, args_ch},
++diff --git a/raptorctl/raptorctl_help.c b/raptorctl/raptorctl_help.c
++index 5f50863..4afc542 100644
++--- a/raptorctl/raptorctl_help.c
+++++ b/raptorctl/raptorctl_help.c
++@@ -46,6 +46,7 @@ const struct help_entry help_entries[] = {
++ 	{"rvd", "enc-get <ch> <param>                Get encoder parameter"},
++ 	{"rvd", "enc-list [ch]                       List encoder parameters"},
++ 	{"rvd", "get-enc-caps                        Show encoder capabilities"},
+++	{"rvd", "get-isp-caps                        Show which ISP controls the HAL has"},
++ 	{"rvd", "get-h264-trans <ch>                 Show H.264 chroma QP offset"},
++ 	{"rvd", "get-h265-trans <ch>                 Show H.265 chroma QP offsets"},
++ 	{"rvd", "get-roi <ch> <idx>                  Show ROI region"},
++diff --git a/rvd/rvd_ctrl.c b/rvd/rvd_ctrl.c
++index 2683ded..12b72ea 100644
++--- a/rvd/rvd_ctrl.c
+++++ b/rvd/rvd_ctrl.c
++@@ -1123,6 +1123,39 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
++ 	int sensor_idx = -1;
++ 	rss_json_get_int(cmd_json, "sensor", &sensor_idx);
++ 
+++	/*
+++	 * Which ISP controls the HAL publishes. A NULL op answers "not supported"
+++	 * to its set- command, so a client (the web UI) can hide the controls a
+++	 * backend does not have instead of offering knobs that do nothing. Setters
+++	 * only: a control is offered when it can be set. "ivs" is the motion path.
+++	 */
+++	if (strcmp(cmd, "get-isp-caps") == 0) {
+++		const rss_hal_ops_t *o = st->ops;
+++		cJSON *r = cJSON_CreateObject();
+++		cJSON_AddStringToObject(r, "status", "ok");
+++		cJSON_AddBoolToObject(r, "brightness", o->isp_set_brightness != NULL);
+++		cJSON_AddBoolToObject(r, "contrast", o->isp_set_contrast != NULL);
+++		cJSON_AddBoolToObject(r, "saturation", o->isp_set_saturation != NULL);
+++		cJSON_AddBoolToObject(r, "sharpness", o->isp_set_sharpness != NULL);
+++		cJSON_AddBoolToObject(r, "hue", o->isp_set_hue != NULL);
+++		cJSON_AddBoolToObject(r, "sinter", o->isp_set_sinter_strength != NULL);
+++		cJSON_AddBoolToObject(r, "temper", o->isp_set_temper_strength != NULL);
+++		cJSON_AddBoolToObject(r, "dpc", o->isp_set_dpc_strength != NULL);
+++		cJSON_AddBoolToObject(r, "drc", o->isp_set_drc_strength != NULL);
+++		cJSON_AddBoolToObject(r, "highlight_depress", o->isp_set_highlight_depress != NULL);
+++		cJSON_AddBoolToObject(r, "backlight_comp", o->isp_set_backlight_comp != NULL);
+++		cJSON_AddBoolToObject(r, "defog", o->isp_set_defog_strength != NULL);
+++		cJSON_AddBoolToObject(r, "ae_comp", o->isp_set_ae_comp != NULL);
+++		cJSON_AddBoolToObject(r, "max_again", o->isp_set_max_again != NULL);
+++		cJSON_AddBoolToObject(r, "max_dgain", o->isp_set_max_dgain != NULL);
+++		cJSON_AddBoolToObject(r, "hflip", o->isp_set_hflip != NULL);
+++		cJSON_AddBoolToObject(r, "vflip", o->isp_set_vflip != NULL);
+++		cJSON_AddBoolToObject(r, "antiflicker", o->isp_set_antiflicker != NULL);
+++		cJSON_AddBoolToObject(r, "wb", o->isp_set_wb != NULL);
+++		cJSON_AddBoolToObject(r, "ivs", o->ivs_create_group != NULL);
+++		return rss_ctrl_resp_json(resp, resp_size, r);
+++	}
+++
++ /* ISP_SET_N: supports --sensor N via _n variant */
++ #define ISP_SET_N(name, fn)                                                                        \
++ 	if (strcmp(cmd, name) == 0) {                                                              \
++-- 
++2.43.0
++
+diff --git a/package/thingino-raptor/files/S32raptor-motion b/package/thingino-raptor/files/S32raptor-motion
+index 60075b5d7..0830304fb 100644
+--- a/package/thingino-raptor/files/S32raptor-motion
++++ b/package/thingino-raptor/files/S32raptor-motion
+@@ -20,7 +20,9 @@ start() {
+ stop() {
+ 	echo "Stopping $NAME..."
+ 	if [ -f "$PIDFILE" ]; then
+-		start-stop-daemon -K -p "$PIDFILE" -x "$DAEMON" 2>/dev/null || true
++		# By pidfile alone: the daemon is a shell script, so its executable is
++		# /bin/sh and -x "$DAEMON" never matches (the watcher kept running).
++		start-stop-daemon -K -p "$PIDFILE" 2>/dev/null || true
+ 		rm -f "$PIDFILE"
+ 	else
+ 		killall raptor-motion-watch 2>/dev/null || true
+diff --git a/package/thingino-raptor/files/raptor-motion-watch b/package/thingino-raptor/files/raptor-motion-watch
+index 9d7b568ec..d385fbbfd 100644
+--- a/package/thingino-raptor/files/raptor-motion-watch
++++ b/package/thingino-raptor/files/raptor-motion-watch
+@@ -47,6 +47,28 @@ sleep_interval() {
+ 	sleep 1
+ }
+ 
++# RMD reports what rvd's IVS path detects. A HAL without IVS (the Infinity6C)
++# never has motion, so there is nothing to wait for: ask rvd (it may still be
++# starting) and stop if it says so. An rvd too old to answer get-isp-caps is
++# watched as before.
++no_ivs() {
++	i=0
++	while [ "$i" -lt 30 ]; do
++		caps=$(raptorctl rvd get-isp-caps 2>/dev/null | tr -d ' \t\r\n')
++		case "$caps" in
++			*'"ivs":false'*) return 0 ;;
++			*'"status":"ok"'* | *'unknowncommand'*) return 1 ;;
++		esac
++		sleep 1
++		i=$((i + 1))
++	done
++	return 1
++}
++if no_ivs; then
++	echo "raptor-motion-watch: rvd has no IVS (no on-camera motion); not watching" >&2
++	exit 0
++fi
++
+ last=idle
+ while true; do
+ 	if ! pidof rmd >/dev/null 2>&1; then
+diff --git a/package/thingino-raptor/files/raptor-sigmastar.webui.json b/package/thingino-raptor/files/raptor-sigmastar.webui.json
+new file mode 100644
+index 000000000..165f11435
+--- /dev/null
++++ b/package/thingino-raptor/files/raptor-sigmastar.webui.json
+@@ -0,0 +1,7 @@
++{
++  "name": "raptor-sigmastar",
++  "description": "SigmaStar backend: its HAL has no IVS, so the camera does not detect motion itself (Frigate does).",
++  "featureFlags": {
++    "motion": false
++  }
++}
+diff --git a/package/thingino-raptor/files/www/a/streamer-image.js b/package/thingino-raptor/files/www/a/streamer-image.js
+index 5cbe5775e..5231f9c87 100644
+--- a/package/thingino-raptor/files/www/a/streamer-image.js
++++ b/package/thingino-raptor/files/www/a/streamer-image.js
+@@ -1,74 +1,331 @@
+ /**
+  * Raptor Image Quality page.
+  *
+- * The generic /a/preview.js wires the WB/AE/flip controls through the agent
+- * (saveImageValue -> sendToEndpoint -> thinginoStreamer.applyPayload), but it
+- * disables them on load expecting the prudynt json-imaging.cgi bridge to
+- * re-enable them later. Raptor has no such CGI, so this module loads the live
+- * image settings from the agent and re-enables/populates those fields.
++ * This module owns the whole page, the preview included. The generic
++ * /a/preview.js is not loaded here: it serves the prudynt pages, races its own
++ * image fields, and spends two config reads before it starts the preview.
+  *
+- * brightness/contrast/sharpness/saturation are already handled end-to-end by
+- * preview.js; this module owns only the fields preview.js leaves disabled.
++ * The agent decides what is shown: /capabilities/image says which controls
++ * the HAL applies (rvd get-isp-caps), and /config returns null for the rest,
++ * so a knob the camera ignores is hidden instead of offered. Each change is
++ * one PATCH to /settings/image/*, which applies it and saves raptor.conf. A
++ * refused change comes back empty, and the control goes back to its value.
+  */
+ (function () {
+   "use strict";
+ 
+-  // page field id -> agent config key
+-  var FIELD_MAP = {
+-    image_core_wb_mode: "core_wb_mode",
+-    image_wb_bgain: "wb_bgain",
+-    image_wb_rgain: "wb_rgain",
+-    image_ae_compensation: "ae_compensation",
+-    image_hflip: "hflip",
+-    image_vflip: "vflip",
+-  };
++  // key = the /config image field and the PATCH body field; cap = capability.
++  var CONTROLS = [
++    { id: "brightness", type: "knob", key: "brightness", path: "brightness", cap: "brightness", label: "Brightness" },
++    { id: "contrast", type: "knob", key: "contrast", path: "contrast", cap: "contrast", label: "Contrast" },
++    { id: "saturation", type: "knob", key: "saturation", path: "saturation", cap: "saturation", label: "Saturation" },
++    { id: "sharpness", type: "knob", key: "sharpness", path: "sharpness", cap: "sharpness", label: "Sharpness" },
++    { id: "ae_comp", type: "knob", key: "ae_compensation", path: "ae-compensation", cap: "ae_compensation", label: "AE compensation" },
++    { id: "antiflicker", type: "select", key: "anti_flicker", path: "anti-flicker", cap: "anti_flicker", label: "Anti-flicker" },
++    { id: "temper", type: "knob", key: "temper", path: "temper", cap: "temper", label: "Temporal noise reduction" },
++    { id: "drc", type: "knob", key: "drc_strength", path: "drc-strength", cap: "drc_strength", label: "WDR" },
++    { id: "defog", type: "knob", key: "defog_strength", path: "defog-strength", cap: "defog_strength", label: "Defog" },
++    { id: "hflip", type: "switch", key: "hflip", path: "hflip", cap: "hflip", label: "H-Flip" },
++    { id: "vflip", type: "switch", key: "vflip", path: "vflip", cap: "vflip", label: "V-Flip" },
++    { id: "wb_mode", type: "select", key: "core_wb_mode", path: "core-wb-mode", cap: "wb", label: "White balance mode" },
++    { id: "wb_rgain", type: "number", max: 1024, key: "wb_rgain", path: "wb-rgain", cap: "wb", label: "Red gain" },
++    { id: "wb_bgain", type: "number", max: 1024, key: "wb_bgain", path: "wb-bgain", cap: "wb", label: "Blue gain" },
++  ];
++
++  // 128 is the tuning's own value on raptor's 0..255 knob scale.
++  var KNOB_DEFAULT = 128;
++  var LIVE_POLL_MS = 3000;
++  // The preview restarts after this long without a frame, backing off to the max.
++  var PREVIEW_STALL_MS = 15000;
++  var PREVIEW_BACKOFF_MAX_MS = 60000;
++
++  var last = {};
++  var liveTimer = null;
+ 
+   function el(id) {
+     return document.getElementById(id);
+   }
+ 
+-  function enable(id) {
+-    var node = el(id);
+-    if (!node) return;
+-    node.disabled = false;
+-    var wrap =
+-      node.closest("p, .select, .boolean, .col") || node.parentElement;
+-    if (wrap) wrap.classList.remove("disabled");
++  function input(c) {
++    return el("iq_" + c.id);
+   }
+ 
+-  function populate(id, value) {
+-    var node = el(id);
+-    if (!node) return;
+-    if (node.type === "checkbox") {
+-      node.checked = value === true || value === 1 || value === "1";
+-    } else if (value === null || value === undefined) {
+-      node.value = "";
++  function slider(c) {
++    return el("iq_" + c.id + "-slider");
++  }
++
++  function wrap(c) {
++    var node = input(c);
++    return node ? node.closest(".iq-knob") : null;
++  }
++
++  function notify(type, message, timeout) {
++    if (typeof window.showAlert === "function") {
++      window.showAlert(type, message, timeout);
+     } else {
+-      node.value = value;
++      console.warn(message);
+     }
+   }
+ 
+-  async function load() {
++  function api(path, options) {
+     var helper = window.thinginoStreamer;
+-    if (!helper || typeof helper.agentRequest !== "function") return;
++    if (!helper || typeof helper.agentRequest !== "function") {
++      return Promise.reject(new Error("agent unavailable"));
++    }
++    var opts = options || {};
++    opts.cache = "no-store";
++    return helper.agentRequest(path, opts);
++  }
++
++  function show(c, value) {
++    var node = input(c);
++    if (!node) return;
++    last[c.id] = value;
++    if (c.type === "switch") {
++      node.checked = value === true || value === 1 || value === "1";
++      return;
++    }
++    node.value = value === null || value === undefined ? "" : String(value);
++    var range = slider(c);
++    if (range && value !== null && value !== undefined) range.value = value;
++  }
++
++  function setBusy(c, busy) {
++    var node = input(c);
++    var range = slider(c);
++    if (node) node.disabled = busy;
++    if (range) range.disabled = busy;
++    var w = wrap(c);
++    if (w) w.classList.toggle("opacity-75", busy);
++  }
++
++  function setShown(c, shown) {
++    var w = wrap(c);
++    if (w) w.classList.toggle("d-none", !shown);
++  }
++
++  // A group with nothing left to show goes too.
++  function hideEmptyGroups() {
++    document.querySelectorAll(".iq-group[id^='iq_group_']").forEach(function (group) {
++      var visible = group.querySelector(".iq-knob:not(.d-none)");
++      group.classList.toggle("d-none", !visible);
++    });
++  }
++
++  function setFlipPending(pending) {
++    var note = el("iq_flip_pending");
++    if (note) note.classList.toggle("d-none", !pending);
++  }
++
++  async function apply(c, value) {
++    var body = {};
++    body[c.key] = value;
++    setBusy(c, true);
++    var res = null;
+     try {
+-      var cfg = await helper.agentRequest("/api/v1/config", {
+-        cache: "no-store",
++      res = await api("/api/v1/settings/image/" + c.path, { method: "PATCH", body: body });
++    } catch (err) {
++      console.warn("PATCH", c.path, err);
++    }
++    setBusy(c, false);
++    if (!res || res.status !== "accepted") {
++      notify("danger", c.label + ": the camera did not apply " + value + ".");
++      show(c, last[c.id]);
++      return;
++    }
++    var applied = res.resource && res.resource[c.key] !== undefined ? res.resource[c.key] : value;
++    show(c, applied);
++    if (Array.isArray(res.restart_required) && res.restart_required.length) {
++      setFlipPending(true);
++    }
++  }
++
++  // A typed value: an integer in range, or the control goes back.
++  function parsed(c, text) {
++    var max = c.max || 255;
++    var n = Number(String(text).trim());
++    if (!Number.isInteger(n) || n < 0 || n > max) {
++      notify("warning", c.label + " takes a whole number from 0 to " + max + ".");
++      show(c, last[c.id]);
++      return null;
++    }
++    return n;
++  }
++
++  function wire(c) {
++    var node = input(c);
++    if (!node) return;
++    if (c.type === "switch") {
++      node.addEventListener("change", function () {
++        apply(c, node.checked);
+       });
+-      var image = (cfg && cfg.image) || {};
+-      Object.keys(FIELD_MAP).forEach(function (id) {
+-        populate(id, image[FIELD_MAP[id]]);
+-        enable(id);
++      return;
++    }
++    if (c.type === "select") {
++      node.addEventListener("change", function () {
++        apply(c, parseInt(node.value, 10));
+       });
++      return;
++    }
++    node.addEventListener("change", function () {
++      var n = parsed(c, node.value);
++      if (n !== null) apply(c, n);
++    });
++    if (c.type !== "knob") return;
++    node.addEventListener("dblclick", function () {
++      apply(c, KNOB_DEFAULT);
++    });
++    var range = slider(c);
++    if (!range) return;
++    range.addEventListener("input", function () {
++      node.value = range.value;
++    });
++    range.addEventListener("change", function () {
++      apply(c, parseInt(range.value, 10));
++    });
++    range.addEventListener("dblclick", function () {
++      apply(c, KNOB_DEFAULT);
++    });
++  }
++
++  async function load() {
++    var got = await Promise.all([
++      api("/api/v1/capabilities/image").catch(function (err) {
++        console.warn("image capabilities", err);
++        return null;
++      }),
++      api("/api/v1/config").catch(function (err) {
++        console.warn("config", err);
++        return null;
++      }),
++    ]);
++    var caps = got[0] || {};
++    var cfg = got[1];
++    if (!cfg || !cfg.image) {
++      notify("danger", "Could not read the image settings from the camera.");
++      return;
++    }
++    var image = cfg.image;
++    CONTROLS.forEach(function (c) {
++      var value = image[c.key];
++      // A flip shows what is saved, which is what the next stream start uses.
++      if (c.type === "switch" && image[c.key + "_saved"] !== undefined) {
++        value = image[c.key + "_saved"];
++      }
++      var shown = caps[c.cap] !== false && value !== null && value !== undefined;
++      setShown(c, shown);
++      if (shown) show(c, value);
++    });
++    setFlipPending(
++      (image.hflip_saved !== undefined && image.hflip_saved !== image.hflip) ||
++        (image.vflip_saved !== undefined && image.vflip_saved !== image.vflip),
++    );
++    hideEmptyGroups();
++    var controls = el("iq_controls");
++    if (controls) controls.classList.remove("opacity-50", "pe-none");
++    document.body.dataset.iqLoadedMs = String(Math.round(performance.now()));
++  }
++
++  // The sub stream's MJPEG while the page is visible, as preview.js does it.
++  function initPreview() {
++    var img = el("preview");
++    if (!img) return;
++    var url = "/x/" + (img.dataset.stream || "ch1") + ".mjpg";
++    var lastFrame = 0;
++    var nextRestart = 0;
++    var backoff = PREVIEW_STALL_MS;
++    function start() {
++      img.src = url + "?" + Date.now();
++      lastFrame = Date.now();
++    }
++    function stop() {
++      img.src = "/a/nostream.svg";
++    }
++    img.addEventListener("load", function () {
++      lastFrame = Date.now();
++      backoff = PREVIEW_STALL_MS;
++      nextRestart = 0;
++    });
++    document.addEventListener("visibilitychange", function () {
++      if (document.hidden) stop();
++      else start();
++    });
++    window.addEventListener("pagehide", stop);
++    setInterval(function () {
++      var now = Date.now();
++      if (document.hidden || now - lastFrame < PREVIEW_STALL_MS || now < nextRestart) return;
++      start();
++      nextRestart = now + backoff;
++      backoff = Math.min(backoff * 2, PREVIEW_BACKOFF_MAX_MS);
++    }, 1000);
++    start();
++  }
++
++  async function restartStream() {
++    var button = el("iq_restart");
++    if (button) button.disabled = true;
++    notify("info", "Restarting the stream...", 5000);
++    try {
++      await fetch("/x/restart-streamer.cgi", { method: "POST", cache: "no-store" });
++    } catch (err) {
++      console.warn("restart", err);
++    }
++    // The streamer is back by the time the CGI answers; give rvd a moment to
++    // take control commands, then read back what it applied.
++    setTimeout(function () {
++      if (button) button.disabled = false;
++      load();
++    }, 3000);
++  }
++
++  function text(id, value) {
++    var node = el(id);
++    if (node) node.textContent = value;
++  }
++
++  function renderLive(r) {
++    if (!r) return;
++    var us = Number(r.exposure_us);
++    if (us > 0) {
++      text("iq_live_shutter", (us / 1000).toFixed(1) + " ms (1/" + Math.round(1e6 / us) + " s)");
++    }
++    if (r.total_gain !== null && r.total_gain !== undefined) text("iq_live_gain", String(r.total_gain));
++    if (r.ae_luma !== null && r.ae_luma !== undefined) text("iq_live_luma", r.ae_luma + " / 255");
++    var fps = Number(r.fps_num) / Number(r.fps_den || 1);
++    if (fps > 0) {
++      // An exposure longer than a frame stretches the frame: the sensor then
++      // runs at about 1/exposure, not the rate it was set to.
++      var est = us > 0 ? Math.min(fps, 1e6 / us) : fps;
++      text(
++        "iq_live_fps",
++        est < fps - 0.5
++          ? "about " + est.toFixed(1) + " fps (set " + Math.round(fps) + "; the exposure is longer than a frame)"
++          : Math.round(fps) + " fps",
++      );
++    }
++    if (r.daynight_mode) text("iq_live_mode", r.daynight_mode);
++  }
++
++  async function pollLive() {
++    if (document.visibilityState !== "visible") return;
++    try {
++      renderLive(await api("/api/v1/runtime/exposure"));
+     } catch (err) {
+-      console.warn("Failed to load raptor image settings", err);
++      console.warn("exposure", err);
+     }
+   }
+ 
+   function init() {
+-    // Re-enable immediately; values arrive when the config fetch resolves.
+-    Object.keys(FIELD_MAP).forEach(enable);
++    CONTROLS.forEach(wire);
++    var button = el("iq_restart");
++    if (button) button.addEventListener("click", restartStream);
++    initPreview();
+     load();
++    pollLive();
++    liveTimer = setInterval(pollLive, LIVE_POLL_MS);
++    window.addEventListener("pagehide", function () {
++      if (liveTimer) clearInterval(liveTimer);
++    });
+   }
+ 
+   if (document.readyState === "loading") {
+diff --git a/package/thingino-raptor/files/www/a/streamer-stream.js b/package/thingino-raptor/files/www/a/streamer-stream.js
+new file mode 100755
+index 000000000..371eb97b1
+--- /dev/null
++++ b/package/thingino-raptor/files/www/a/streamer-stream.js
+@@ -0,0 +1,488 @@
++/**
++ * Main stream / Substream settings pages.
++ *
++ * The page edits a whole stream and applies it as one request. The camera
++ * writes the settings to /etc/raptor.conf and restarts the video stack, which
++ * takes a few seconds and makes RTSP clients reconnect; nothing applies until
++ * Apply is pressed.
++ *
++ * Which values each menu offers comes from the camera profile
++ * (GET /api/v1/settings/streams/options), so one page serves every camera
++ * series. A menu with no choices configured shows the current value only.
++ * A change that would not fit the video memory (MMA) is refused here before
++ * anything is sent, and again on the camera.
++ */
++(function () {
++  "use strict";
++
++  const section = document.querySelector("[data-stream-id]");
++  if (!section) return;
++
++  const streamId = Number(section.dataset.streamId);
++  const byId = (id) => document.getElementById(id);
++  const ui = {
++    url: byId("ss-url"),
++    preview: byId("ss-preview"),
++    previewNote: byId("ss-preview-note"),
++    form: byId("ss-form"),
++    resolution: byId("ss-resolution"),
++    fps: byId("ss-fps"),
++    fpsNote: byId("ss-fps-note"),
++    codec: byId("ss-codec"),
++    profile: byId("ss-profile"),
++    rc: byId("ss-rc"),
++    bitrate: byId("ss-bitrate"),
++    maxbr: byId("ss-maxbitrate"),
++    maxbrWrap: byId("ss-maxbitrate-wrap"),
++    gop: byId("ss-gop"),
++    jpeg: byId("ss-jpeg"),
++    jq: byId("ss-jpeg-quality"),
++    enabled: byId("ss-enabled"),
++    apply: byId("ss-apply"),
++    revert: byId("ss-revert"),
++    status: byId("ss-status"),
++    mmaText: byId("ss-mma-text"),
++    mmaUsed: byId("ss-mma-used"),
++    mmaDelta: byId("ss-mma-delta"),
++    mmaNote: byId("ss-mma-note"),
++  };
++
++  const LABELS = {
++    codec: { h264: "H.264", h265: "H.265" },
++    profile: { baseline: "Baseline", main: "Main", high: "High" },
++    rc: {
++      cbr: "CBR (constant bitrate)",
++      vbr: "VBR (variable, up to the max bitrate)",
++      capped_vbr: "Capped VBR",
++      capped_quality: "Capped quality",
++      smart: "Smart",
++      fixqp: "Fixed QP",
++    },
++  };
++
++  let data = null; // last GET streams/options
++  let current = null; // this stream as the camera runs it
++  let busy = false;
++
++  // ---- requests ----------------------------------------------------------
++
++  async function request(path, options) {
++    const opts = { cache: "no-store", ...(options || {}) };
++    opts.headers = { Accept: "application/json" };
++    if (opts.body !== undefined) {
++      opts.headers["Content-Type"] = "application/json";
++      opts.body = JSON.stringify(opts.body);
++    }
++    const res = await fetch(window.agentApiUrl(path), opts);
++    const text = (await res.text()).trim();
++    let json = null;
++    try {
++      json = text ? JSON.parse(text) : null;
++    } catch (_err) {
++      json = null;
++    }
++    // The agent answers a refused change with HTTP 200 and the reason as
++    // plain text, so anything that is not a JSON object is an error.
++    if (!res.ok || !json || typeof json !== "object" || json.error) {
++      const message =
++        (json && json.error && json.error.message) || text || `HTTP ${res.status}`;
++      throw new Error(message);
++    }
++    return json;
++  }
++
++  // ---- video memory --------------------------------------------------------
++
++  function costKib(id, w, h, jpeg, enabled) {
++    if (!enabled || !w || !h || !data) return 0;
++    const m = data.mma;
++    const px = w * h;
++    let bytes = (px * (id === 0 ? m.main_mbpp : m.sub_mbpp)) / 1000;
++    if (jpeg) bytes += (px * m.jpeg_mbpp) / 1000;
++    return Math.round(bytes / 1024);
++  }
++
++  function mib(kib) {
++    return (kib / 1024).toFixed(1);
++  }
++
++  // Free MMA after this stream changes to w x h, given the JPEG and enabled
++  // switches; null when the camera did not report its heap.
++  function freeAfter(w, h, jpeg, enabled) {
++    if (!data || !data.mma.total_kib) return null;
++    const before = costKib(streamId, current.width, current.height, current.jpeg, current.enabled);
++    const after = costKib(streamId, w, h, jpeg, enabled);
++    return data.mma.free_kib + before - after;
++  }
++
++  // ---- menus -------------------------------------------------------------
++
++  // Fill a <select> from [{value, text, disabled}], always offering the value
++  // the camera runs now so the page never shows a value it is not using.
++  function fill(select, choices, value, currentText) {
++    const list = choices.slice();
++    if (value !== null && value !== undefined && value !== "") {
++      if (!list.some((c) => String(c.value) === String(value))) {
++        list.unshift({ value, text: `${currentText(value)} (current)` });
++      }
++    }
++    select.replaceChildren();
++    for (const c of list) {
++      const option = document.createElement("option");
++      option.value = String(c.value);
++      option.textContent = c.text;
++      option.disabled = !!c.disabled;
++      select.append(option);
++    }
++    if (value !== null && value !== undefined) select.value = String(value);
++    const usable = list.filter((c) => !c.disabled).length;
++    select.disabled = busy || usable <= 1;
++    select.title = choices.length ? "" : "No choices are configured for this camera";
++  }
++
++  function streamOptions() {
++    return (data.options.streams || []).find((s) => s.id === streamId) || {};
++  }
++
++  function otherStream() {
++    return (data.streams || []).find((s) => s.id !== streamId) || null;
++  }
++
++  function resolutionLabel(value) {
++    return String(value).replace("x", " × ");
++  }
++
++  function renderResolution(selected) {
++    const other = otherStream();
++    const jpeg = ui.jpeg.checked;
++    const enabled = streamId === 1 ? ui.enabled.checked : true;
++    const reserve = data.mma.reserve_kib;
++    const choices = (streamOptions().resolutions || []).map((value) => {
++      const [w, h] = value.split("x").map(Number);
++      let note = "";
++      // The sub is a VENC cascade off the main, which only scales down.
++      if (other && other.enabled !== false) {
++        if (streamId === 1 && (w > other.width || h > other.height)) note = "larger than the main stream";
++        if (streamId === 0 && (w < other.width || h < other.height)) note = "smaller than the substream";
++      }
++      const free = freeAfter(w, h, jpeg, enabled);
++      if (!note && free !== null && free < reserve) {
++        note = `needs ${mib(reserve - free)} MiB more video memory`;
++      }
++      return {
++        value,
++        text: note ? `${resolutionLabel(value)} — ${note}` : resolutionLabel(value),
++        disabled: !!note && value !== `${current.width}x${current.height}`,
++      };
++    });
++    fill(ui.resolution, choices, selected, resolutionLabel);
++  }
++
++  function fpsLabel(v) {
++    return `${v} fps`;
++  }
++
++  function stream(id) {
++    return (data.streams || []).find((s) => s.id === id) || null;
++  }
++
++  // The pipeline only drops sensor frames, so a rate that does not divide the
++  // one above it drops them unevenly. The main's rate is the sensor's; the
++  // sub's has to divide the main's.
++  function renderFps(selected) {
++    const main = stream(0);
++    const choices = (data.options.fps || []).map((v) => {
++      let note = "";
++      if (streamId === 1 && main) {
++        if (v > main.fps) note = "faster than the main stream";
++        else if (main.fps % v) note = `uneven against the main's ${main.fps} fps`;
++      }
++      return {
++        value: v,
++        text: note ? `${v} fps — ${note}` : fpsLabel(v),
++        disabled: !!note && v !== current.fps,
++      };
++    });
++    fill(ui.fps, choices, selected, fpsLabel);
++  }
++
++  // Where the sub lands when the main moves to mainFps: unchanged while it
++  // still divides it, else the divisor closest to its rate, the lower on a tie
++  // (what the camera does).
++  function subFollows(mainFps) {
++    const sub = stream(1);
++    if (!sub || sub.enabled === false || !sub.fps) return null;
++    if (sub.fps <= mainFps && mainFps % sub.fps === 0) return null;
++    let best = null;
++    for (let d = 1; d <= mainFps; d += 1) {
++      if (mainFps % d) continue;
++      if (best === null || Math.abs(d - sub.fps) < Math.abs(best - sub.fps)) best = d;
++    }
++    return best;
++  }
++
++  function fpsNote(fps) {
++    if (streamId === 1) {
++      const main = stream(0);
++      return main ? `Whole divisors of the main stream's ${main.fps} fps keep the frame spacing even.` : "";
++    }
++    const follows = fps !== current.fps ? subFollows(fps) : null;
++    const base = "The sensor runs at the main stream's rate.";
++    return follows ? `${base} The substream moves to ${follows} fps to stay even.` : base;
++  }
++
++  function bitrateLabel(bps) {
++    const kbps = Math.round(Number(bps) / 1000);
++    return kbps >= 1000 ? `${(kbps / 1000).toFixed(kbps % 1000 ? 1 : 0)} Mbit/s` : `${kbps} kbit/s`;
++  }
++
++  // VBR and the capped modes are bounded by the max bitrate; CBR has none. A
++  // camera whose config never set one runs capped at the bitrate, so that is
++  // what an unset cap shows as.
++  function currentMaxBitrate() {
++    return Number(current.max_bitrate) || Number(current.bitrate) || 0;
++  }
++
++  function renderMaxBitrate(selected) {
++    const vbr = ui.rc.value !== "cbr";
++    ui.maxbrWrap.classList.toggle("d-none", !vbr);
++    if (!vbr) return;
++    const floor = Number(ui.bitrate.value) || 0;
++    const value = Math.max(Number(selected) || 0, floor);
++    const choices = (streamOptions().bitrates_kbps || [])
++      .filter((k) => k * 1000 >= floor)
++      .map((k) => ({ value: k * 1000, text: bitrateLabel(k * 1000) }));
++    fill(ui.maxbr, choices, value, bitrateLabel);
++  }
++
++  // GOP is offered in seconds and sent in frames; a GOP that is not a whole
++  // number of seconds at this frame rate stays selectable as frames.
++  function renderGop(selectedFrames) {
++    const fps = Number(ui.fps.value) || current.fps;
++    const choices = (data.options.gop_seconds || []).map((s) => ({
++      value: `s:${s}`,
++      text: `${s} s (${s * fps} frames)`,
++    }));
++    let value = `f:${selectedFrames}`;
++    const secs = selectedFrames / fps;
++    if (Number.isInteger(secs) && choices.some((c) => c.value === `s:${secs}`)) value = `s:${secs}`;
++    fill(ui.gop, choices, value, (v) => {
++      const frames = Number(String(v).slice(2));
++      return `${frames} frames`;
++    });
++  }
++
++  function renderProfile(selected) {
++    if (ui.codec.value === "h265") {
++      // H.265 has the one profile here; the setting is H.264's.
++      fill(ui.profile, [{ value: "main", text: "Main (H.265)" }], "main", () => "Main");
++      ui.profile.disabled = true;
++      return;
++    }
++    const choices = (data.options.profiles || []).map((p) => ({ value: p, text: LABELS.profile[p] || p }));
++    fill(ui.profile, choices, selected, (v) => LABELS.profile[v] || v);
++  }
++
++  function render() {
++    const opts = data.options;
++    renderResolution(`${current.width}x${current.height}`);
++    renderFps(current.fps);
++    fill(
++      ui.codec,
++      (opts.codecs || []).map((c) => ({ value: c, text: LABELS.codec[c] || c })),
++      current.codec,
++      (v) => LABELS.codec[v] || v,
++    );
++    renderProfile(current.profile);
++    fill(
++      ui.rc,
++      (opts.rc_modes || []).map((m) => ({ value: m, text: LABELS.rc[m] || m })),
++      current.rc_mode,
++      (v) => LABELS.rc[v] || v,
++    );
++    fill(
++      ui.bitrate,
++      (streamOptions().bitrates_kbps || []).map((k) => ({ value: k * 1000, text: bitrateLabel(k * 1000) })),
++      current.bitrate,
++      bitrateLabel,
++    );
++    renderMaxBitrate(currentMaxBitrate());
++    renderGop(current.gop || current.fps);
++    ui.jpeg.checked = !!current.jpeg;
++    ui.jpeg.disabled = busy;
++    if (ui.enabled) ui.enabled.disabled = busy;
++    fill(
++      ui.jq,
++      (opts.jpeg_qualities || []).map((q) => ({ value: q, text: `${q}` })),
++      current.jpeg_quality,
++      (v) => `${v}`,
++    );
++    if (ui.enabled) ui.enabled.checked = current.enabled !== false;
++    ui.url.textContent = current.rtsp_url || "";
++    refresh();
++  }
++
++  // ---- form state ----------------------------------------------------------
++
++  function formValues() {
++    const [width, height] = ui.resolution.value.split("x").map(Number);
++    const fps = Number(ui.fps.value);
++    const gopSel = ui.gop.value;
++    const gop = gopSel.startsWith("f:") ? Number(gopSel.slice(2)) : Number(gopSel.slice(2)) * fps;
++    const values = {
++      width,
++      height,
++      fps,
++      codec: ui.codec.value,
++      rc_mode: ui.rc.value,
++      bitrate: Number(ui.bitrate.value),
++      gop,
++      jpeg: ui.jpeg.checked,
++      jpeg_quality: Number(ui.jq.value),
++    };
++    if (ui.codec.value === "h264") values.profile = ui.profile.value;
++    if (values.rc_mode !== "cbr") values.max_bitrate = Number(ui.maxbr.value);
++    if (streamId === 1) values.enabled = ui.enabled.checked;
++    return values;
++  }
++
++  function changes() {
++    const values = formValues();
++    const out = {};
++    for (const key of Object.keys(values)) {
++      const was = key === "max_bitrate" ? currentMaxBitrate() : current[key];
++      if (String(values[key]) !== String(was)) out[key] = values[key];
++    }
++    return out;
++  }
++
++  function refresh() {
++    if (!current) return;
++    const values = formValues();
++    ui.jq.disabled = busy || !values.jpeg || ui.jq.options.length <= 1;
++    ui.fpsNote.textContent = fpsNote(values.fps);
++    const pending = Object.keys(changes()).length > 0;
++
++    // Memory bar: the heap as it is, plus what this change would add.
++    const m = data.mma;
++    let fits = true;
++    if (m.total_kib) {
++      const used = m.total_kib - m.free_kib;
++      const free = freeAfter(values.width, values.height, values.jpeg, values.enabled !== false);
++      const delta = m.free_kib - free;
++      fits = free >= m.reserve_kib;
++      ui.mmaUsed.style.width = `${(Math.min(used, m.total_kib) / m.total_kib) * 100}%`;
++      ui.mmaDelta.style.width = `${(Math.max(delta, 0) / m.total_kib) * 100}%`;
++      ui.mmaDelta.className = `progress-bar ${fits ? "bg-warning" : "bg-danger"}`;
++      let text = `${mib(used)} of ${mib(m.total_kib)} MiB used`;
++      if (pending && delta !== 0) text += ` · after apply ${mib(used + delta)} MiB`;
++      ui.mmaText.textContent = text;
++      ui.mmaNote.textContent = fits
++        ? `${mib(m.reserve_kib)} MiB is kept free. JPEG snapshots on this stream cost about ${mib(
++            costKib(streamId, values.width, values.height, true, true) -
++              costKib(streamId, values.width, values.height, false, true),
++          )} MiB at this size.`
++        : `Does not fit: ${mib(m.reserve_kib - free)} MiB short. Turn JPEG snapshots off or choose a smaller size.`;
++    } else {
++      ui.mmaText.textContent = "not reported by this camera";
++      ui.mmaNote.textContent = "";
++    }
++
++    ui.apply.disabled = busy || !pending || !fits;
++    ui.revert.disabled = busy || !pending;
++  }
++
++  function setBusy(on) {
++    busy = on;
++    for (const control of ui.form.querySelectorAll("select, input")) control.disabled = on;
++    if (!on) render();
++    else refresh();
++  }
++
++  function setStatus(kind, message) {
++    ui.status.className = kind ? `small text-${kind}` : "small";
++    ui.status.textContent = message || "";
++  }
++
++  // ---- preview -------------------------------------------------------------
++
++  let previewRetry = null;
++
++  function reloadPreview() {
++    clearTimeout(previewRetry);
++    const anyJpeg = (data.streams || []).some((s) => s.jpeg && s.enabled !== false);
++    if (!anyJpeg) {
++      ui.preview.src = "/a/nostream.svg";
++      ui.previewNote.textContent = "No preview: JPEG snapshots are off on both streams.";
++      return;
++    }
++    ui.previewNote.textContent = current.jpeg
++      ? "Live preview from this stream's JPEG channel."
++      : "Live preview from the other stream's JPEG channel.";
++    ui.preview.src = `/x/ch${streamId}.mjpg?t=${Date.now()}`;
++  }
++
++  ui.preview.addEventListener("error", () => {
++    if (ui.preview.src.endsWith("nostream.svg")) return;
++    ui.preview.src = "/a/nostream.svg";
++    previewRetry = setTimeout(reloadPreview, 3000);
++  });
++
++  // ---- load / apply ----------------------------------------------------------
++
++  async function load() {
++    data = await request("/api/v1/settings/streams/options");
++    current = (data.streams || []).find((s) => s.id === streamId);
++    if (!current) throw new Error("the camera did not report this stream");
++    render();
++  }
++
++  async function apply() {
++    const body = changes();
++    if (!Object.keys(body).length) return;
++    setBusy(true);
++    setStatus("warning", "Applying: the video restarts, about 6 seconds…");
++    try {
++      const res = await request(`/api/v1/settings/streams/${streamId}`, { method: "PATCH", body });
++      await load();
++      const secs = res.restart_ms ? ` in ${(res.restart_ms / 1000).toFixed(1)} s` : "";
++      const sub = res.sub_fps_followed ? ` The substream moved to ${res.sub_fps_followed} fps.` : "";
++      setStatus("success", `Applied and saved; the video restarted${secs}.${sub}`);
++      reloadPreview();
++    } catch (err) {
++      setStatus("danger", err.message);
++      try {
++        await load();
++      } catch (_err) {
++        /* keep the form as it was */
++      }
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  ui.form.addEventListener("change", (ev) => {
++    if (ev.target === ui.fps) renderGop(formValues().gop);
++    if (ev.target === ui.codec) renderProfile(current.profile);
++    if (ev.target === ui.rc || ev.target === ui.bitrate) {
++      renderMaxBitrate(Math.max(Number(ui.maxbr.value) || 0, currentMaxBitrate()));
++    }
++    if (ev.target === ui.jpeg || ev.target === ui.enabled) renderResolution(ui.resolution.value);
++    setStatus("", "");
++    refresh();
++  });
++  ui.apply.addEventListener("click", apply);
++  ui.revert.addEventListener("click", () => {
++    render();
++    setStatus("", "");
++  });
++
++  if (streamId !== 1) {
++    for (const node of section.querySelectorAll("[data-substream-only]")) node.remove();
++    ui.enabled = null;
++  }
++
++  load()
++    .then(reloadPreview)
++    .catch((err) => setStatus("danger", `Could not read the stream settings: ${err.message}`));
++})();
+diff --git a/package/thingino-raptor/files/www/streamer-image.html b/package/thingino-raptor/files/www/streamer-image.html
+index 80a8f1e04..565879dfb 100644
+--- a/package/thingino-raptor/files/www/streamer-image.html
++++ b/package/thingino-raptor/files/www/streamer-image.html
+@@ -13,6 +13,10 @@
+     integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
+   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.13.1/font/bootstrap-icons.min.css">
+   <link rel="stylesheet" href="/a/main.css">
++  <style>
++    .iq-value { width: 4.5em; }
++    .iq-group h5 { font-size: 1rem; margin-bottom: .75rem; }
++  </style>
+ </head>
+ 
+ <body id="page-streamer-image">
+@@ -24,95 +28,156 @@
+ 
+     <section>
+       <h3>Image Quality</h3>
++      <p class="text-body-secondary small">
++        Only the controls this camera applies are shown. On the 0-255 knobs 128 is
++        the camera's own tuning; double-click a value to return to it. Each change
++        applies at once and is saved.
++      </p>
+ 
+       <div class="row mb-3">
+         <div class="col-12 col-xl-4 mb-3">
+           <div id="frame" class="position-relative">
+             <img id="preview" src="/a/nostream.svg" class="img-fluid" alt="Image: Preview" tabindex="-1" data-stream="ch1">
+           </div>
++          <div class="iq-group card mt-3" id="iq_live_wrap">
++            <div class="card-body">
++              <h5>Live exposure</h5>
++              <dl class="row small mb-0" id="iq_live">
++                <dt class="col-5">Shutter</dt><dd class="col-7" id="iq_live_shutter">—</dd>
++                <dt class="col-5">Gain</dt><dd class="col-7" id="iq_live_gain">—</dd>
++                <dt class="col-5">Luma</dt><dd class="col-7" id="iq_live_luma">—</dd>
++                <dt class="col-5">Frame rate</dt><dd class="col-7" id="iq_live_fps">—</dd>
++                <dt class="col-5">Mode</dt><dd class="col-7" id="iq_live_mode">—</dd>
++              </dl>
++            </div>
++          </div>
+         </div>
+-        <div class="col col-xl-8">
+-          <div class="row g-2">
+-            <div class="col">
+-              <p>
+-                <label for="brightness">Brightness</label>
+-                <input type="text" id="brightness" name="brightness" class="form-control text-end" value="" pattern="[0-9]{1,}" data-min="0" data-max="255" data-step="1">
+-              </p>
+-              <p>
+-                <label for="contrast">Contrast</label>
+-                <input type="text" id="contrast" name="contrast" class="form-control text-end" value="" pattern="[0-9]{1,}" data-min="0" data-max="255" data-step="1">
+-              </p>
+-              <p>
+-                <label for="sharpness">Sharpness</label>
+-                <input type="text" id="sharpness" name="sharpness" class="form-control text-end" value="" pattern="[0-9]{1,}" data-min="0" data-max="255" data-step="1">
+-              </p>
+-              <p>
+-                <label for="saturation">Saturation</label>
+-                <input type="text" id="saturation" name="saturation" class="form-control text-end" value="" pattern="[0-9]{1,}" data-min="0" data-max="255" data-step="1">
+-              </p>
+-            </div><!-- .col -->
+-            <div class="col">
+-              <p>
+-                <label for="backlight">Backlight</label>
+-                <input type="text" id="backlight" name="backlight" class="form-control text-end" value="" pattern="[0-9]{1,}" data-min="0" data-max="10" data-step="1">
+-              </p>
+-              <p>
+-                <label for="wide_dynamic_range">WDR</label><span class="input-group">
+-                <input type="text" id="wide_dynamic_range" name="wide_dynamic_range" class="form-control text-end" value="" pattern="[0-9]{1,}" data-min="0" data-max="255" data-step="1">
+-              </p>
+-              <p>
+-                <label for="tone">Highlights</label>
+-                <input type="text" id="tone" name="tone" class="form-control text-end" value="" pattern="[0-9]{1,}" data-min="0" data-max="255" data-step="1">
+-              </p>
+-              <p>
+-                <label for="defog">Defog</label>
+-                <input type="text" id="defog" name="defog" class="form-control text-end" value="" pattern="[0-9]{1,}" data-min="0" data-max="255" data-step="1">
+-              </p>
+-              <p>
+-                <label for="noise_reduction">Noise reduction</label>
+-                <input type="text" id="noise_reduction" name="noise_reduction" class="form-control text-end" value="" pattern="[0-9]{1,}" data-min="0" data-max="255" data-step="1">
+-              </p>
+-            </div><!-- .col -->
+-            <div class="col">
+-              <p class="select" id="image_core_wb_mode_wrap">
+-                <label for="image_core_wb_mode">White balance mode</label>
+-                <select class="form-select" id="image_core_wb_mode" name="image_core_wb_mode">
+-                  <option value="0">AUTO</option>
+-                  <option value="1">MANUAL</option>
+-                  <option value="2">DAY LIGHT</option>
+-                  <option value="3">CLOUDY</option>
+-                  <option value="4">INCANDESCENT</option>
+-                  <option value="5">FLOURESCENT</option>
+-                  <option value="6">TWILIGHT</option>
+-                  <option value="7">SHADE</option>
+-                  <option value="8">WARM FLOURESCENT</option>
+-                  <option value="9">CUSTOM</option>
++
++        <div class="col col-xl-8 opacity-50 pe-none" id="iq_controls">
++          <div class="row g-3">
++            <div class="col-12 col-lg-6 iq-group" id="iq_group_picture">
++              <h5>Picture</h5>
++              <div class="mb-3 iq-knob" data-knob="brightness">
++                <label for="iq_brightness" class="form-label">Brightness</label>
++                <div class="d-flex align-items-center gap-2">
++                  <input type="range" class="form-range" id="iq_brightness-slider" min="0" max="255" step="1">
++                  <input type="text" class="form-control form-control-sm text-end iq-value" id="iq_brightness" inputmode="numeric">
++                </div>
++              </div>
++              <div class="mb-3 iq-knob" data-knob="contrast">
++                <label for="iq_contrast" class="form-label">Contrast</label>
++                <div class="d-flex align-items-center gap-2">
++                  <input type="range" class="form-range" id="iq_contrast-slider" min="0" max="255" step="1">
++                  <input type="text" class="form-control form-control-sm text-end iq-value" id="iq_contrast" inputmode="numeric">
++                </div>
++              </div>
++              <div class="mb-3 iq-knob" data-knob="saturation">
++                <label for="iq_saturation" class="form-label">Saturation</label>
++                <div class="d-flex align-items-center gap-2">
++                  <input type="range" class="form-range" id="iq_saturation-slider" min="0" max="255" step="1">
++                  <input type="text" class="form-control form-control-sm text-end iq-value" id="iq_saturation" inputmode="numeric">
++                </div>
++              </div>
++              <div class="mb-3 iq-knob" data-knob="sharpness">
++                <label for="iq_sharpness" class="form-label">Sharpness</label>
++                <div class="d-flex align-items-center gap-2">
++                  <input type="range" class="form-range" id="iq_sharpness-slider" min="0" max="255" step="1">
++                  <input type="text" class="form-control form-control-sm text-end iq-value" id="iq_sharpness" inputmode="numeric">
++                </div>
++              </div>
++            </div>
++
++            <div class="col-12 col-lg-6 iq-group" id="iq_group_exposure">
++              <h5>Exposure</h5>
++              <div class="mb-3 iq-knob" data-knob="ae_comp">
++                <label for="iq_ae_comp" class="form-label"><abbr title="Automatic Exposure">AE</abbr> compensation</label>
++                <div class="d-flex align-items-center gap-2">
++                  <input type="range" class="form-range" id="iq_ae_comp-slider" min="0" max="255" step="1">
++                  <input type="text" class="form-control form-control-sm text-end iq-value" id="iq_ae_comp" inputmode="numeric">
++                </div>
++                <div class="form-text">The exposure target: above 128 brighter, below darker.</div>
++              </div>
++              <div class="mb-3 iq-knob" data-knob="antiflicker">
++                <label for="iq_antiflicker" class="form-label">Anti-flicker</label>
++                <select class="form-select form-select-sm" id="iq_antiflicker">
++                  <option value="0">Off</option>
++                  <option value="1">50 Hz mains</option>
++                  <option value="2">60 Hz mains</option>
++                </select>
++                <div class="form-text">Holds the shutter to the mains frequency so lit scenes do not band.</div>
++              </div>
++            </div>
++
++            <div class="col-12 col-lg-6 iq-group" id="iq_group_noise">
++              <h5>Noise and dynamic range</h5>
++              <div class="mb-3 iq-knob" data-knob="temper">
++                <label for="iq_temper" class="form-label">Temporal noise reduction</label>
++                <div class="d-flex align-items-center gap-2">
++                  <input type="range" class="form-range" id="iq_temper-slider" min="0" max="255" step="1">
++                  <input type="text" class="form-control form-control-sm text-end iq-value" id="iq_temper" inputmode="numeric">
++                </div>
++                <div class="form-text">Higher is smoother at night; moving objects may trail above about 170.</div>
++              </div>
++              <div class="mb-3 iq-knob" data-knob="drc">
++                <label for="iq_drc" class="form-label"><abbr title="Wide dynamic range">WDR</abbr></label>
++                <div class="d-flex align-items-center gap-2">
++                  <input type="range" class="form-range" id="iq_drc-slider" min="0" max="255" step="1">
++                  <input type="text" class="form-control form-control-sm text-end iq-value" id="iq_drc" inputmode="numeric">
++                </div>
++                <div class="form-text">Below 128 off, 128 automatic, above a fixed strength.</div>
++              </div>
++              <div class="mb-3 iq-knob" data-knob="defog">
++                <label for="iq_defog" class="form-label">Defog</label>
++                <div class="d-flex align-items-center gap-2">
++                  <input type="range" class="form-range" id="iq_defog-slider" min="0" max="255" step="1">
++                  <input type="text" class="form-control form-control-sm text-end iq-value" id="iq_defog" inputmode="numeric">
++                </div>
++                <div class="form-text">Below 128 off, 128 automatic, above a fixed strength.</div>
++              </div>
++            </div>
++
++            <div class="col-12 col-lg-6 iq-group" id="iq_group_orientation">
++              <h5>Orientation</h5>
++              <div class="form-check form-switch iq-knob" data-knob="hflip">
++                <input type="checkbox" class="form-check-input" role="switch" id="iq_hflip">
++                <label for="iq_hflip" class="form-check-label">Mirror (H-Flip)</label>
++              </div>
++              <div class="form-check form-switch iq-knob" data-knob="vflip">
++                <input type="checkbox" class="form-check-input" role="switch" id="iq_vflip">
++                <label for="iq_vflip" class="form-check-label">Upside down (V-Flip)</label>
++              </div>
++              <div class="alert alert-warning small mt-3 mb-0 d-none" id="iq_flip_pending" role="status">
++                Saved. This camera applies a flip when the stream restarts, which
++                drops video for about 10 seconds.
++                <button type="button" class="btn btn-sm btn-warning ms-2" id="iq_restart">Restart stream now</button>
++              </div>
++            </div>
++
++            <div class="col-12 col-lg-6 iq-group" id="iq_group_wb">
++              <h5>White balance</h5>
++              <div class="mb-3 iq-knob" data-knob="wb">
++                <label for="iq_wb_mode" class="form-label">Mode</label>
++                <select class="form-select form-select-sm" id="iq_wb_mode">
++                  <option value="0">Auto</option>
++                  <option value="1">Manual</option>
++                  <option value="2">Daylight</option>
++                  <option value="3">Cloudy</option>
++                  <option value="4">Incandescent</option>
++                  <option value="5">Fluorescent</option>
++                  <option value="6">Twilight</option>
++                  <option value="7">Shade</option>
++                  <option value="8">Warm fluorescent</option>
++                  <option value="9">Custom</option>
+                 </select>
+-              </p>
+-              <p>
+-                <label for="image_wb_bgain">Blue channel gain</label>
+-                <input type="text" id="image_wb_bgain" name="image_wb_bgain" class="form-control text-end" value="" pattern="[0-9]{1,}" data-min="0" data-max="1024" data-step="1">
+-              </p>
+-              <p>
+-                <label for="image_wb_rgain">Red channel gain</label>
+-                <input type="text" id="image_wb_rgain" name="image_wb_rgain" class="form-control text-end" value="" pattern="[0-9]{1,}" data-min="0" data-max="1024" data-step="1">
+-              </p>
+-              <p>
+-                <label for="image_ae_compensation"><abbr title="Automatic Exposure">AE</abbr> compensation</label>
+-                <input type="text" id="image_ae_compensation" name="image_ae_compensation" class="form-control text-end" value="" pattern="[0-9]{1,}" data-min="0" data-max="255" data-step="1">
+-              </p>
+-            </div><!-- .col -->
+-            <div class="col">
+-              <p class="boolean form-switch" id="image_hflip_wrap">
+-                <input type="hidden" id="image_hflip-false" name="image_hflip" value="false">
+-                <input type="checkbox" id="image_hflip" name="image_hflip" value="true" role="switch" class="form-check-input">
+-                <label for="image_hflip" class="form-check-label">H-Flip</label>
+-              </p>
+-              <p class="boolean form-switch" id="image_vflip_wrap">
+-                <input type="hidden" id="image_vflip-false" name="image_vflip" value="false">
+-                <input type="checkbox" id="image_vflip" name="image_vflip" value="true" role="switch" class="form-check-input">
+-                <label for="image_vflip" class="form-check-label">V-Flip</label>
+-              </p>
++              </div>
++              <div class="mb-3 iq-knob" data-knob="wb">
++                <label for="iq_wb_rgain" class="form-label">Red gain</label>
++                <input type="text" class="form-control form-control-sm text-end iq-value" id="iq_wb_rgain" inputmode="numeric">
++              </div>
++              <div class="mb-3 iq-knob" data-knob="wb">
++                <label for="iq_wb_bgain" class="form-label">Blue gain</label>
++                <input type="text" class="form-control form-control-sm text-end iq-value" id="iq_wb_bgain" inputmode="numeric">
++              </div>
+             </div>
+           </div>
+         </div>
+@@ -134,7 +199,6 @@
+ <script src="/a/navigation.js"></script>
+ <script src="/a/footer.js"></script>
+ <script src="/a/streamer.js"></script>
+-<script src="/a/preview.js"></script>
+ <script src="/a/streamer-config.js"></script>
+ <script src="/a/streamer-image.js"></script>
+ </body>
+diff --git a/package/thingino-raptor/files/www/streamer-main.html b/package/thingino-raptor/files/www/streamer-main.html
+index af0fbce53..9ec97c361 100644
+--- a/package/thingino-raptor/files/www/streamer-main.html
++++ b/package/thingino-raptor/files/www/streamer-main.html
+@@ -22,89 +22,96 @@
+   <div class="container">
+     <div data-app-controls></div>
+ 
+-    <section>
+-      <h3>RTSP Main Stream</h3>
++    <section data-stream-id="0">
++      <h3 class="mb-1">RTSP Main Stream</h3>
++      <p class="text-body-secondary small mb-3"><i class="bi bi-broadcast me-1"></i><span id="ss-url"></span></p>
+ 
+-      <div class="row mb-3">
+-        <div class="col-12 col-xl-4">
+-          <div id="frame" class="position-relative">
+-            <img id="preview" src="/a/nostream.svg" class="img-fluid" alt="Image: Preview" tabindex="-1" data-stream="ch0">
++      <div class="row g-4">
++        <div class="col-12 col-lg-5">
++          <img id="ss-preview" src="/a/nostream.svg" class="img-fluid rounded border" alt="Stream preview">
++          <p id="ss-preview-note" class="form-text"></p>
++
++          <div class="mt-3">
++            <div class="d-flex justify-content-between small mb-1">
++              <span>Video memory (MMA)</span>
++              <span id="ss-mma-text" class="text-body-secondary"></span>
++            </div>
++            <div class="progress" style="height: .75rem">
++              <div id="ss-mma-used" class="progress-bar bg-info" style="width: 0%"></div>
++              <div id="ss-mma-delta" class="progress-bar bg-warning" style="width: 0%"></div>
++            </div>
++            <p id="ss-mma-note" class="form-text"></p>
+           </div>
+         </div>
+-        <div class="col col-xl-8">
+-          <div class="row g-2">
+-            <div class="col">
+-              <p>
+-                <label for="stream0_width">Width</label>
+-                <input type="text" id="stream0_width" name="stream0_width" class="form-control" value="">
+-              </p>
+-              <p>
+-                <label for="stream0_height">Height</label>
+-                <input type="text" id="stream0_height" name="stream0_height" class="form-control" value="">
+-              </p>
+-              <p>
+-                <label for="stream0_format">Format</label>
+-                <select class="form-select" id="stream0_format" name="stream0_format">
+-                  <option value="">- Select -</option>
+-                </select>
+-              </p>
+-            </div><!-- .col -->
+-            <div class="col">
+-              <p>
+-                <label for="stream0_fps">FPS</label>
+-                <input type="text" id="stream0_fps" name="stream0_fps" class="form-control text-end" value="" pattern="[0-9]{1,}" title="numeric value" data-min="5" data-max="30" data-step="1">
+-              </p>
+-              <p>
+-                <label for="stream0_gop">GOP</label>
+-                <input type="text" id="stream0_gop" name="stream0_gop" class="form-control" value="">
+-              </p>
+-              <p>
+-                <label for="stream0_max_gop">Max GOP</label>
+-                <input type="text" id="stream0_max_gop" name="stream0_max_gop" class="form-control" value="">
+-              </p>
+-            </div><!-- .col -->
+-            <div class="col">
+-              <p>
+-                <label for="stream0_mode">Mode</label>
+-                <select class="form-select" id="stream0_mode" name="stream0_mode">
+-                  <option value="">- Select -</option>
+-                </select>
+-              </p>
+-              <p>
+-                <label for="stream0_bitrate">Bitrate</label>
+-                <input type="text" id="stream0_bitrate" name="stream0_bitrate" class="form-control" value="">
+-              </p>
+-              <p>
+-                <label for="stream0_profile">Profile</label>
+-                <input type="text" id="stream0_profile" name="stream0_profile" class="form-control" value="">
+-              </p>
+-            </div><!-- .col -->
+-            <div class="col">
+-              <p>
+-                <label for="stream0_buffers">Buffers</label>
+-                <input type="text" id="stream0_buffers" name="stream0_buffers" class="form-control" value="">
+-              </p>
+-              <p>
+-                <label for="stream0_rtsp_endpoint">RTSP Endpoint</label>
+-                <input type="text" id="stream0_rtsp_endpoint" name="stream0_rtsp_endpoint" class="form-control" value="">
+-              </p>
+-              <p class="form-switch">
+-                <input type="hidden" id="stream0_enabled-false" name="stream0_enabled" value="false">
+-                <input type="checkbox" id="stream0_enabled" name="stream0_enabled" value="true" role="switch" class="form-check-input">
+-                <label for="stream0_enabled" class="form-check-label">Stream enabled</label>
+-              </p>
+-              <p class="form-switch">
+-                <input type="hidden" id="stream0_audio_enabled-false" name="stream0_audio_enabled" value="false">
+-                <input type="checkbox" id="stream0_audio_enabled" name="stream0_audio_enabled" value="true" role="switch" class="form-check-input">
+-                <label for="stream0_audio_enabled" class="form-check-label">Audio in stream</label>
+-              </p>
++
++        <div class="col-12 col-lg-7">
++          <form id="ss-form" class="row g-3" onsubmit="return false">
++            <div class="col-sm-6">
++              <label for="ss-resolution" class="form-label">Resolution</label>
++              <select id="ss-resolution" class="form-select"></select>
++            </div>
++            <div class="col-sm-6">
++              <label for="ss-fps" class="form-label">Frame rate</label>
++              <select id="ss-fps" class="form-select"></select>
++              <div id="ss-fps-note" class="form-text"></div>
++            </div>
++            <div class="col-sm-6">
++              <label for="ss-codec" class="form-label">Codec</label>
++              <select id="ss-codec" class="form-select"></select>
++            </div>
++            <div class="col-sm-6">
++              <label for="ss-profile" class="form-label">Profile</label>
++              <select id="ss-profile" class="form-select"></select>
++            </div>
++            <div class="col-sm-6">
++              <label for="ss-rc" class="form-label">Rate control</label>
++              <select id="ss-rc" class="form-select"></select>
+             </div>
++            <div class="col-sm-6">
++              <label for="ss-gop" class="form-label">Keyframe interval</label>
++              <select id="ss-gop" class="form-select"></select>
++            </div>
++            <div class="col-sm-6">
++              <label for="ss-bitrate" class="form-label">Bitrate</label>
++              <select id="ss-bitrate" class="form-select"></select>
++            </div>
++            <div class="col-sm-6" id="ss-maxbitrate-wrap">
++              <label for="ss-maxbitrate" class="form-label">Max bitrate</label>
++              <select id="ss-maxbitrate" class="form-select"></select>
++            </div>
++            <div class="col-sm-6">
++              <label for="ss-jpeg-quality" class="form-label">Snapshot quality</label>
++              <select id="ss-jpeg-quality" class="form-select"></select>
++            </div>
++            <div class="col-12">
++              <div class="form-check form-switch">
++                <input id="ss-jpeg" type="checkbox" role="switch" class="form-check-input">
++                <label for="ss-jpeg" class="form-check-label">JPEG snapshots and MJPEG from this stream</label>
++              </div>
++            </div>
++            <div class="col-12" data-substream-only>
++              <div class="form-check form-switch">
++                <input id="ss-enabled" type="checkbox" role="switch" class="form-check-input">
++                <label for="ss-enabled" class="form-check-label">Stream enabled</label>
++              </div>
++            </div>
++          </form>
++
++          <div class="d-flex flex-wrap align-items-center gap-2 mt-4">
++            <button type="button" id="ss-apply" class="btn btn-primary" disabled>
++              <i class="bi bi-check2-circle me-1"></i> Apply
++            </button>
++            <button type="button" id="ss-revert" class="btn btn-outline-secondary" disabled>
++              <i class="bi bi-arrow-counterclockwise me-1"></i> Revert
++            </button>
++            <span id="ss-status" class="small"></span>
+           </div>
++          <p class="form-text mt-2">
++            Apply saves the settings to /etc/raptor.conf and restarts the video, which takes a few seconds;
++            RTSP clients reconnect on their own. The choices offered come from this camera's profile.
++          </p>
+         </div>
+       </div>
+-      <button type="button" id="save-config" class="btn btn-primary mt-3">
+-        <i class="bi bi-floppy me-1"></i> Save configuration to file
+-      </button>
+     </section>
+   </div>
+ </main>
+@@ -118,8 +125,6 @@
+ <script src="/a/control-bar.js"></script>
+ <script src="/a/navigation.js"></script>
+ <script src="/a/footer.js"></script>
+-<script src="/a/streamer.js"></script>
+-<script src="/a/preview.js"></script>
+-<script src="/a/streamer-config.js"></script>
++<script src="/a/streamer-stream.js"></script>
+ </body>
+ </html>
+diff --git a/package/thingino-raptor/files/www/streamer-substream.html b/package/thingino-raptor/files/www/streamer-substream.html
+index e0eaca231..bcafd185c 100644
+--- a/package/thingino-raptor/files/www/streamer-substream.html
++++ b/package/thingino-raptor/files/www/streamer-substream.html
+@@ -22,89 +22,96 @@
+   <div class="container">
+     <div data-app-controls></div>
+ 
+-    <section>
+-      <h3>RTSP Substream</h3>
++    <section data-stream-id="1">
++      <h3 class="mb-1">RTSP Substream</h3>
++      <p class="text-body-secondary small mb-3"><i class="bi bi-broadcast me-1"></i><span id="ss-url"></span></p>
+ 
+-      <div class="row mb-3">
+-        <div class="col-12 col-xl-4">
+-          <div id="frame" class="position-relative">
+-            <img id="preview" src="/a/nostream.svg" class="img-fluid" alt="Image: Preview" tabindex="-1" data-stream="ch1">
++      <div class="row g-4">
++        <div class="col-12 col-lg-5">
++          <img id="ss-preview" src="/a/nostream.svg" class="img-fluid rounded border" alt="Stream preview">
++          <p id="ss-preview-note" class="form-text"></p>
++
++          <div class="mt-3">
++            <div class="d-flex justify-content-between small mb-1">
++              <span>Video memory (MMA)</span>
++              <span id="ss-mma-text" class="text-body-secondary"></span>
++            </div>
++            <div class="progress" style="height: .75rem">
++              <div id="ss-mma-used" class="progress-bar bg-info" style="width: 0%"></div>
++              <div id="ss-mma-delta" class="progress-bar bg-warning" style="width: 0%"></div>
++            </div>
++            <p id="ss-mma-note" class="form-text"></p>
+           </div>
+         </div>
+-        <div class="col col-xl-8">
+-          <div class="row g-2">
+-            <div class="col">
+-              <p>
+-                <label for="stream1_width">Width</label>
+-                <input type="text" id="stream1_width" name="stream1_width" class="form-control" value="">
+-              </p>
+-              <p>
+-                <label for="stream1_height">Height</label>
+-                <input type="text" id="stream1_height" name="stream1_height" class="form-control" value="">
+-              </p>
+-              <p>
+-                <label for="stream1_format">Format</label>
+-                <select class="form-select" id="stream1_format" name="stream1_format">
+-                  <option value="">- Select -</option>
+-                </select>
+-              </p>
+-            </div><!-- .col -->
+-            <div class="col">
+-              <p>
+-                <label for="stream1_fps">FPS</label>
+-                <input type="text" id="stream1_fps" name="stream1_fps" class="form-control text-end" value="" pattern="[0-9]{1,}" title="numeric value" data-min="5" data-max="30" data-step="1">
+-              </p>
+-              <p>
+-                <label for="stream1_gop">GOP</label>
+-                <input type="text" id="stream1_gop" name="stream1_gop" class="form-control" value="">
+-              </p>
+-              <p>
+-                <label for="stream1_max_gop">Max GOP</label>
+-                <input type="text" id="stream1_max_gop" name="stream1_max_gop" class="form-control" value="">
+-              </p>
+-            </div><!-- .col -->
+-            <div class="col">
+-              <p>
+-                <label for="stream1_mode">Mode</label>
+-                <select class="form-select" id="stream1_mode" name="stream1_mode">
+-                  <option value="">- Select -</option>
+-                </select>
+-              </p>
+-              <p>
+-                <label for="stream1_bitrate">Bitrate</label>
+-                <input type="text" id="stream1_bitrate" name="stream1_bitrate" class="form-control" value="">
+-              </p>
+-              <p>
+-                <label for="stream1_profile">Profile</label>
+-                <input type="text" id="stream1_profile" name="stream1_profile" class="form-control" value="">
+-              </p>
+-            </div><!-- .col -->
+-            <div class="col">
+-              <p>
+-                <label for="stream1_buffers">Buffers</label>
+-                <input type="text" id="stream1_buffers" name="stream1_buffers" class="form-control" value="">
+-              </p>
+-              <p>
+-                <label for="stream1_rtsp_endpoint">RTSP Endpoint</label>
+-                <input type="text" id="stream1_rtsp_endpoint" name="stream1_rtsp_endpoint" class="form-control" value="">
+-              </p>
+-              <p class="form-switch">
+-                <input type="hidden" id="stream1_enabled-false" name="stream1_enabled" value="false">
+-                <input type="checkbox" id="stream1_enabled" name="stream1_enabled" value="true" role="switch" class="form-check-input">
+-                <label for="stream1_enabled" class="form-check-label">Stream enabled</label>
+-              </p>
+-              <p class="form-switch">
+-                <input type="hidden" id="stream1_audio_enabled-false" name="stream1_audio_enabled" value="false">
+-                <input type="checkbox" id="stream1_audio_enabled" name="stream1_audio_enabled" value="true" role="switch" class="form-check-input">
+-                <label for="stream1_audio_enabled" class="form-check-label">Audio in stream</label>
+-              </p>
++
++        <div class="col-12 col-lg-7">
++          <form id="ss-form" class="row g-3" onsubmit="return false">
++            <div class="col-sm-6">
++              <label for="ss-resolution" class="form-label">Resolution</label>
++              <select id="ss-resolution" class="form-select"></select>
++            </div>
++            <div class="col-sm-6">
++              <label for="ss-fps" class="form-label">Frame rate</label>
++              <select id="ss-fps" class="form-select"></select>
++              <div id="ss-fps-note" class="form-text"></div>
++            </div>
++            <div class="col-sm-6">
++              <label for="ss-codec" class="form-label">Codec</label>
++              <select id="ss-codec" class="form-select"></select>
++            </div>
++            <div class="col-sm-6">
++              <label for="ss-profile" class="form-label">Profile</label>
++              <select id="ss-profile" class="form-select"></select>
++            </div>
++            <div class="col-sm-6">
++              <label for="ss-rc" class="form-label">Rate control</label>
++              <select id="ss-rc" class="form-select"></select>
+             </div>
++            <div class="col-sm-6">
++              <label for="ss-gop" class="form-label">Keyframe interval</label>
++              <select id="ss-gop" class="form-select"></select>
++            </div>
++            <div class="col-sm-6">
++              <label for="ss-bitrate" class="form-label">Bitrate</label>
++              <select id="ss-bitrate" class="form-select"></select>
++            </div>
++            <div class="col-sm-6" id="ss-maxbitrate-wrap">
++              <label for="ss-maxbitrate" class="form-label">Max bitrate</label>
++              <select id="ss-maxbitrate" class="form-select"></select>
++            </div>
++            <div class="col-sm-6">
++              <label for="ss-jpeg-quality" class="form-label">Snapshot quality</label>
++              <select id="ss-jpeg-quality" class="form-select"></select>
++            </div>
++            <div class="col-12">
++              <div class="form-check form-switch">
++                <input id="ss-jpeg" type="checkbox" role="switch" class="form-check-input">
++                <label for="ss-jpeg" class="form-check-label">JPEG snapshots and MJPEG from this stream</label>
++              </div>
++            </div>
++            <div class="col-12" data-substream-only>
++              <div class="form-check form-switch">
++                <input id="ss-enabled" type="checkbox" role="switch" class="form-check-input">
++                <label for="ss-enabled" class="form-check-label">Stream enabled</label>
++              </div>
++            </div>
++          </form>
++
++          <div class="d-flex flex-wrap align-items-center gap-2 mt-4">
++            <button type="button" id="ss-apply" class="btn btn-primary" disabled>
++              <i class="bi bi-check2-circle me-1"></i> Apply
++            </button>
++            <button type="button" id="ss-revert" class="btn btn-outline-secondary" disabled>
++              <i class="bi bi-arrow-counterclockwise me-1"></i> Revert
++            </button>
++            <span id="ss-status" class="small"></span>
+           </div>
++          <p class="form-text mt-2">
++            Apply saves the settings to /etc/raptor.conf and restarts the video, which takes a few seconds;
++            RTSP clients reconnect on their own. The choices offered come from this camera's profile.
++          </p>
+         </div>
+       </div>
+-      <button type="button" id="save-config" class="btn btn-primary mt-3">
+-        <i class="bi bi-floppy me-1"></i> Save configuration to file
+-      </button>
+     </section>
+   </div>
+ </main>
+@@ -118,8 +125,6 @@
+ <script src="/a/control-bar.js"></script>
+ <script src="/a/navigation.js"></script>
+ <script src="/a/footer.js"></script>
+-<script src="/a/streamer.js"></script>
+-<script src="/a/preview.js"></script>
+-<script src="/a/streamer-config.js"></script>
++<script src="/a/streamer-stream.js"></script>
+ </body>
+ </html>

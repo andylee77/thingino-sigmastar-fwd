@@ -1,0 +1,342 @@
+From c2ca764eb3dee1fd4bac7c9a7b9d0ddd58f232b0 Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 08:19:15 -0500
+Subject: [PATCH 11/21] thingino-raptor: RTSP/ONVIF delivery and Ch1 preview
+ fallback (rsd, onvif)
+
+---
+ ...S31raptor-run-hooks-around-the-stack.patch |  64 +++++++++
+ ...sd-send-each-RTSP-reply-in-one-piece.patch |  56 ++++++++
+ ...IBE-with-the-parameter-sets-not-befo.patch | 129 ++++++++++++++++++
+ .../thingino-raptor/files/S96onvif_discovery  |   8 ++
+ package/thingino-raptor/files/www/x/ch1.mjpg  |   5 +
+ package/thingino-raptor/files/www/x/dl1.jpg   |   8 +-
+ 6 files changed, 269 insertions(+), 1 deletion(-)
+ create mode 100644 package/thingino-raptor/0006-S31raptor-run-hooks-around-the-stack.patch
+ create mode 100644 package/thingino-raptor/0007-rsd-send-each-RTSP-reply-in-one-piece.patch
+ create mode 100644 package/thingino-raptor/0008-rsd-answer-DESCRIBE-with-the-parameter-sets-not-befo.patch
+ mode change 100644 => 100755 package/thingino-raptor/files/S96onvif_discovery
+
+diff --git a/package/thingino-raptor/0006-S31raptor-run-hooks-around-the-stack.patch b/package/thingino-raptor/0006-S31raptor-run-hooks-around-the-stack.patch
+new file mode 100644
+index 000000000..7effba1e9
+--- /dev/null
++++ b/package/thingino-raptor/0006-S31raptor-run-hooks-around-the-stack.patch
+@@ -0,0 +1,64 @@
++From 7e576ef29f8a6cfbb0285f35a5da105122cfa8be Mon Sep 17 00:00:00 2001
++From: Andy <andylee77@users.noreply.github.com>
++Date: Sun, 25 Oct 2026 13:58:04 -0400
++Subject: [PATCH] S31raptor: run hooks around the stack
++
++Some processes outside the stack call into the video pipeline: on
++SigmaStar, a lens daemon reading the ISP's autofocus statistics every
++frame. If one of its calls lands while rvd tears the ISP channel down,
++the vendor MI module oopses in the call and leaves its device semaphore
++held, and the next rvd blocks forever opening the device -- a streamer
++restart from the web UI then leaves the camera without video until a
++reboot.
++
++Run the executables in /etc/raptor.d with "stop" before any daemon goes
++down and with "start" once the stack is back, so such a process can get
++off the pipeline first and come back after.
++---
++ config/S31raptor | 16 ++++++++++++++++
++ 1 file changed, 16 insertions(+)
++
++diff --git a/config/S31raptor b/config/S31raptor
++index 77cbcde..f9bb27f 100755
++--- a/config/S31raptor
+++++ b/config/S31raptor
++@@ -5,6 +5,19 @@ CONF=/etc/raptor.conf
++ RUNDIR=/var/run/rss
++ SHMDIR=/dev/shm
++ 
+++# Executables here run with "stop" before any daemon goes down and with
+++# "start" once the stack is up. They are for processes outside the stack that
+++# call into the video pipeline: those must be off it while rvd tears it down
+++# (on SigmaStar, a call into a destroyed ISP channel oopses the vendor MI
+++# module and leaves its device locked, so the next rvd hangs).
+++HOOKDIR=/etc/raptor.d
+++
+++run_hooks() {
+++	for h in "$HOOKDIR"/*; do
+++		[ -x "$h" ] && "$h" "$1"
+++	done
+++}
+++
++ # Read a boolean from raptor.conf: config_bool <section> <key> <default>
++ config_bool() {
++ 	val=$(raptorctl config get "$1" "$2" 2>/dev/null | tr -d '\r\n')
++@@ -116,6 +129,8 @@ start() {
++ 	start_daemon rsp
++ 	start_daemon rsr
++ 
+++	run_hooks start
+++
++ 	echo "Done."
++ }
++ 
++@@ -137,6 +152,7 @@ stop_daemon() {
++ 
++ stop() {
++ 	echo "Stopping Raptor Streaming System..."
+++	run_hooks stop
++ 
++ 	# Stop consumers first, then producer (RVD) last
++ 	for d in rsr rsp rwd rmd rmr ric rhd rsd rod rad rvd; do
++-- 
++2.43.0
++
+diff --git a/package/thingino-raptor/0007-rsd-send-each-RTSP-reply-in-one-piece.patch b/package/thingino-raptor/0007-rsd-send-each-RTSP-reply-in-one-piece.patch
+new file mode 100644
+index 000000000..3d51730a4
+--- /dev/null
++++ b/package/thingino-raptor/0007-rsd-send-each-RTSP-reply-in-one-piece.patch
+@@ -0,0 +1,56 @@
++From e8ef47b68ef5ee2951c9e764c4db5f961a30cc7f Mon Sep 17 00:00:00 2001
++From: Andy <andylee77@users.noreply.github.com>
++Date: Sun, 25 Oct 2026 20:42:01 -0400
++Subject: [PATCH] rsd: send each RTSP reply in one piece
++
++compy writes a response through the fd writer one token at a time, and
++the client socket is TCP_NODELAY, so a single reply left the camera as
++about twenty TCP segments ("RTSP/1." "0" " 200" ...). The Happytime
++RTSP client in a Zosi (Ansjer) NVR stalls on a reply split that finely:
++it timed out about 1.27 s into every session, at whichever step it had
++reached, reset the connection and started over, so the NVR showed the
++camera as unconnected. Two sessions that got lucky streamed meanwhile.
++
++Cork the socket for the dispatch of each request and uncork after, so
++the kernel sends the reply whole; RTP is untouched (it is written by the
++reader threads outside the dispatch). With this the NVR connects on the
++first try and keeps its two sessions; nothing else changes for other
++clients (Frigate, ffmpeg).
++---
++ rsd/rsd_session.c | 12 ++++++++++++
++ 1 file changed, 12 insertions(+)
++
++diff --git a/rsd/rsd_session.c b/rsd/rsd_session.c
++index a997bfc..d35823e 100644
++--- a/rsd/rsd_session.c
+++++ b/rsd/rsd_session.c
++@@ -12,6 +12,9 @@
++ #include <string.h>
++ #include <unistd.h>
++ #include <sys/epoll.h>
+++#include <sys/socket.h>
+++#include <netinet/in.h>
+++#include <netinet/tcp.h>
++ #include <rss_net.h>
++ #include <rss_aac.h>
++ 
++@@ -1255,7 +1258,16 @@ void rsd_handle_rtsp_data(rsd_client_t *client, const char *data, size_t len)
++ 			writer = compy_fd_writer(&client->fd);
++ 		Compy_Controller ctrl = DYN(rsd_client_t, Compy_Controller, client);
++ 		pthread_mutex_lock(&client->write_lock);
+++		/* compy writes a response piece by piece and the socket is
+++		 * TCP_NODELAY, so without this every header token leaves as
+++		 * its own segment; some NVR clients (the Happytime SDK)
+++		 * stall on a reply split that finely. Cork for the dispatch
+++		 * so the reply goes out whole. */
+++		int cork = 1;
+++		setsockopt(client->fd, IPPROTO_TCP, TCP_CORK, &cork, sizeof(cork));
++ 		compy_dispatch(writer, ctrl, &req);
+++		cork = 0;
+++		setsockopt(client->fd, IPPROTO_TCP, TCP_CORK, &cork, sizeof(cork));
++ 		pthread_mutex_unlock(&client->write_lock);
++ 
++ 		/* Apply deferred PLAY — now that write_lock is released,
++-- 
++2.43.0
++
+diff --git a/package/thingino-raptor/0008-rsd-answer-DESCRIBE-with-the-parameter-sets-not-befo.patch b/package/thingino-raptor/0008-rsd-answer-DESCRIBE-with-the-parameter-sets-not-befo.patch
+new file mode 100644
+index 000000000..36f89578c
+--- /dev/null
++++ b/package/thingino-raptor/0008-rsd-answer-DESCRIBE-with-the-parameter-sets-not-befo.patch
+@@ -0,0 +1,129 @@
++From a75043e111c38226994fe17137f0d9e77a4981fe Mon Sep 17 00:00:00 2001
++From: Andy <andylee77@users.noreply.github.com>
++Date: Sun, 25 Oct 2026 23:53:27 -0400
++Subject: [PATCH] rsd: answer DESCRIBE with the parameter sets, not before them
++
++Right after rvd or rsd (re)starts, the reader has not seen a keyframe,
++and DESCRIBE went out without sprop-parameter-sets. A client that
++reconnects at once (go2rtc does) then holds that SDP for as long as the
++connection lives. go2rtc builds every MSE init segment from it, and
++without parameter sets it falls back to a 128x96 placeholder SPS: Frigate
++showed the camera's 16:9 stream at 4:3 (2560x1920) in every browser,
++until the producer was recreated. Seen on a YMF46D (Infinity6C) after a
++reboot: the stored SDP had sprop, the receiver's codec did not, and the
++init segment carried go2rtc's dummy SPS.
++
++A DESCRIBE that finds no parameter sets cached now sets params_wanted;
++the reader thread (which owns the ring) asks the encoder for an IDR, and
++DESCRIBE waits for the cache, at most 2 s, before answering. The wait
++holds the RTSP loop only in that startup window; media runs on its own
++threads. JPEG streams have nothing to wait for.
++---
++ rsd/rsd.h             |  4 ++++
++ rsd/rsd_ring_reader.c |  9 +++++++++
++ rsd/rsd_session.c     | 47 +++++++++++++++++++++++++++++++++++++++++++
++ 3 files changed, 60 insertions(+)
++
++diff --git a/rsd/rsd.h b/rsd/rsd.h
++index 73a9a46..066d78e 100644
++--- a/rsd/rsd.h
+++++ b/rsd/rsd.h
++@@ -198,6 +198,10 @@ typedef struct {
++ 	_Atomic uint16_t vps_len;
++ 	_Atomic uint16_t sps_len;
++ 	_Atomic uint16_t pps_len;
+++
+++	/* Set by a DESCRIBE that found no parameter sets cached; the reader
+++	 * thread, which owns the ring, asks the producer for an IDR. */
+++	atomic_bool params_wanted;
++ } rsd_ring_ctx_t;
++ 
++ /* Server state */
++diff --git a/rsd/rsd_ring_reader.c b/rsd/rsd_ring_reader.c
++index 2a1c8b3..03363f7 100644
++--- a/rsd/rsd_ring_reader.c
+++++ b/rsd/rsd_ring_reader.c
++@@ -405,6 +405,15 @@ void *rsd_video_reader_thread(void *arg)
++ 				 geometry_changed ? ", resolution changed" : "");
++ 		}
++ 
+++		/* A DESCRIBE is waiting for parameter sets not cached yet (the
+++		 * reader just opened the ring): ask for the keyframe now rather
+++		 * than leave it a GOP away. Once per waiting DESCRIBE. */
+++		if (atomic_exchange_explicit(&rctx->params_wanted, false, memory_order_acq_rel) &&
+++		    atomic_load_explicit(&rctx->sps_len, memory_order_relaxed) == 0) {
+++			rss_ring_request_idr(rctx->ring);
+++			rsd_idr_recovery_note(&idr_recovery, rss_timestamp_us());
+++		}
+++
++ 		int ret = rss_ring_wait(rctx->ring, 100);
++ 		if (ret != 0) {
++ 			const rss_ring_header_t *h = rss_ring_get_header(rctx->ring);
++diff --git a/rsd/rsd_session.c b/rsd/rsd_session.c
++index d35823e..ebaec42 100644
++--- a/rsd/rsd_session.c
+++++ b/rsd/rsd_session.c
++@@ -293,6 +293,51 @@ static int detect_stream_idx(const rsd_server_t *srv, CharSlice99 uri)
++ 	return -1;
++ }
++ 
+++/* Whether the reader has cached what this codec's SDP fmtp carries. */
+++static bool rsd_params_cached(rsd_ring_ctx_t *rctx)
+++{
+++	switch (atomic_load_explicit(&rctx->last_codec, memory_order_acquire)) {
+++	case 0: /* H.264: sprop-parameter-sets */
+++		return atomic_load_explicit(&rctx->sps_len, memory_order_acquire) &&
+++		       atomic_load_explicit(&rctx->pps_len, memory_order_acquire);
+++	case 1: /* H.265: sprop-vps/sps/pps */
+++		return atomic_load_explicit(&rctx->vps_len, memory_order_acquire) &&
+++		       atomic_load_explicit(&rctx->sps_len, memory_order_acquire) &&
+++		       atomic_load_explicit(&rctx->pps_len, memory_order_acquire);
+++	default: /* JPEG: nothing in the SDP to wait for */
+++		return true;
+++	}
+++}
+++
+++/*
+++ * Answer DESCRIBE with the parameter sets, not before them. Right after rvd
+++ * or rsd (re)starts, the reader has not seen a keyframe yet, and an SDP
+++ * without sprop-parameter-sets is worse than a late one: go2rtc (Frigate's
+++ * restreamer) builds every MSE init segment from the SDP it connected with,
+++ * for as long as that connection lives, and without parameter sets it uses a
+++ * 128x96 placeholder SPS -- browsers then draw a 16:9 stream at 4:3. The
+++ * reader asks the encoder for an IDR; this waits for it, at most
+++ * RSD_DESCRIBE_PARAMS_WAIT_MS. That holds the RTSP loop briefly, and only in
+++ * that startup window; media keeps flowing on its own threads.
+++ */
+++#define RSD_DESCRIBE_PARAMS_WAIT_MS 2000
+++
+++static void rsd_wait_params(rsd_ring_ctx_t *rctx)
+++{
+++	if (rsd_params_cached(rctx))
+++		return;
+++	atomic_store_explicit(&rctx->params_wanted, true, memory_order_release);
+++	for (int ms = 20; ms <= RSD_DESCRIBE_PARAMS_WAIT_MS; ms += 20) {
+++		usleep(20000);
+++		if (rsd_params_cached(rctx)) {
+++			RSS_INFO("DESCRIBE stream %d: parameter sets after %d ms", rctx->idx, ms);
+++			return;
+++		}
+++	}
+++	RSS_WARN("DESCRIBE stream %d: no parameter sets after %d ms, SDP without them",
+++		 rctx->idx, RSD_DESCRIBE_PARAMS_WAIT_MS);
+++}
+++
++ static void rsd_client_t_describe(VSelf, Compy_Context *ctx, const Compy_Request *req)
++ {
++ 	VSELF(rsd_client_t);
++@@ -310,6 +355,8 @@ static void rsd_client_t_describe(VSelf, Compy_Context *ctx, const Compy_Request
++ 	 * between our check and any header read, causing a UAF. */
++ 	rsd_ring_ctx_t *rctx = &self->srv->video[self->stream_idx];
++ 	bool has_video = rctx->last_width > 0;
+++	if (has_video)
+++		rsd_wait_params(rctx);
++ 
++ 	/* RFC 2435 carries dimensions in 8-bit units of 8 pixels: 2040 is
++ 	 * the widest JPEG the payload format can describe, and compy sends
++-- 
++2.43.0
++
+diff --git a/package/thingino-raptor/files/S96onvif_discovery b/package/thingino-raptor/files/S96onvif_discovery
+old mode 100644
+new mode 100755
+index e1bcfae86..77dd619e4
+--- a/package/thingino-raptor/files/S96onvif_discovery
++++ b/package/thingino-raptor/files/S96onvif_discovery
+@@ -115,6 +115,14 @@ configure_raptor_onvif_profiles() {
+ 	jct "$tmpfile" set profiles.stream1.url "${rtsp_scheme}://%s:${rtsp_port}/${endpoint_sub}"
+ 	jct "$tmpfile" set audio.backchannel.uri "${rtsp_scheme}://%s:${rtsp_port}/${endpoint_main}"
+ 
++	# The profiles' sizes are what ONVIF clients are told the streams are.
++	for s in 0 1; do
++		width=$(raptor_conf_get "stream$s" width)
++		height=$(raptor_conf_get "stream$s" height)
++		[ -n "$width" ] && jct "$tmpfile" set "profiles.stream$s.width" "$width"
++		[ -n "$height" ] && jct "$tmpfile" set "profiles.stream$s.height" "$height"
++	done
++
+ 	if [ "$(raptor_webrtc_enabled)" = "true" ]; then
+ 		webrtc_scheme=$(raptor_webrtc_scheme)
+ 		webrtc_port=$(raptor_webrtc_port)
+diff --git a/package/thingino-raptor/files/www/x/ch1.mjpg b/package/thingino-raptor/files/www/x/ch1.mjpg
+index fb1b8fdf6..bafc94c37 100755
+--- a/package/thingino-raptor/files/www/x/ch1.mjpg
++++ b/package/thingino-raptor/files/www/x/ch1.mjpg
+@@ -11,6 +11,11 @@ require_auth
+ CHANNEL=1
+ BOUNDARY="raptorframe"
+ 
++# rvd numbers JPEG channels over the streams that have one: with the main's
++# JPEG off, the sub's is channel 0 and there is no channel 1. Serve channel 0
++# then, so "Ch1" previews whatever JPEG there is instead of failing.
++[ -e /dev/shm/rss_ring_jpeg1 ] || CHANNEL=0
++
+ if ! pidof rhd >/dev/null 2>&1; then
+ 	printf 'Status: 503 Service Unavailable\r\n\r\n'
+ 	exit 0
+diff --git a/package/thingino-raptor/files/www/x/dl1.jpg b/package/thingino-raptor/files/www/x/dl1.jpg
+index 7c3c6c3f8..a0db45cf5 100755
+--- a/package/thingino-raptor/files/www/x/dl1.jpg
++++ b/package/thingino-raptor/files/www/x/dl1.jpg
+@@ -13,7 +13,13 @@ if ! command -v raptorctl >/dev/null 2>&1; then
+ 	exit 0
+ fi
+ 
+-if ! raptorctl rvd save jpeg "$tmp" 1 >/dev/null 2>&1 || [ ! -s "$tmp" ]; then
++# rvd numbers JPEG channels over the streams that have one: with the main's
++# JPEG off, the sub's is channel 0 and there is no channel 1. Serve channel 0
++# then, so "Ch1" snapshots whatever JPEG there is instead of failing.
++channel=1
++[ -e /dev/shm/rss_ring_jpeg1 ] || channel=0
++
++if ! raptorctl rvd save jpeg "$tmp" "$channel" >/dev/null 2>&1 || [ ! -s "$tmp" ]; then
+ 	printf 'Status: 503 Service Unavailable\r\n\r\n'
+ 	exit 0
+ fi

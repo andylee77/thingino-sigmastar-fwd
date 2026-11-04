@@ -1,0 +1,193 @@
+From 0e3167d43b221f650324c47348256b4ea5b94870 Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 08:19:15 -0500
+Subject: [PATCH 06/21] sigmastar: build Raptor against the raptor-hal fork;
+ reference target
+
+---
+ .../noname_ssc377qe_imx335_defconfig          | 127 ++++++++++++++++++
+ package/thingino-raptor-hal/Config.in         |   8 ++
+ .../thingino-raptor-hal.mk                    |  15 +++
+ 3 files changed, 150 insertions(+)
+ create mode 100644 configs/cameras/noname_ssc377qe_imx335/noname_ssc377qe_imx335_defconfig
+
+diff --git a/configs/cameras/noname_ssc377qe_imx335/noname_ssc377qe_imx335_defconfig b/configs/cameras/noname_ssc377qe_imx335/noname_ssc377qe_imx335_defconfig
+new file mode 100644
+index 000000000..afcfa6cf6
+--- /dev/null
++++ b/configs/cameras/noname_ssc377qe_imx335/noname_ssc377qe_imx335_defconfig
+@@ -0,0 +1,127 @@
++# NAME: Unbranded SSC377QE (Infinity6C, IMX335)
++#
++# First Infinity6C target. See board/sigmastar/infinity6c/ and sigmastar-sdk's
++# infinity6c/PROVENANCE.
++#
++# Streams, as of raptor-hal e3d7f54: capture and encode only. ISP is not
++# implemented on the infinity6c backend -- no tuning load, no exposure or
++# colour control -- so on this target a bad picture is expected and tells you
++# nothing, while no picture is a real result.
++# FRAG: soc-sigmastar core-sigmastar
++
++# board.mk includes this file as a makefile before thingino.mk runs, so the
++# vendor and model are readable there and drive SOC_VENDOR / SOC_MODEL /
++# SOC_FAMILY / SOC_ARCH / SOC_CPU / KERNEL_VERSION.
++#
++# The vendor has to be declared here and not only in soc-sigmastar.fragment:
++# fragments are appended to .config, never included as makefiles, so a symbol
++# set only in a fragment is invisible to thingino.mk's vendor dispatch.
++BR2_SOC_VENDOR_SIGMASTAR=y
++BR2_SIGMASTAR_SOC_MODEL="ssc377qe"
++
++# The driver is present and builds: infinity6c/sensor-src/sensor_imx335_mipi.c.
++#
++# The tuning is not. The family ships sensor-iq/{imx307,sc430ai}.bin and no
++# imx335.bin, so this installs a module without a blob -- the inverse of the
++# sc430ai this target used to select, which had the blob and no module. Of the
++# two that is the better half to have: the sensor is driven either way, and a
++# missing bin costs colour accuracy, not capture. sigmastar-sdk warns and skips
++# the install rather than failing.
++#
++# Point BR2_SENSOR_1_IQ_FILE at a blob when one turns up; it overrides the
++# family bin and needs no change here.
++BR2_SENSOR_1_NAME="imx335"
++
++FLASH_SIZE_MB=16
++
++# Wired Ethernet: installs the eth0 DHCP stanza (thingino-ethernet).
++BR2_ETHERNET=y
++
++# Same ARM toolchain the Infinity6E target uses. Nothing in it is 6E-specific:
++# it is a generic arm-thingino-linux-uclibcgnueabihf, and Cortex-A35 executes
++# the same aarch32 code. Re-pointed here because the toolchain fragment is
++# resolved from TYPE/GCC/LIBC alone (Makefile:185), which has no architecture in
++# it, so the file appended is always thingino's mipsel one. The camera defconfig
++# is appended after the fragments, so these win.
++#
++# uClibc rather than glibc: SigmaStar ships each vendor drop in both flavours,
++# and the set that matches this hardware is the uClibc-ng one -- every
++# libmi_*.so in it carries NEEDED libc.so.0, which no glibc rootfs can satisfy.
++# This line overrides BR2_THINGINO_TOOLCHAIN_LIBC_GLIBC from
++# configs/fragments/core-sigmastar.fragment, read earlier.
++BR2_THINGINO_TOOLCHAIN_LIBC_UCLIBC=y
++BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y
++BR2_TOOLCHAIN_EXTERNAL_DOWNLOAD=y
++BR2_TOOLCHAIN_EXTERNAL_URL="file://$(HOME)/src/mirrors/releases/johnchia__thingino-firmware/toolchain-x86_64/thingino-toolchain-x86_64_infinity6e_uclibc_gcc16-linux-arm.tar.gz"
++BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX="arm-thingino-linux-uclibcgnueabihf"
++BR2_TOOLCHAIN_EXTERNAL_CUSTOM_UCLIBC=y
++BR2_TOOLCHAIN_EXTERNAL_GCC_16=y
++BR2_TOOLCHAIN_EXTERNAL_CXX=y
++BR2_TOOLCHAIN_EXTERNAL_WCHAR=y
++BR2_TOOLCHAIN_EXTERNAL_LOCALE=y
++BR2_TOOLCHAIN_EXTERNAL_HAS_THREADS_DEBUG=y
++# Declared, not chosen: the vendor blobs need __stack_chk_fail, so the producer
++# builds uClibc with SSP, and Buildroot refuses to configure an external
++# toolchain whose SSP support is not stated. Not in the shared uclibc fragment
++# because the Ingenic toolchains it also serves are built without it.
++BR2_TOOLCHAIN_EXTERNAL_HAS_SSP=y
++# BR2_TOOLCHAIN_EXTERNAL_INET_RPC is not set
++
++# The toolchain is built against 4.9 headers, which is what it has regardless of
++# this board running a 5.10 kernel -- Buildroot checks this against the sysroot,
++# so it states what is there rather than what we would like. Headers older than
++# the kernel are the supported direction.
++BR2_TOOLCHAIN_EXTERNAL_HEADERS_4_9=y
++
++# Build U-Boot. The package is already family-generic -- it configures
++# $(SOC_FAMILY)_defconfig and passes the model as -DPRODUCT_SOC -- and OpenIPC's
++# tree carries everything this family needs: infinity6c_defconfig, an
++# ipl/infinity6c/ with IPL.bin, IPL_CUST.bin and GCIS.bin, a make_boot_spinor.sh
++# branch that places GCIS at 36k for 6c rather than MXP_SF at 60k, and ssc377de
++# among the SoCs its build.sh iterates. So no package change was needed.
++#
++# Producing BOOT.bin is not flashing it: the boot partition is the one place on
++# this board where a bad write cannot be undone in software.
++BR2_PACKAGE_SIGMASTAR_UBOOT=y
++
++BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_THINGINO_PATH)/board/sigmastar/post-image.sh"
++
++# Gates the camera stack in Config.soc.in.
++BR2_THINGINO_DEV_IPCAM=y
++
++# Raptor, by default. thingino-streamer/Config.in defaults the choice to Raptor
++# for any camera device, so DEV_IPCAM above pulls in raptor, raptor-common and
++# raptor-hal without a symbol here. INFINITY6C is a raptor-hal platform as of
++# e3d7f54.
++
++BR2_PACKAGE_DROPBEAR=y
++
++# No VPN, and the reason is a build failure rather than a preference.
++#
++# core-sigmastar.fragment selects WireGuard, and thingino-vpn/Config.in then
++# selects wireguard-linux-compat "if BR2_LINUX_KERNEL && !KERNEL_VERSION_7".
++# WireGuard has been in mainline since 5.6, so on this family's 5.10 kernel the
++# out-of-tree compat module is both unnecessary and does not compile.
++#
++# KERNEL_VERSION_7 is not a declared Kconfig symbol -- it is used in seven
++# places and defined in none, so it always reads n and the guard always fires.
++# On Ingenic's 3.10/4.4/4.9 kernels selecting the module is the right answer
++# anyway, which is why nothing has caught it; 5.10 is the first kernel where it
++# is wrong.
++#
++# A select cannot be declined by a defconfig, so the choice moves to None
++# rather than the compat package being switched off. Fixing the guard properly
++# means touching Kconfig that every Ingenic target reads, which is a change
++# worth making on its own with its own verification.
++BR2_PACKAGE_THINGINO_VPN_NONE=y
++
++# See the Infinity6E target: the external toolchain's bundled libz is not copied
++# into the target, so anything linking -lz needs a real target zlib.
++BR2_PACKAGE_ZLIB=y
++
++# Upstream rvd reads the sensor's name and I2C address from /proc/jz/sensor, an
++# Ingenic driver node, and will not start without them, so on SigmaStar they
++# come from [sensor]. 7-bit address, raptor.conf's convention (the driver's
++# 8-bit slave is 0x34); the Infinity6C backend does not use it.
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_SENSOR_NAME="imx335"
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_SENSOR_I2C_ADDR="0x1a"
+diff --git a/package/thingino-raptor-hal/Config.in b/package/thingino-raptor-hal/Config.in
+index 20000d147..62c5fa1ca 100644
+--- a/package/thingino-raptor-hal/Config.in
++++ b/package/thingino-raptor-hal/Config.in
+@@ -1,6 +1,7 @@
+ config BR2_PACKAGE_THINGINO_RAPTOR_HAL
+ 	bool
+ 	select BR2_PACKAGE_THINGINO_RAPTOR_HAL_INGENIC if BR2_SOC_VENDOR_INGENIC
++	select BR2_PACKAGE_THINGINO_RAPTOR_HAL_SIGMASTAR if BR2_SOC_VENDOR_SIGMASTAR
+ 
+ # One backend symbol per vendor. A new vendor costs one select above and one
+ # block here, not a guard on every library line.
+@@ -18,3 +19,10 @@ config BR2_PACKAGE_THINGINO_RAPTOR_HAL_INGENIC
+ 	select BR2_PACKAGE_INGENIC_SYSTEM_LIBS_NEO_LIBALOG
+ 	select BR2_PACKAGE_LIBAUDIOPROCESS_NEO
+ 	select BR2_PACKAGE_INGENIC_LIB_AUDIOPROCESS if !BR2_PACKAGE_LIBAUDIOPROCESS_NEO
++
++# The MI libraries are dlopened, so the linker never sees them and nothing else
++# would pull them in: without this the daemons build, start, and fail at the
++# first HAL call.
++config BR2_PACKAGE_THINGINO_RAPTOR_HAL_SIGMASTAR
++	bool
++	select BR2_PACKAGE_SIGMASTAR_LIB
+diff --git a/package/thingino-raptor-hal/thingino-raptor-hal.mk b/package/thingino-raptor-hal/thingino-raptor-hal.mk
+index a96f9ad55..a6637fdb7 100644
+--- a/package/thingino-raptor-hal/thingino-raptor-hal.mk
++++ b/package/thingino-raptor-hal/thingino-raptor-hal.mk
+@@ -40,4 +40,19 @@ define THINGINO_RAPTOR_HAL_INSTALL_STAGING_CMDS
+ 		$(STAGING_DIR)/usr/include/raptor_hal.h
+ endef
+ 
++# SigmaStar builds our raptor-hal fork: upstream plus John Chia's Infinity6C
++# backend (FORK.md in that repository says what else). Local only for now.
++#
++# Down here rather than beside the pin at the top, so upstream's pin bumps never
++# conflict with it; Buildroot reads _VERSION and _SITE when generic-package is
++# evaluated below, so this is still in time. The fork vendors its MI headers,
++# and ingenic-headers, the only submodule, is not used by that backend.
++# Buildroot fetches submodules for any non-empty value, NO included, so off is
++# empty.
++ifeq ($(BR2_SOC_VENDOR_SIGMASTAR),y)
++THINGINO_RAPTOR_HAL_VERSION = 39a48ca03d64755d376357b33ee7cdd371237700
++THINGINO_RAPTOR_HAL_SITE = file://$(HOME)/src/forks/raptor-hal
++THINGINO_RAPTOR_HAL_GIT_SUBMODULES =
++endif
++
+ $(eval $(generic-package))

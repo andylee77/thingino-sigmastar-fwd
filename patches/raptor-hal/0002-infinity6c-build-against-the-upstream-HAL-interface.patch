@@ -1,0 +1,206 @@
+From 30384e698e1cbff29a728e697b6d71bc39e12397 Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 12:50:44 -0400
+Subject: [PATCH 2/6] infinity6c: build against the upstream HAL interface
+
+John's backend uses interface items only his fork's raptor_hal.h has. When
+RSS_ISP_AUTO is absent (upstream), i6c_upstream_compat.h selects
+I6C_UPSTREAM_HAL_IFACE and the backend adapts:
+- defines RSS_ISP_AUTO and rss_isp_knob_t;
+- wraps the six int* ISP getters as upstream's uint8_t* ones;
+- drops the knob-caps op and the green WB gain;
+- forces the sensor mode to auto;
+- guards .max_enc_pixel_rate.
++70/-6, all inside the backend.
+---
+ src/caps_sigmastar.inc               |  4 ++++
+ src/infinity6c/hal_common.c          | 27 +++++++++++++++++++------
+ src/infinity6c/hal_isp.c             | 15 ++++++++++++++
+ src/infinity6c/i6c_upstream_compat.h | 30 ++++++++++++++++++++++++++++
+ src/infinity6c/infinity6c_state.h    |  1 +
+ 5 files changed, 71 insertions(+), 6 deletions(-)
+ create mode 100644 src/infinity6c/i6c_upstream_compat.h
+
+diff --git a/src/caps_sigmastar.inc b/src/caps_sigmastar.inc
+index 0c75073..967144a 100644
+--- a/src/caps_sigmastar.inc
++++ b/src/caps_sigmastar.inc
+@@ -274,7 +274,9 @@ const rss_hal_caps_t g_hal_caps = {
+      * a misbehaving board has left, not by taking frame rate off one that
+      * works.
+      */
++#ifdef RSS_ISP_AUTO
+     .max_enc_pixel_rate = RSS_ENC_PIXEL_RATE,
++#endif
+ #if defined(SOC_MODEL_SSC333)
+     /*
+      * The JPEG ceiling, unlike the rate, is a real failure: past it the
+@@ -463,7 +465,9 @@ const rss_hal_caps_t g_hal_caps = {
+      * this file. Warn-only, and max_jpeg_pixels stays 0 because no 6C part
+      * has been swept for a JPEG ceiling.
+      */
++#ifdef RSS_ISP_AUTO
+     .max_enc_pixel_rate = RSS_ENC_PIXEL_RATE,
++#endif
+ 
+     /*
+      * OSD limits. A group here is a VENC channel that regions attach to, so
+diff --git a/src/infinity6c/hal_common.c b/src/infinity6c/hal_common.c
+index 9160cd9..f458ddd 100644
+--- a/src/infinity6c/hal_common.c
++++ b/src/infinity6c/hal_common.c
+@@ -224,7 +224,12 @@ static int hal_init(void *ctx, const rss_multi_sensor_config_t *cfg)
+      * port and a valid encoder channel, so "unset" needs a value of its own.
+      */
+     st->snr_profile = -1;
++#ifdef I6C_UPSTREAM_HAL_IFACE
++    st->snr_mode_req = -1;
++    (void)cfg;
++#else
+     st->snr_mode_req = cfg && cfg->sensor_count > 0 ? cfg->sensors[0].mode : -1;
++#endif
+     st->scl_video_port = -1;
+     /* Not the calloc'd zero either: the flip predicates are gated on 3DNR. */
+     st->isp_nr3d_req = 1;
+@@ -613,6 +618,14 @@ static int hal_sys_rebase_timestamp(void *ctx, int64_t base)
+  * resolves to RSS_ERR_NOTSUP through RSS_HAL_CALL.
+  * ================================================================ */
+ 
++#ifdef I6C_UPSTREAM_HAL_IFACE
++I6C_U8_GETTER_DECL(hal_isp_get_brightness)
++I6C_U8_GETTER_DECL(hal_isp_get_contrast)
++I6C_U8_GETTER_DECL(hal_isp_get_saturation)
++I6C_U8_GETTER_DECL(hal_isp_get_drc_strength)
++I6C_U8_GETTER_DECL(hal_isp_get_temper_strength)
++I6C_U8_GETTER_DECL(hal_isp_get_defog_strength)
++#endif
+ static const rss_hal_ops_t g_ops = {
+     .init = hal_init,
+     .deinit = hal_deinit,
+@@ -728,12 +741,14 @@ static const rss_hal_ops_t g_ops = {
+      * hal_isp.c.
+      */
+     .isp_set_brightness = hal_isp_set_brightness,
+-    .isp_get_brightness = hal_isp_get_brightness,
++    .isp_get_brightness = I6C_GETTER(hal_isp_get_brightness),
++#ifndef I6C_UPSTREAM_HAL_IFACE
+     .isp_get_knob_caps = hal_isp_get_knob_caps,
++#endif
+     .isp_set_contrast = hal_isp_set_contrast,
+-    .isp_get_contrast = hal_isp_get_contrast,
++    .isp_get_contrast = I6C_GETTER(hal_isp_get_contrast),
+     .isp_set_saturation = hal_isp_set_saturation,
+-    .isp_get_saturation = hal_isp_get_saturation,
++    .isp_get_saturation = I6C_GETTER(hal_isp_get_saturation),
+     /*
+      * Sharpness is absent, and what costs too much is not the per-gain curve
+      * that DRC below pays -- it is the rest of the module. Measured on an
+@@ -753,7 +768,7 @@ static const rss_hal_ops_t g_ops = {
+      * back.
+      */
+     .isp_set_drc_strength = hal_isp_set_drc_strength,
+-    .isp_get_drc_strength = hal_isp_get_drc_strength,
++    .isp_get_drc_strength = I6C_GETTER(hal_isp_get_drc_strength),
+     /*
+      * Temper is NR3D's u8TfStrY, and it pays none of DRC's cost: the value goes
+      * into all sixteen gain entries rather than into stManual, so the module
+@@ -762,7 +777,7 @@ static const rss_hal_ops_t g_ops = {
+      * use. See the IQ_GAINRUN row in hal_isp.c.
+      */
+     .isp_set_temper_strength = hal_isp_set_temper_strength,
+-    .isp_get_temper_strength = hal_isp_get_temper_strength,
++    .isp_get_temper_strength = I6C_GETTER(hal_isp_get_temper_strength),
+     /*
+      * No isp_{set,get}_sinter_strength: NrLumaAdv's blend weight is already at
+      * the tuning's maximum on every sensor here, so the knob had no range to
+@@ -773,7 +788,7 @@ static const rss_hal_ops_t g_ops = {
+     .isp_set_defog_strength = hal_isp_set_defog_strength,
+     /* The one rvd's [image] block calls; the plain setter serves the ctrl API. */
+     .isp_set_defog_strength_adv = hal_isp_set_defog_strength_adv,
+-    .isp_get_defog_strength = hal_isp_get_defog_strength,
++    .isp_get_defog_strength = I6C_GETTER(hal_isp_get_defog_strength),
+     .isp_set_ae_comp = hal_isp_set_ae_comp,
+     .isp_get_ae_comp = hal_isp_get_ae_comp,
+     .isp_set_antiflicker = hal_isp_set_antiflicker,
+diff --git a/src/infinity6c/hal_isp.c b/src/infinity6c/hal_isp.c
+index 5551f6d..c5cdfae 100644
+--- a/src/infinity6c/hal_isp.c
++++ b/src/infinity6c/hal_isp.c
+@@ -194,10 +194,16 @@ int hal_isp_get_exposure(void *ctx, rss_exposure_t *exposure)
+         st->isp.awb_status && st->isp.awb_status(I6C_DEV_ID(I6C_ISP_DEV), I6C_ISP_CHN, &awb) == 0;
+     if (have_awb) {
+         exposure->wb_rgain = (uint16_t)awb.rGain;
++#ifndef I6C_UPSTREAM_HAL_IFACE
+         exposure->wb_ggain = (uint16_t)awb.gGain;
++#endif
+         exposure->wb_bgain = (uint16_t)awb.bGain;
++#ifdef I6C_UPSTREAM_HAL_IFACE
++        exposure->valid_mask |= RSS_EXPOSURE_VALID_WB_RGAIN | RSS_EXPOSURE_VALID_WB_BGAIN;
++#else
+         exposure->valid_mask |= RSS_EXPOSURE_VALID_WB_RGAIN | RSS_EXPOSURE_VALID_WB_GGAIN |
+                                 RSS_EXPOSURE_VALID_WB_BGAIN;
++#endif
+     }
+ 
+     if (!ae_logged) {
+@@ -2689,3 +2695,12 @@ int hal_isp_get_sensor_fps(void *ctx, uint32_t *fps_num, uint32_t *fps_den)
+     *fps_den = 1;
+     return RSS_OK;
+ }
++
++#ifdef I6C_UPSTREAM_HAL_IFACE
++I6C_U8_GETTER_DEF(hal_isp_get_brightness)
++I6C_U8_GETTER_DEF(hal_isp_get_contrast)
++I6C_U8_GETTER_DEF(hal_isp_get_saturation)
++I6C_U8_GETTER_DEF(hal_isp_get_drc_strength)
++I6C_U8_GETTER_DEF(hal_isp_get_temper_strength)
++I6C_U8_GETTER_DEF(hal_isp_get_defog_strength)
++#endif
+diff --git a/src/infinity6c/i6c_upstream_compat.h b/src/infinity6c/i6c_upstream_compat.h
+new file mode 100644
+index 0000000..b170dbb
+--- /dev/null
++++ b/src/infinity6c/i6c_upstream_compat.h
+@@ -0,0 +1,30 @@
++/* Build the infinity6c backend against gtxaspec raptor-hal's interface.
++ * The fork's raptor_hal.h defines RSS_ISP_AUTO; upstream's does not, so its
++ * absence selects this compat layer. */
++#ifndef I6C_UPSTREAM_COMPAT_H
++#define I6C_UPSTREAM_COMPAT_H
++#include <limits.h>
++#include <stdbool.h>
++#include <stdint.h>
++#ifndef RSS_ISP_AUTO
++#define I6C_UPSTREAM_HAL_IFACE 1
++#define RSS_ISP_AUTO INT_MIN
++typedef struct {
++    int min, max, neutral;
++    bool has_auto, enabled;
++} rss_isp_knob_t;
++/* upstream getters take uint8_t*; wrap the native-int ones */
++#define I6C_U8_GETTER_DECL(fn) int fn##_u8(void *ctx, uint8_t *val);
++#define I6C_U8_GETTER_DEF(fn)                                                  \
++    int fn##_u8(void *ctx, uint8_t *val)                                       \
++    {                                                                          \
++        int v = 0, r = fn(ctx, &v);                                            \
++        if (r == 0)                                                            \
++            *val = (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);                   \
++        return r;                                                              \
++    }
++#define I6C_GETTER(fn) fn##_u8
++#else
++#define I6C_GETTER(fn) fn
++#endif
++#endif
+diff --git a/src/infinity6c/infinity6c_state.h b/src/infinity6c/infinity6c_state.h
+index 68c0348..519acde 100644
+--- a/src/infinity6c/infinity6c_state.h
++++ b/src/infinity6c/infinity6c_state.h
+@@ -23,6 +23,7 @@
+ #define INFINITY6C_STATE_H
+ 
+ #include "hal_internal.h"
++#include "i6c_upstream_compat.h"
+ 
+ #include "i6c_aud_load.h"
+ #include "i6c_isp_load.h"

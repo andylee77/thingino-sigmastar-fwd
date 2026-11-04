@@ -1,0 +1,32 @@
+From d9cd1472a31f7ec3c6b37cf982e3367bf1d6daa6 Mon Sep 17 00:00:00 2001
+From: andylee77 <andylee77@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 16:36:13 -0400
+Subject: [PATCH 6/6] infinity6c: report ae_luma on the 0..255 scale
+
+The upstream exposure contract, and ric's night_luma, are 0..255. CUS3A's
+preAvgY is 10-bit: on the MC-A85 bench AE settled every IR-lit scene at
+410, where Ingenic's GetAeLuma settles ~100, and a dim room at ceiling
+gain read 110-130. Passed through as-is, every luma comparison in ric
+ran four times too bright. Shift it down to 8 bits.
+---
+ src/infinity6c/hal_isp.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/src/infinity6c/hal_isp.c b/src/infinity6c/hal_isp.c
+index 0a86af2..5351568 100644
+--- a/src/infinity6c/hal_isp.c
++++ b/src/infinity6c/hal_isp.c
+@@ -186,8 +186,11 @@ int hal_isp_get_exposure(void *ctx, rss_exposure_t *exposure)
+     exposure->total_gain = (uint32_t)(((uint64_t)ae.sensorGain * ae.ispGain) >> 10);
+     exposure->valid_mask |= RSS_EXPOSURE_VALID_TOTAL_GAIN;
+     /* preAvgY comes out of the same status read, so it is as valid as the
+-     * gain is -- including when the frame really is black. */
+-    exposure->ae_luma = ae.preAvgY;
++     * gain is -- including when the frame really is black. It is 10-bit
++     * (AE settles a lit scene at ~410, where Ingenic's 0..255 GetAeLuma
++     * settles ~100; MC-A85 bench 2026-10-24), and ae_luma is 0..255, the
++     * scale ric's night_luma is set in. */
++    exposure->ae_luma = ae.preAvgY >> 2;
+     exposure->valid_mask |= RSS_EXPOSURE_VALID_AE_LUMA;
+ 
+     have_awb =

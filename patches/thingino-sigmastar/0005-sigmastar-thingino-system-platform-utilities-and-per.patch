@@ -1,0 +1,499 @@
+From 2de2f494bd5962c851b69ff7e8e78251f625f4f6 Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 08:19:15 -0500
+Subject: [PATCH 05/21] sigmastar: thingino-system platform utilities and
+ per-vendor lib-serial-mac
+
+---
+ package/thingino-system/Config.in             |  13 ++
+ package/thingino-system/Config.sigmastar.in   |  15 ++
+ .../files/ingenic}/lib-serial-mac             |   0
+ .../thingino-system/files/sigmastar/S03mac    |  76 ++++++++++
+ .../files/sigmastar/lib-serial-mac            |  38 +++++
+ .../thingino-system/files/sigmastar/sensor    |  77 ++++++++++
+ package/thingino-system/files/sigmastar/soc   | 136 ++++++++++++++++++
+ .../thingino-system/files/sigmastar/usb-role  |  32 +++++
+ package/thingino-system/thingino-system.mk    |  18 +++
+ 9 files changed, 405 insertions(+)
+ create mode 100644 package/thingino-system/Config.sigmastar.in
+ rename {overlay/etc/init.d => package/thingino-system/files/ingenic}/lib-serial-mac (100%)
+ create mode 100755 package/thingino-system/files/sigmastar/S03mac
+ create mode 100644 package/thingino-system/files/sigmastar/lib-serial-mac
+ create mode 100755 package/thingino-system/files/sigmastar/sensor
+ create mode 100755 package/thingino-system/files/sigmastar/soc
+ create mode 100755 package/thingino-system/files/sigmastar/usb-role
+
+diff --git a/package/thingino-system/Config.in b/package/thingino-system/Config.in
+index 774f8a19e..2a477169a 100644
+--- a/package/thingino-system/Config.in
++++ b/package/thingino-system/Config.in
+@@ -19,6 +19,19 @@ config BR2_PACKAGE_THINGINO_SYSTEM_INGENIC
+ 	  Another vendor supplies its own block rather than teaching these
+ 	  to branch.
+ 
++config BR2_PACKAGE_THINGINO_SYSTEM_SIGMASTAR
++	default y
++	bool "SigmaStar platform utilities"
++	depends on BR2_PACKAGE_THINGINO_SYSTEM && BR2_SOC_VENDOR_SIGMASTAR
++	help
++	  soc, sensor, usb-role and S03mac, from files/sigmastar/.
++
++	  None of them touches the Ingenic registers, which fault here. soc
++	  reports the build-stamped model and family and the OTP die ID,
++	  S03mac derives the MAC from that die ID, sensor reports the
++	  configured sensor and the streamer's geometry, and usb-role is a
++	  no-op: these SoCs have no software USB role switch.
++
+ config BR2_PACKAGE_THINGINO_SYSTEM_USB_ROLE
+ 	default y
+ 	depends on BR2_PACKAGE_THINGINO_SYSTEM
+diff --git a/package/thingino-system/Config.sigmastar.in b/package/thingino-system/Config.sigmastar.in
+new file mode 100644
+index 000000000..208f12d9f
+--- /dev/null
++++ b/package/thingino-system/Config.sigmastar.in
+@@ -0,0 +1,15 @@
++# SigmaStar's half of BR2_THINGINO_SYSTEM_PACKAGES, mirroring Config.ingenic.in.
++#
++# The MI bundle is the counterpart of ingenic-sdk plus ingenic-lib, and splits
++# the same way: sigmastar-sdk is the kernel side and selects sigmastar-lib for
++# the userspace half. It belongs here rather than only under the Raptor HAL,
++# which is where it used to hang -- a board that picks a different streamer
++# still needs /dev/mi_* to exist.
++#
++# No BR2_SOC_FAMILY gate. The family is a directory inside each repo, resolved
++# by $(SOC_FAMILY)/$(SOC_FAMILY_CAPS) at install time, so a second Infinity
++# family needs no Kconfig change -- the same property BR2_PACKAGE_INGENIC_LIB
++# has.
++config BR2_THINGINO_SYSTEM_PACKAGES_SIGMASTAR
++	bool
++	select BR2_PACKAGE_SIGMASTAR_SDK
+diff --git a/overlay/etc/init.d/lib-serial-mac b/package/thingino-system/files/ingenic/lib-serial-mac
+similarity index 100%
+rename from overlay/etc/init.d/lib-serial-mac
+rename to package/thingino-system/files/ingenic/lib-serial-mac
+diff --git a/package/thingino-system/files/sigmastar/S03mac b/package/thingino-system/files/sigmastar/S03mac
+new file mode 100755
+index 000000000..fb02da8db
+--- /dev/null
++++ b/package/thingino-system/files/sigmastar/S03mac
+@@ -0,0 +1,76 @@
++#!/bin/sh
++#
++# Derive the MAC from the SoC die ID.
++#
++# S03mac.ingenic reads the Ingenic efuse at 0x13540200-0x1354023C via devmem.
++# On Infinity6E that is outside the RIU window, and CONFIG_STRICT_DEVMEM is off
++# so the read is not refused -- it returns zeros or garbage. Garbage is the bad
++# case: the script runs only when eth.mac is unset and it *persists* what it
++# computes, so one bad read becomes a permanently wrong MAC, and an unstable one
++# means a new DHCP lease every boot.
++#
++# The die ID is the only source, deliberately, even though the board ships with
++# an assigned `ethaddr` in the vendor U-Boot environment. A full sysupgrade
++# erases the whole chip, environment included, so a camera that preferred
++# `ethaddr` would run the assigned address until its first update and a derived
++# one forever after -- changing its identity on the network at the least
++# convenient moment, under a DHCP reservation made against the old value. One
++# stateless source that is identical before and after an update is worth more
++# than an assigned address that survives only until it matters.
++#
++# The die ID is 48 bits burned at the fab, so collisions are vanishingly
++# unlikely across any realistic fleet, and the result is a locally-administered
++# address that is not claiming to be globally unique in the first place.
++#
++# A user who wants the assigned address back can set it on the web UI's network
++# page, which writes eth.mac and takes precedence over everything here. Their
++# saved copy is the only record of it once the environment is gone.
++#
++# If `soc -s` cannot read the die ID this script writes nothing, and
++# /etc/network/if-pre-up.d/set_mac_address falls back to `ethaddr` at the point
++# of use. Silence here is a working degradation, not a failure.
++#
++# wlan.mac is deliberately not derived. This board has no wifi.
++
++CONFIG_JSON="/etc/thingino.json"
++
++command -v jct >/dev/null 2>&1 || exit 0
++
++# Already set, nothing to do. This is what makes the web UI override stick.
++jct "$CONFIG_JSON" get eth.mac >/dev/null 2>&1 && exit 0
++
++# 48 bits of die ID into 40 bits of address, because the 02: prefix is fixed by
++# thingino's convention and costs a byte. The high word is lot and wafer and is
++# the least varying of the three, so it is the one folded; the low two words
++# carry the per-die X/Y and come through whole.
++#
++# The last byte is forced odd so that a wlan.mac of eth.mac + 1 can never carry
++# into the byte above. This board has no wifi, but the convention is shared and
++# breaking it here would surprise the next SigmaStar camera.
++#
++# `soc -s` prints nothing unless the generation tag matches and the die ID is
++# neither all-zero nor all-ones, so a printed value is always usable and the
++# length check below is the only guard needed.
++mac_from_die_id() {
++	die_id=$(soc -s 2>/dev/null) || return 1
++	[ ${#die_id} -eq 12 ] || return 1
++
++	a=$(printf '%d' "0x${die_id%????????}")
++	b=$(printf '%d' "0x$(echo "$die_id" | cut -c5-8)")
++	c=$(printf '%d' "0x$(echo "$die_id" | cut -c9-12)")
++
++	m1=$(( ((a >> 8) ^ (a & 255)) & 255 ))
++	m2=$(( (b >> 8) & 255 ))
++	m3=$(( b & 255 ))
++	m4=$(( (c >> 8) & 255 ))
++	m5=$(( (c & 255) | 1 ))
++
++	printf '02:%02x:%02x:%02x:%02x:%02x\n' "$m1" "$m2" "$m3" "$m4" "$m5"
++}
++
++eth_mac=$(mac_from_die_id) || exit 0
++[ -n "$eth_mac" ] || exit 0
++
++echo -c 240 -e "- ETH MAC from SoC die ID: $eth_mac"
++
++jct "$CONFIG_JSON" set eth.mac "$eth_mac"
+diff --git a/package/thingino-system/files/sigmastar/lib-serial-mac b/package/thingino-system/files/sigmastar/lib-serial-mac
+new file mode 100644
+index 000000000..129d27684
+--- /dev/null
++++ b/package/thingino-system/files/sigmastar/lib-serial-mac
+@@ -0,0 +1,38 @@
++#!/bin/sh
++# shellcheck disable=SC2034
++#
++# Unit ID -> MAC bytes, for S04hostname. Sourced, not an init entry point.
++#
++# The OTP die ID where soc can read it (S03mac's derivation); otherwise the
++# address the Ethernet driver comes up with. S04hostname runs before
++# S40network applies any configured MAC, so that one is the board's own.
++
++# Sets m1..m5; returns 1 when neither source is available.
++derive_serial_mac() {
++	die_id=$(soc -s 2>/dev/null)
++	if [ ${#die_id} -eq 12 ]; then
++		a=$(printf '%d' "0x${die_id%????????}")
++		b=$(printf '%d' "0x$(echo "$die_id" | cut -c5-8)")
++		c=$(printf '%d' "0x$(echo "$die_id" | cut -c9-12)")
++
++		m1=$((((a >> 8) ^ (a & 255)) & 255))
++		m2=$(((b >> 8) & 255))
++		m3=$((b & 255))
++		m4=$(((c >> 8) & 255))
++		m5=$(((c & 255) | 1))
++		return 0
++	fi
++
++	mac=$(cat /sys/class/net/eth0/address 2>/dev/null)
++	[ ${#mac} -eq 17 ] && [ "$mac" != "00:00:00:00:00:00" ] || return 1
++
++	IFS=: read -r _ b2 b3 b4 b5 b6 <<EOF
++$mac
++EOF
++	m1=$((0x$b2))
++	m2=$((0x$b3))
++	m3=$((0x$b4))
++	m4=$((0x$b5))
++	m5=$((0x$b6))
++	return 0
++}
+diff --git a/package/thingino-system/files/sigmastar/sensor b/package/thingino-system/files/sigmastar/sensor
+new file mode 100755
+index 000000000..5f2e1f7e1
+--- /dev/null
++++ b/package/thingino-system/files/sigmastar/sensor
+@@ -0,0 +1,77 @@
++#!/bin/sh
++#
++# SigmaStar replacement for thingino-system's `sensor`.
++#
++# The stock helper is a thin reader over /proc/jz/sensor/, which is created by
++# Ingenic's tx-isp driver and does not exist here -- it exits 1 with
++# "/proc/jz/sensor does not exist." on every call. Unlike `soc` this one is
++# harmless (no devmem, so no fault), but it reports nothing useful.
++#
++# The equivalent facts on SigmaStar come from two places:
++#   name    - the U-Boot `sensor` variable, falling back to the build-time name
++#             at /usr/share/sensor/model: there is no native i2c probe for
++#             SigmaStar yet, and a full sysupgrade erases the variable.
++#   width,  - the running streamer's config. raptorctl reads the live values
++#   height,   from rvd, so these follow a runtime change rather than the
++#   fps       build-time defconfig.
++#
++# See the header of overlay/usr/sbin/soc for why this is a camera overlay
++# rather than a package.
++
++sensor_name() {
++	n=$(fw_printenv -n sensor 2>/dev/null)
++	[ -n "$n" ] || n=$(cat /usr/share/sensor/model 2>/dev/null)
++	printf '%s' "$n"
++}
++
++raptor_get() {
++	v=$(raptorctl config get "$1" "$2" 2>/dev/null | tr -d '\r\n"')
++	# An unset key in [sensor] reads back as 0, not as empty. Report it as no
++	# value, or the stream0 fallback below never runs.
++	[ "$v" = "0" ] && return
++	printf '%s' "$v"
++}
++
++param="${1:-all}"
++idx="${2:-0}"
++
++# One MIPI sensor on this platform. The multi-sensor [sensor0]/[sensor1] path
++# exists in raptor.conf but is not brought up on this board, so anything past
++# index 0 is reported as absent rather than silently answered with sensor 0.
++if [ "$idx" != "0" ]; then
++	echo "sensor$idx is not registered." >&2
++	exit 1
++fi
++
++case "$param" in
++	count)
++		echo 1
++		;;
++	name)
++		n=$(sensor_name)
++		[ -n "$n" ] || { echo "sensor name unavailable" >&2; exit 1; }
++		echo "$n"
++		;;
++	width | height | fps)
++		v=$(raptor_get sensor "$param")
++		[ -n "$v" ] || v=$(raptor_get stream0 "$param")
++		[ -n "$v" ] || { echo "$param unavailable" >&2; exit 1; }
++		echo "$v"
++		;;
++	all | -a)
++		n=$(sensor_name)
++		[ -n "$n" ] || n="unknown"
++		printf '%-16s %s\n' "name:" "$n"
++		for p in width height fps; do
++			v=$(raptor_get sensor "$p")
++			[ -n "$v" ] || v=$(raptor_get stream0 "$p")
++			[ -n "$v" ] && printf '%-16s %s\n' "$p:" "$v"
++		done
++		;;
++	*)
++		echo "Usage: $0 [all|count|name|width|height|fps] [sensor_index]" >&2
++		exit 1
++		;;
++esac
++
++exit 0
+diff --git a/package/thingino-system/files/sigmastar/soc b/package/thingino-system/files/sigmastar/soc
+new file mode 100755
+index 000000000..04cb028ce
+--- /dev/null
++++ b/package/thingino-system/files/sigmastar/soc
+@@ -0,0 +1,136 @@
++#!/bin/sh
++#
++# SigmaStar replacement for thingino-system's `soc`.
++#
++# The stock helper reads Ingenic identification registers with devmem
++# (0x1300002C, 0x13540231, 0x13540238, 0x13540250, 0x1354021C and four serial
++# words at 0x135402xx). None of those addresses is inside the Infinity6E RIU
++# window, so on this SoC every one of them takes an external abort:
++#
++#   Unhandled fault: external abort on non-linefetch (0x008) at 0xb6eb8200
++#
++# That is the source of the unhandled faults seen once per caller per boot --
++# S04hostname, S48webui-config and S96onvif_discovery each invoke it. The reads
++# do not merely fail, they fault, and STRICT_DEVMEM is off so nothing stops them.
++#
++# This replacement uses no devmem at all. Everything it reports comes from
++# /etc/os-release (stamped at build time by scripts/rootfs_script.sh) or from
++# procfs.
++#
++# Everything here is vendor-level: the model and family are read from the
++# build-stamped /etc/os-release, so a second SigmaStar family needs no change.
++
++# Overridable so the parsing can be exercised off-target.
++OS_RELEASE="${OS_RELEASE:-/etc/os-release}"
++
++os_release_value() {
++	[ -r "$OS_RELEASE" ] || return 0
++	sed -rn "s/^$1=\"?([^\"]*)\"?$/\1/p" "$OS_RELEASE" | head -n1
++}
++
++# Build-stamped like the family below. The fallback is the first board this
++# file served, for an image built before SOC_MODEL was stamped.
++print_soc_model() {
++	model=$(os_release_value SOC_MODEL)
++	[ -n "$model" ] || model="ssc30kq"
++	echo "$model"
++}
++
++# Build-stamped, so it tracks the defconfig rather than being repeated here.
++print_soc_family() {
++	family=$(os_release_value SOC)
++	[ -n "$family" ] || family="infinity6e"
++	echo "$family"
++}
++
++print_soc_architecture() {
++	arch=$(os_release_value ARCHITECTURE)
++	[ -n "$arch" ] || arch=$(uname -m)
++	echo "$arch"
++}
++
++print_soc_clocks() {
++	freq=""
++	for f in /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_cur_freq \
++		/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq; do
++		[ -r "$f" ] && freq=$(cat "$f" 2>/dev/null) && break
++	done
++	if [ -n "$freq" ]; then
++		echo "CPU Speed: $((freq / 1000)) MHz"
++	else
++		# No cpufreq driver on this kernel. Say so rather than printing a
++		# guess -- a wrong clock is worse than an absent one.
++		echo "CPU Speed: unknown"
++	fi
++}
++
++# The 48-bit OTP die ID, burned at the fab and read-only. Three consecutive
++# 16-bit RIU registers; only the low half of each is part of the ID, which is
++# the detail a naive port of the Ingenic helper gets wrong -- that one feeds
++# whole 32-bit efuse words into its arithmetic.
++#
++# These addresses are inside the Infinity6E RIU window, unlike the Ingenic ones
++# this file exists to avoid, so they read rather than fault. Verified on
++# hardware: the generation tag reads 0xF1 and the ID is non-degenerate.
++#
++# Two reads have to be rejected rather than used. An all-zero ID means the
++# generation has none (some SigmaStar parts genuinely do not), and an all-ones
++# ID means unprogrammed OTP. Either would be identical on every unit, and a
++# caller that persists what it gets -- S03mac does -- would bake a shared
++# identity into the fleet.
++OTP_GENERATION=0x1F003C00
++OTP_DIE_ID_A=0x1F203158
++OTP_DIE_ID_B=0x1F203154
++OTP_DIE_ID_C=0x1F203150
++
++read_reg16() {
++	v=$(devmem "$1" 32 2>/dev/null) || return 1
++	[ -n "$v" ] || return 1
++	printf '%d' $(( v & 0xFFFF ))
++}
++
++print_serial_number() {
++	command -v devmem >/dev/null 2>&1 || return 0
++
++	# Refuse to read the ID registers unless this really is an Infinity6E.
++	gen=$(read_reg16 "$OTP_GENERATION") || return 0
++	[ "$gen" = "241" ] || return 0
++
++	a=$(read_reg16 "$OTP_DIE_ID_A") || return 0
++	b=$(read_reg16 "$OTP_DIE_ID_B") || return 0
++	c=$(read_reg16 "$OTP_DIE_ID_C") || return 0
++
++	[ "$a" -eq 0 ] && [ "$b" -eq 0 ] && [ "$c" -eq 0 ] && return 0
++	[ "$a" -eq 65535 ] && [ "$b" -eq 65535 ] && [ "$c" -eq 65535 ] && return 0
++
++	printf '%04X%04X%04X\n' "$a" "$b" "$c"
++}
++
++print_wiki_line() {
++	printf '%s\t%s\t%s\n' "$(print_soc_model)" "$(print_soc_family)" \
++		"$(print_soc_architecture)"
++}
++
++show_usage() {
++	echo "Usage: $0 [-c|-f|-m|-w|-a|-s]
++	-m	SoC model
++	-f	SoC family
++	-w	raw info for wiki
++	-a	CPU architecture
++	-c	CPU Clocks
++	-s	Serial number (unavailable on SigmaStar, prints nothing)
++" >&2
++}
++
++case "$1" in
++	-c) print_soc_clocks ;;
++	-f) print_soc_family ;;
++	-m) print_soc_model ;;
++	-w) print_wiki_line ;;
++	-a) print_soc_architecture ;;
++	-s) print_serial_number ;;
++	"") print_soc_model ;;
++	*) show_usage ;;
++esac
++
++exit 0
+diff --git a/package/thingino-system/files/sigmastar/usb-role b/package/thingino-system/files/sigmastar/usb-role
+new file mode 100755
+index 000000000..f019a021c
+--- /dev/null
++++ b/package/thingino-system/files/sigmastar/usb-role
+@@ -0,0 +1,32 @@
++#!/bin/sh
++#
++# Infinity6E exposes no software USB role switch, so there is nothing to set.
++# Exits 0 for every argument: S05usb treats a non-zero status as a failure to
++# configure the controller and logs it, and a control that does not exist is
++# not a failure.
++
++show_help() {
++	echo "Usage: $0 [-m host|device]
++Options:
++	-m    Set the USB mode to either 'host' or 'device'.
++	-h    Display this help message.
++" >&2
++	exit 0
++}
++
++while getopts ":m:h" opt; do
++	case $opt in
++		m) MODE=$OPTARG ;;
++		h) show_help ;;
++		\?) show_help ;;
++		:) show_help ;;
++	esac
++done
++
++if [ -z "$MODE" ]; then
++	echo "No software role switch on this SoC" >&2
++else
++	echo "No software role switch on this SoC, ignoring -m $MODE" >&2
++fi
++
++exit 0
+diff --git a/package/thingino-system/thingino-system.mk b/package/thingino-system/thingino-system.mk
+index c2f9b439a..e7a7fe39a 100644
+--- a/package/thingino-system/thingino-system.mk
++++ b/package/thingino-system/thingino-system.mk
+@@ -103,6 +103,8 @@ define THINGINO_SYSTEM_INSTALL_TARGET_CMDS
+ 			$(TARGET_DIR)/usr/sbin/soc; \
+ 		$(INSTALL) -D -m 0755 $(THINGINO_SYSTEM_PKGDIR)/files/ingenic/S03mac \
+ 			$(TARGET_DIR)/etc/init.d/S03mac; \
++		$(INSTALL) -D -m 0644 $(THINGINO_SYSTEM_PKGDIR)/files/ingenic/lib-serial-mac \
++			$(TARGET_DIR)/etc/init.d/lib-serial-mac; \
+ 		if [ "$(BR2_PACKAGE_THINGINO_SYSTEM_USB_ROLE)" = "y" ]; then \
+ 			$(INSTALL) -D -m 0755 $(THINGINO_SYSTEM_PKGDIR)/files/ingenic/usb-role \
+ 				$(TARGET_DIR)/usr/sbin/usb-role; \
+@@ -112,6 +114,22 @@ define THINGINO_SYSTEM_INSTALL_TARGET_CMDS
+ 				$(TARGET_DIR)/usr/sbin/sensor; \
+ 		fi; \
+ 	fi
++	if [ "$(BR2_PACKAGE_THINGINO_SYSTEM_SIGMASTAR)" = "y" ]; then \
++		$(INSTALL) -D -m 0755 $(THINGINO_SYSTEM_PKGDIR)/files/sigmastar/soc \
++			$(TARGET_DIR)/usr/sbin/soc; \
++		$(INSTALL) -D -m 0755 $(THINGINO_SYSTEM_PKGDIR)/files/sigmastar/S03mac \
++			$(TARGET_DIR)/etc/init.d/S03mac; \
++		$(INSTALL) -D -m 0644 $(THINGINO_SYSTEM_PKGDIR)/files/sigmastar/lib-serial-mac \
++			$(TARGET_DIR)/etc/init.d/lib-serial-mac; \
++		if [ "$(BR2_PACKAGE_THINGINO_SYSTEM_USB_ROLE)" = "y" ]; then \
++			$(INSTALL) -D -m 0755 $(THINGINO_SYSTEM_PKGDIR)/files/sigmastar/usb-role \
++				$(TARGET_DIR)/usr/sbin/usb-role; \
++		fi; \
++		if [ "$(BR2_PACKAGE_THINGINO_SYSTEM_SENSOR_UTILS)" = "y" ]; then \
++			$(INSTALL) -D -m 0755 $(THINGINO_SYSTEM_PKGDIR)/files/sigmastar/sensor \
++				$(TARGET_DIR)/usr/sbin/sensor; \
++		fi; \
++	fi
+ endef
+ 
+ $(eval $(generic-package))

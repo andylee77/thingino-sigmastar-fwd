@@ -1,0 +1,1186 @@
+From 1969dfa06deea4d1769052a1bfd7ac529b671daa Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 08:19:16 -0500
+Subject: [PATCH 15/21] thingino-lensd: AF feed, ONVIF PTZ, serial IR-cut,
+ Pelco-D (lensd -P)
+
+---
+ package/thingino-lensd/Config.in            |  21 +
+ package/thingino-lensd/files/S33lensd       |  72 +++
+ package/thingino-lensd/files/lensctl        | 204 ++++++
+ package/thingino-lensd/files/lensd.c        | 676 ++++++++++++++++++++
+ package/thingino-lensd/files/onvif-ptz.json |  25 +
+ package/thingino-lensd/files/raptor-hook    |   6 +
+ package/thingino-lensd/files/stock_af.h     |  53 ++
+ package/thingino-lensd/thingino-lensd.mk    |  56 ++
+ 8 files changed, 1113 insertions(+)
+ create mode 100644 package/thingino-lensd/Config.in
+ create mode 100755 package/thingino-lensd/files/S33lensd
+ create mode 100755 package/thingino-lensd/files/lensctl
+ create mode 100644 package/thingino-lensd/files/lensd.c
+ create mode 100644 package/thingino-lensd/files/onvif-ptz.json
+ create mode 100755 package/thingino-lensd/files/raptor-hook
+ create mode 100644 package/thingino-lensd/files/stock_af.h
+ create mode 100644 package/thingino-lensd/thingino-lensd.mk
+
+diff --git a/package/thingino-lensd/Config.in b/package/thingino-lensd/Config.in
+new file mode 100644
+index 000000000..418ad5922
+--- /dev/null
++++ b/package/thingino-lensd/Config.in
+@@ -0,0 +1,21 @@
++config BR2_PACKAGE_THINGINO_LENSD
++	bool "thingino-lensd"
++	depends on BR2_SOC_VENDOR_SIGMASTAR
++	# Both install /usr/bin/motors: thingino-motors drives SoC-side steppers,
++	# this a Pelco-D board that keeps its own positions.
++	depends on !BR2_PACKAGE_THINGINO_MOTORS
++	select BR2_PACKAGE_SIGMASTAR_LIB
++	help
++	  Daemon for SigmaStar PTZ modules whose zoom/focus board runs its
++	  own focus search (the JL12D2's CAM-YS183, Pelco-D at 57600 on
++	  the FUART, /dev/ttyS2). The board only focuses if the SoC
++	  streams it two focus values from the ISP's AF statistics once
++	  per frame, as the vendor firmware does; lensd applies the
++	  vendor's AF window and filter config, streams those values, and
++	  passes zoom, focus, pan, tilt and preset commands to the board.
++
++	  lensctl is its command line and the backend of the ONVIF
++	  server's PTZ section: continuous pan/tilt/zoom, stop, zoom
++	  position, and presets the board stores itself. There is no
++	  pan/tilt position feedback, so absolute and relative moves are
++	  not offered.
+diff --git a/package/thingino-lensd/files/S33lensd b/package/thingino-lensd/files/S33lensd
+new file mode 100755
+index 000000000..4476d19b1
+--- /dev/null
++++ b/package/thingino-lensd/files/S33lensd
+@@ -0,0 +1,72 @@
++#!/bin/sh
++# S33lensd -- feed the lens board its per-frame AF data and pass it PTZ
++# commands from /run/lensd.cmd (JL12D2 / CAM-YS183 on /dev/ttyS2). Raptor's
++# init script also stops it before rvd goes down and starts it once rvd is
++# back (/etc/raptor.d/lensd).
++
++DAEMON=/usr/sbin/lensd
++PIDFILE=/run/lensd.pid
++NAME=lensd
++LENSD_ARGS=""
++# per-camera args (e.g. -P for the N803 pelco-only head)
++[ -r /etc/default/lensd ] && . /etc/default/lensd
++ONVIF_CONFIG=/etc/onvif.json
++ONVIF_PTZ=/usr/share/lensd/onvif-ptz.json
++
++# Point the ONVIF server's ptz section at lensctl. With no position feedback,
++# absolute and relative moves are refused rather than faked.
++onvif_ptz() {
++	[ -f "$ONVIF_CONFIG" ] && [ -f "$ONVIF_PTZ" ] || return 0
++	jct "$ONVIF_CONFIG" import "$ONVIF_PTZ" >/dev/null 2>&1
++	jct "$ONVIF_CONFIG" del ptz.jump_to_abs >/dev/null 2>&1
++	jct "$ONVIF_CONFIG" del ptz.jump_to_rel >/dev/null 2>&1
++}
++
++start() {
++	[ -x "$DAEMON" ] || return 0
++	onvif_ptz
++	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
++		echo "$NAME already running"
++		return 0
++	fi
++	echo "Starting $NAME..."
++	start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $LENSD_ARGS
++}
++
++# Waits for the exit: the raptor hook needs lensd gone before rvd stops.
++stop() {
++	echo "Stopping $NAME..."
++	pid=$(cat "$PIDFILE" 2>/dev/null)
++	[ -n "$pid" ] || pid=$(pidof lensd)
++	rm -f "$PIDFILE"
++	[ -n "$pid" ] || return 0
++	kill $pid 2>/dev/null
++	i=0
++	while [ $i -lt 30 ] && kill -0 $pid 2>/dev/null; do
++		usleep 100000
++		i=$((i + 1))
++	done
++	if kill -0 $pid 2>/dev/null; then
++		kill -9 $pid 2>/dev/null
++	fi
++	return 0
++}
++
++case "$1" in
++	start)
++		start
++		;;
++	stop)
++		stop
++		;;
++	restart)
++		stop
++		start
++		;;
++	*)
++		echo "Usage: $0 {start|stop|restart}" >&2
++		exit 1
++		;;
++esac
++
++exit 0
+diff --git a/package/thingino-lensd/files/lensctl b/package/thingino-lensd/files/lensctl
+new file mode 100755
+index 000000000..054a653ef
+--- /dev/null
++++ b/package/thingino-lensd/files/lensctl
+@@ -0,0 +1,204 @@
++#!/bin/sh
++# lensctl -- drive lensd (the JL12D2's Pelco-D lens/PTZ board) from the shell.
++# It is also the backend the ONVIF server's ptz section runs
++# (/usr/share/lensd/onvif-ptz.json).
++#
++#   lensctl left|right|up|down|up_left|up_right|down_left|down_right [speed] [ms=N]
++#   lensctl zoom_in|zoom_out|focus_near|focus_far [ms=N]
++#   lensctl stop
++#   lensctl pan <x> | tilt <y> | pantilt <x> <y>
++#                        ONVIF continuous moves: the sign picks the direction,
++#                        the size the speed (stock's floor(10|v|) + 1)
++#   lensctl position     0,0,<zoom 0-65535> (pan and tilt have no feedback)
++#   lensctl moving       1 or 0
++#   lensctl status       lensd's status file
++#   lensctl presets      <slot>,0,0,<name> per stored preset
++#   lensctl preset_set <slot> [name] | preset_goto <slot> | preset_clear <slot>
++#   lensctl preset_rename <slot> <name>   rename only; the position stays
++#   lensctl home | home_set
++#
++# The board stores positions in presets 1-32 only: a set or call of 33 is
++# ignored (bench, 2026-10-26), and some higher numbers are functions (35/36
++# scan margins, 38 area scan, 41 cruise, 64, 92/94 human trace, 107, 255).
++# So preset slots 0-30 are board presets 1-31 and home is board preset 32.
++# The board keeps the positions; the names live in $NAMES. Calling an empty
++# board preset does nothing, so `home` refuses (exit 2) until home_set has
++# stored one; $HOME_SET records which board preset holds it, and a marker
++# for any other preset (an older lensctl used the ignored 33) does not count.
++
++FIFO=/run/lensd.cmd
++STATUS=/run/lensd.status
++NAMES=/etc/lensd/presets
++HOME_SET=/etc/lensd/home
++SLOTS=31
++HOME_PRESET=32
++SPEED=5
++
++send() {
++	if ! pidof lensd >/dev/null; then
++		echo "lensctl: lensd is not running" >&2
++		exit 1
++	fi
++	# A read-write open of a FIFO never blocks, even if lensd just exited.
++	echo "$*" 1<>"$FIFO"
++}
++
++status_get() {
++	sed -n "s/^$1=//p" "$STATUS" 2>/dev/null
++}
++
++# ONVIF passes machine units as %f; the sign picks the direction...
++sign() {
++	case "$1" in
++	-*[1-9]*) echo - ;;
++	*[1-9]*) echo + ;;
++	*) echo 0 ;;
++	esac
++}
++
++# ...and the size the speed level, as stock maps a velocity: floor(10|v|) + 1,
++# capped at 10 (ONVIF velocities run 0-1; Frigate's arrows send 0.5 = 6).
++level() {
++	local a=${1#-} i f l
++	i=${a%%.*}
++	f=${a#"$i"}
++	f=${f#.}
++	f=$(printf '%.1s' "${f:-0}")
++	case "${i:-0}$f" in
++	*[!0-9]*)
++		echo $SPEED
++		return
++		;;
++	esac
++	l=$((${i:-0} * 10 + f + 1))
++	[ $l -gt 10 ] && l=10
++	echo $l
++}
++
++slot() {
++	case "$1" in
++	'' | *[!0-9]*)
++		echo "lensctl: bad preset slot '$1'" >&2
++		exit 1
++		;;
++	esac
++	if [ "$1" -ge "$SLOTS" ]; then
++		echo "lensctl: preset slots are 0-$((SLOTS - 1))" >&2
++		exit 1
++	fi
++}
++
++case "$1" in
++left | right | up | down | up_left | up_right | down_left | down_right | \
++	zoom_in | zoom_out | focus_near | focus_far | query | raw | trace)
++	send "$@"
++	;;
++stop)
++	# ONVIF says which axes ("all", "pantilt", "zoom"); a Pelco-D stop is all.
++	send stop
++	;;
++pan)
++	s=$(level "$2")
++	case $(sign "$2") in
++	+) send right "$s" ;;
++	-) send left "$s" ;;
++	*) send stop ;;
++	esac
++	;;
++tilt)
++	s=$(level "$2")
++	case $(sign "$2") in
++	+) send up "$s" ;;
++	-) send down "$s" ;;
++	*) send stop ;;
++	esac
++	;;
++pantilt)
++	# One Pelco-D speed for a diagonal: the faster axis's.
++	s=$(level "$2")
++	t=$(level "$3")
++	[ "$t" -gt "$s" ] && s=$t
++	case $(sign "$2")$(sign "$3") in
++	++) send up_right "$s" ;;
++	+-) send down_right "$s" ;;
++	-+) send up_left "$s" ;;
++	--) send down_left "$s" ;;
++	+0) send right "$s" ;;
++	-0) send left "$s" ;;
++	0+) send up "$s" ;;
++	0-) send down "$s" ;;
++	*) send stop ;;
++	esac
++	;;
++position)
++	z=$(status_get zoom)
++	[ "${z:--1}" -ge 0 ] 2>/dev/null || z=0
++	echo "0,0,$z"
++	;;
++moving)
++	m=$(status_get moving)
++	echo "${m:-0}"
++	;;
++status)
++	cat "$STATUS"
++	;;
++presets)
++	[ -f "$NAMES" ] || exit 0
++	sort -t, -k1,1n "$NAMES" | while IFS=, read -r n name; do
++		echo "$n,0,0,$name"
++	done
++	;;
++preset_set)
++	slot "$2"
++	n=$2
++	shift 2
++	name=$*
++	send preset_set $((n + 1))
++	mkdir -p "${NAMES%/*}"
++	{
++		grep -v "^$n," "$NAMES" 2>/dev/null
++		echo "$n,${name:-Preset $n}"
++	} >"$NAMES.tmp" && mv "$NAMES.tmp" "$NAMES"
++	;;
++preset_goto)
++	slot "$2"
++	send preset_goto $(($2 + 1))
++	;;
++preset_clear)
++	slot "$2"
++	send preset_clear $(($2 + 1))
++	if [ -f "$NAMES" ]; then
++		grep -v "^$2," "$NAMES" >"$NAMES.tmp"
++		mv "$NAMES.tmp" "$NAMES"
++	fi
++	;;
++preset_rename)
++	slot "$2"
++	n=$2
++	shift 2
++	grep -q "^$n," "$NAMES" 2>/dev/null || {
++		echo "lensctl: no preset in slot $n" >&2
++		exit 1
++	}
++	{
++		grep -v "^$n," "$NAMES"
++		echo "$n,${*:-Preset $n}"
++	} >"$NAMES.tmp" && mv "$NAMES.tmp" "$NAMES"
++	;;
++home)
++	if [ "$(cat "$HOME_SET" 2>/dev/null)" != "$HOME_PRESET" ]; then
++		echo "lensctl: no home position stored yet (lensctl home_set)" >&2
++		exit 2
++	fi
++	send preset_goto $HOME_PRESET
++	;;
++home_set)
++	send preset_set $HOME_PRESET
++	mkdir -p "${HOME_SET%/*}"
++	echo $HOME_PRESET >"$HOME_SET"
++	;;
++*)
++	sed -n '2,/^$/s/^# \{0,1\}//p' "$0" >&2
++	exit 1
++	;;
++esac
+diff --git a/package/thingino-lensd/files/lensd.c b/package/thingino-lensd/files/lensd.c
+new file mode 100644
+index 000000000..84ce6db25
+--- /dev/null
++++ b/package/thingino-lensd/files/lensd.c
+@@ -0,0 +1,676 @@
++/*
++ * lensd -- feed the JL12D2 lens board (CAM-YS183 MCU on /dev/ttyS2) the way
++ * the stock firmware does, so its autofocus works, and pass zoom/focus/PTZ
++ * commands to it.
++ *
++ * The lens board runs the focus search itself; it needs, once per frame, the
++ * two focus values the SoC's AF statistics give. Everything here was measured
++ * on a running stock unit (V3.3.2.4), not inferred:
++ *
++ *   port     57600 8N1 raw, VMIN = VTIME = 0
++ *   startup  "END"+0xD7 x8 at 60 ms, then "VER"+0xED (reply: version text)
++ *   frame    51 01 04 78 01 0d FVa_H FVa_L FVb_H FVb_L 01 DN 03 NP 00 CK
++ *            CK = sum(bytes 0..14) & 0xff; DN = day/night (00 day / 01 night),
++ *            NP = night param (00 day / 32 night). The integrated IR-cut/AF/zoom
++ *            head drives the physical IR-cut filter from DN -- this is what the
++ *            stock comm_server sends; gpio /dev/irled is vestigial on the PTZ.
++ *            Set DN with the "day" / "night" FIFO command.
++ *   FVx      (field0 + field1 + field3 + field4 of AF window x) >> 9,
++ *            window 0 for FVa, window 1 for FVb (40-bit counters, 5 fields x
++ *            16 windows); fit to the wire with a relative error of 1e-4
++ *   AF setup stock's window/filter/filter-sq structs (stock_af.h); without
++ *            them the vendor default 4x4 grid gives values ~100x smaller
++ *
++ * Commands, one per line on the FIFO (default /run/lensd.cmd):
++ *   zoom_in | zoom_out | focus_near | focus_far [ms=N]
++ *   left | right | up | down | up_left | up_right | down_left | down_right
++ *       [speed 1-10, default 5, stock's scale] [ms=N]
++ *   stop | query | preset_set N | preset_goto N | preset_clear N
++ *   trace [secs] | raw <hex bytes...>
++ *
++ * A move runs until "stop", for ms=N if given (repeating the same move
++ * restarts that clock without resending it), and never past MAX_MOVE_MS.
++ * State goes to the status file (default /run/lensd.status), key=value:
++ * moving (0/1), motion (the running move or "none"), zoom (0 wide .. 65535
++ * tele, from the position query; -1 until the first reply), zoom_step (the
++ * board's own 1-30 zoom number; -1 until it first zooms).
++ *
++ *   lensd [-p /dev/ttyS2] [-f /run/lensd.cmd] [-s /run/lensd.status] [-r 25] [-v] [-P]
++ *
++ * -P (pelco-only): for a manual-focus Pelco-D head like the N803-HS5X, where
++ * the board takes Pelco-D zoom/focus/PTZ commands but has no SoC-fed autofocus.
++ * Skips the ISP AF-stats load, the END/VER handshake and the per-frame AF feed;
++ * the daemon then just runs the FIFO -> Pelco-D command path. (The N803's own
++ * 51 01 04 78 01 0d stream is its status telemetry, not a command.)
++ */
++#include <dlfcn.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <stdarg.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <syslog.h>
++#include <termios.h>
++#include <time.h>
++#include <unistd.h>
++
++#include "stock_af.h"
++
++typedef int (*mi_get_fn)(unsigned int dev, unsigned int chn, void *data);
++
++static struct {
++	mi_get_fn get_stats, get_window;
++	mi_get_fn set_window, set_filter, set_filter_sq;
++} isp;
++
++static int verbose;
++static int pelco_only;		/* -P: Pelco-D only (N803 manual-focus head); no AF feed/ISP */
++static long trace_until;	/* "trace <secs>": log every frame's FVs until then */
++
++static void logm(int prio, const char *fmt, ...)
++{
++	va_list ap;
++
++	if (prio == LOG_DEBUG && !verbose)
++		return;
++	va_start(ap, fmt);
++	vsyslog(prio, fmt, ap);
++	va_end(ap);
++	if (verbose) {
++		va_start(ap, fmt);
++		vfprintf(stderr, fmt, ap);
++		fputc('\n', stderr);
++		va_end(ap);
++	}
++}
++
++static long now_ms(void)
++{
++	struct timespec ts;
++
++	clock_gettime(CLOCK_MONOTONIC, &ts);
++	return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
++}
++
++static uint64_t u40(const uint8_t *p)
++{
++	return (uint64_t)p[0] | (uint64_t)p[1] << 8 | (uint64_t)p[2] << 16 |
++	       (uint64_t)p[3] << 24 | (uint64_t)p[4] << 32;
++}
++
++/* ric still pulses gpio 80 (day) / 11 (night) on each day/night transition
++ * (vestigial for the filter -- D5 is unwired -- but a clean day/night signal).
++ * Read them: 80 high = day, 11 high = night, both low (rest) = hold last mode.
++ * We mirror that into AF-frame byte 11, which is what actually moves the
++ * physical IR-cut filter in the head. */
++#define IRCUT_DAY_GPIO   80
++#define IRCUT_NIGHT_GPIO 11
++
++static int gpio_val(int pin)
++{
++	char path[64], c = 0;
++	int fd, r;
++
++	snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/value", pin);
++	fd = open(path, O_RDONLY);
++	if (fd < 0)
++		return -1;
++	r = read(fd, &c, 1);
++	close(fd);
++	return r == 1 ? (c == '1') : -1;
++}
++
++/* ---- serial ---------------------------------------------------------- */
++
++static int port_open(const char *dev)
++{
++	struct termios tio;
++	int fd = open(dev, O_RDWR | O_NOCTTY | O_NONBLOCK);
++
++	if (fd < 0)
++		return -1;
++	memset(&tio, 0, sizeof(tio));
++	tio.c_cflag = CREAD | CLOCAL | CS8;
++	cfsetispeed(&tio, B57600);
++	cfsetospeed(&tio, B57600);
++	tio.c_cc[VMIN] = 0;
++	tio.c_cc[VTIME] = 0;
++	tcsetattr(fd, TCSANOW, &tio);
++	tcflush(fd, TCIOFLUSH);
++	return fd;
++}
++
++static void put(int fd, const unsigned char *b, size_t n)
++{
++	size_t done = 0;
++	int tries;
++
++	for (tries = 0; done < n && tries < 50; tries++) {
++		ssize_t w = write(fd, b + done, n - done);
++
++		if (w > 0)
++			done += (size_t)w;
++		else
++			usleep(1000);
++	}
++}
++
++static void sum_tail(unsigned char *b, size_t n)
++{
++	unsigned int s = 0;
++	size_t i;
++
++	for (i = 0; i < n - 1; i++)
++		s += b[i];
++	b[n - 1] = (unsigned char)s;
++}
++
++/* Pelco-D, address 1, with the speed bytes the stock comm_server sends: the
++ * board ignores a zoom whose speed bytes are both zero. */
++static void pelco(int fd, unsigned char c1, unsigned char c2, unsigned char d1, unsigned char d2)
++{
++	unsigned char f[7] = {0xff, 0x01, c1, c2, d1, d2, 0};
++
++	f[6] = (unsigned char)(f[1] + f[2] + f[3] + f[4] + f[5]);
++	put(fd, f, sizeof(f));
++}
++
++/* Answered with 51 01 04 78 90 06 <pan16> <tilt16> <zoom16> <ck>; pan and
++ * tilt are always 0 (the head has no position feedback), zoom runs 0x0000 at
++ * the wide end to 0xffff at the tele end. */
++static const unsigned char query9a[7] = {0xff, 0x01, 0x9a, 0x00, 0x00, 0x00, 0x9b};
++
++static void stop_all(int fd)
++{
++	int i;
++
++	/* stock: a position query, then the stop five times, ~50 ms apart */
++	put(fd, query9a, sizeof(query9a));
++	usleep(10000);
++	for (i = 0; i < 5; i++) {
++		pelco(fd, 0x00, 0x00, 0x00, 0x00);
++		usleep(50000);
++	}
++}
++
++/* ---- state ------------------------------------------------------------- */
++
++/* The longest a move runs without a stop: what a lost Stop (a closed browser
++ * tab, a dropped ONVIF request) can cost. Pan has no end stop to save it. */
++#define MAX_MOVE_MS 30000
++
++static const char *status_path = "/run/lensd.status";
++static struct {
++	const char *verb;	/* the running move, NULL when idle */
++	unsigned char d1, d2;
++	long until;
++} motion;
++static int board_moving;	/* the board's own flag: 51 01 04 78 88 02 01 xx */
++static long zoom_pos = -1;
++static int zoom_report = -1;
++static int night_mode;		/* 0 day (filter in) / 1 night (filter out); byte 11 to the head */
++
++static void status_write(void)
++{
++	char tmp[128];
++	FILE *f;
++
++	snprintf(tmp, sizeof(tmp), "%s.tmp", status_path);
++	f = fopen(tmp, "w");
++	if (!f)
++		return;
++	fprintf(f, "moving=%d\nmotion=%s\nzoom=%ld\nzoom_step=%d\n", motion.verb || board_moving,
++		motion.verb ? motion.verb : "none", zoom_pos, zoom_report);
++	fclose(f);
++	rename(tmp, status_path);
++}
++
++/* ---- lens board replies ---------------------------------------------- */
++
++static unsigned char rx[512];
++static size_t rx_len;
++
++/* Frames are 51 01 04 78 <type> <len> <payload...> <ck>. While zooming the
++ * board sends type 01 with payload 0b 1a <digits...> 21 26 26 26: one digit
++ * (len 07) or two (len 08), up to "3 0" at the tele end, where the stock
++ * firmware's on-screen zoom reads 30x. It is the board's own zoom scale, not
++ * optical magnification (the tele end measures ~13.4x the wide end), and how
++ * stock maps it for its overlay is not yet known -- so it is kept raw. Type 88
++ * (payload 01 02 moving, 01 00 stopped) is the board's motion flag, type 90
++ * the answer to the position query. */
++static void rx_parse(void)
++{
++	size_t i = 0;
++
++	while (rx_len - i >= 7) {
++		size_t n;
++
++		if (memcmp(rx + i, "\x51\x01\x04\x78", 4)) {
++			i++;
++			continue;
++		}
++		n = 6 + rx[i + 5] + 1;
++		if (n > 32) {
++			i++;
++			continue;
++		}
++		if (rx_len - i < n)
++			break;
++		{
++			unsigned int s = 0;
++			size_t k;
++
++			for (k = 0; k < n - 1; k++)
++				s += rx[i + k];
++			if ((unsigned char)s != rx[i + n - 1]) {
++				i++;	/* not a frame boundary after all */
++				continue;
++			}
++		}
++		if (rx[i + 4] == 0x01 && (rx[i + 5] == 0x07 || rx[i + 5] == 0x08) &&
++		    rx[i + 6] == 0x0b && rx[i + 7] == 0x1a && rx[i + 8] <= 9 &&
++		    (rx[i + 5] == 0x07 || rx[i + 9] <= 9)) {
++			int z = rx[i + 5] == 0x08 ? rx[i + 8] * 10 + rx[i + 9] : rx[i + 8];
++
++			if (z != zoom_report) {
++				logm(LOG_DEBUG, "zoom report %d", z);
++				zoom_report = z;
++				status_write();
++			}
++		} else if (rx[i + 4] == 0x88 && rx[i + 5] == 0x02) {
++			int m = rx[i + 7] != 0;
++
++			if (m != board_moving) {
++				board_moving = m;
++				status_write();
++			}
++		} else if (rx[i + 4] == 0x90 && rx[i + 5] == 0x06) {
++			long z = (long)rx[i + 10] << 8 | rx[i + 11];
++
++			if (z != zoom_pos) {
++				zoom_pos = z;
++				status_write();
++			}
++		} else if (verbose) {
++			char hex[3 * 32 + 1];
++			size_t k;
++
++			for (k = 0; k < n; k++)
++				sprintf(hex + 3 * k, " %02x", rx[i + k]);
++			logm(LOG_DEBUG, "rx%s", hex);
++		}
++		i += n;
++	}
++	memmove(rx, rx + i, rx_len - i);
++	rx_len -= i;
++}
++
++static void rx_drain(int fd)
++{
++	ssize_t n;
++
++	while (rx_len < sizeof(rx) && (n = read(fd, rx + rx_len, sizeof(rx) - rx_len)) > 0)
++		rx_len += (size_t)n;
++	if (rx_len == sizeof(rx))
++		rx_len = 0;
++	rx_parse();
++}
++
++static void handshake(int fd)
++{
++	unsigned char end[4] = {'E', 'N', 'D', 0}, ver[4] = {'V', 'E', 'R', 0};
++	char txt[64] = "";
++	long t0;
++	int i;
++
++	sum_tail(end, 4);
++	sum_tail(ver, 4);
++	for (i = 0; i < 8; i++) {
++		put(fd, end, 4);
++		usleep(60000);
++	}
++	tcflush(fd, TCIFLUSH);
++	put(fd, ver, 4);
++	for (t0 = now_ms(); now_ms() - t0 < 1000;) {
++		ssize_t n = read(fd, txt + strlen(txt), sizeof(txt) - 1 - strlen(txt));
++
++		if (n > 0)
++			txt[strlen(txt) + n] = 0;
++		usleep(20000);
++	}
++	for (i = 0; txt[i]; i++)
++		if (txt[i] < 32 || txt[i] > 126)
++			txt[i] = '.';
++	logm(LOG_INFO, "lens board version: %s", txt[0] ? txt : "(no reply)");
++}
++
++/* ---- ISP --------------------------------------------------------------- */
++
++/*
++ * The vendor libraries are linked in (NEEDED), not dlopen'd: libmi_isp and
++ * libcus3a call each other (MI_ISP_GENERAL_* <-> Cus3A_*), and uClibc
++ * resolves a dlopen'd library's lazy calls only against what was loaded
++ * before it, so whichever of the two comes second is unreachable from the
++ * first and the AF setters die at their first call. Loaded at startup they
++ * share the program's global scope. The symbols are still looked up by name
++ * so a missing one is a logged error rather than a load failure.
++ */
++static int isp_load(void)
++{
++	void *hsys, *hisp;
++
++	hsys = hisp = dlopen(NULL, RTLD_LAZY);
++	if (!hsys) {
++		logm(LOG_ERR, "dlopen: %s", dlerror());
++		return -1;
++	}
++	isp.get_stats = (mi_get_fn)dlsym(hisp, "MI_ISP_CUS3A_GetAFStats");
++	isp.get_window = (mi_get_fn)dlsym(hisp, "MI_ISP_CUS3A_GetAFWindow");
++	isp.set_window = (mi_get_fn)dlsym(hisp, "MI_ISP_CUS3A_SetAFWindow");
++	isp.set_filter = (mi_get_fn)dlsym(hisp, "MI_ISP_CUS3A_SetAFFilter");
++	isp.set_filter_sq = (mi_get_fn)dlsym(hisp, "MI_ISP_CUS3A_SetAFFilterSq");
++	if (!isp.get_stats || !isp.get_window || !isp.set_window || !isp.set_filter ||
++	    !isp.set_filter_sq) {
++		logm(LOG_ERR, "missing MI_ISP_CUS3A AF symbols");
++		return -1;
++	}
++	return ((int (*)(unsigned short))dlsym(hsys, "MI_SYS_Init"))(0);
++}
++
++/* The setters take a non-const pointer; hand them copies. */
++static int af_apply(void)
++{
++	unsigned char w[sizeof(STOCK_AFWINDOW)], f[sizeof(STOCK_AFFILTER)], q[sizeof(STOCK_AFFILTERSQ)];
++	int rw, rf, rq;
++
++	memcpy(w, STOCK_AFWINDOW, sizeof(w));
++	memcpy(f, STOCK_AFFILTER, sizeof(f));
++	memcpy(q, STOCK_AFFILTERSQ, sizeof(q));
++	rw = isp.set_window(0, 0, w);
++	rf = isp.set_filter(0, 0, f);
++	rq = isp.set_filter_sq(0, 0, q);
++	logm(LOG_INFO, "stock AF config applied (window %d, filter %d, filter-sq %d)", rw, rf, rq);
++	return rw || rf || rq ? -1 : 0;
++}
++
++/* An rvd restart recreates the ISP channel with vendor defaults. */
++static int af_config_current(void)
++{
++	static unsigned char w[1024];
++
++	memset(w, 0, sizeof(w));
++	return !isp.get_window(0, 0, w) && !memcmp(w, STOCK_AFWINDOW, sizeof(STOCK_AFWINDOW));
++}
++
++static int af_values(unsigned int *fva, unsigned int *fvb)
++{
++	/* GetAFStats writes 7168 bytes (measured by pattern fill), far past the
++	 * 400 the 5 x 16 counters below occupy. A smaller buffer is overrun every
++	 * frame and zeroes whatever statics follow it. */
++	static uint8_t s[8192];
++	static const int fields[4] = {0, 1, 3, 4};
++	uint64_t a = 0, b = 0;
++	int i;
++
++	if (isp.get_stats(0, 0, s))
++		return -1;
++	for (i = 0; i < 4; i++) {
++		a += u40(s + 5 * (fields[i] * 16 + 0));
++		b += u40(s + 5 * (fields[i] * 16 + 1));
++	}
++	a >>= 9;
++	b >>= 9;
++	*fva = a > 0xffff ? 0xffff : (unsigned int)a;
++	*fvb = b > 0xffff ? 0xffff : (unsigned int)b;
++	return 0;
++}
++
++/* ---- commands ---------------------------------------------------------- */
++
++/* Stock's pan/tilt speed 1..10 (web UI and /cgi-bin/ptz_ctrl, default 5) as
++ * the data byte it sends; ONVIF velocity v uses level floor(10v)+1, capped at
++ * 10. Zoom has no speed: stock sends 01 01 at every level. */
++static const unsigned char pt_speed[10] = {0x01, 0x04, 0x0a, 0x12, 0x19, 0x20, 0x27, 0x2e, 0x35, 0x3f};
++
++static void move_stop(int fd)
++{
++	stop_all(fd);
++	motion.verb = NULL;
++	status_write();
++}
++
++/* Repeating the running move only pushes its deadline out: resending the
++ * frame would restart the board's ramp and stutter a held button. */
++static void move(int fd, const char *verb, unsigned char c1, unsigned char c2, unsigned char d1, unsigned char d2,
++		 long ms)
++{
++	if (ms <= 0 || ms > MAX_MOVE_MS)
++		ms = MAX_MOVE_MS;
++	if (!motion.verb || strcmp(motion.verb, verb) || motion.d1 != d1 || motion.d2 != d2) {
++		pelco(fd, c1, c2, d1, d2);
++		motion.verb = verb;
++		motion.d1 = d1;
++		motion.d2 = d2;
++		status_write();
++	}
++	motion.until = now_ms() + ms;
++}
++
++static void command(int fd, char *line)
++{
++	static const struct {
++		const char *name;
++		unsigned char c1, c2, d1, d2;
++		int axes; /* bit 0: pan speed in d1, bit 1: tilt speed in d2 */
++	} verbs[] = {
++		{"zoom_in", 0x00, 0x20, 0x01, 0x01, 0},   {"zoom_out", 0x00, 0x40, 0x01, 0x01, 0},
++		{"focus_far", 0x00, 0x80, 0x00, 0x00, 0}, {"focus_near", 0x01, 0x00, 0x00, 0x00, 0},
++		{"left", 0x00, 0x04, 0x00, 0x00, 1},      {"right", 0x00, 0x02, 0x00, 0x00, 1},
++		{"up", 0x00, 0x08, 0x00, 0x00, 2},        {"down", 0x00, 0x10, 0x00, 0x00, 2},
++		{"up_left", 0x00, 0x0c, 0x00, 0x00, 3},   {"up_right", 0x00, 0x0a, 0x00, 0x00, 3},
++		{"down_left", 0x00, 0x14, 0x00, 0x00, 3}, {"down_right", 0x00, 0x12, 0x00, 0x00, 3},
++	};
++	/* Pelco-D set / call / clear; the board stores the positions itself */
++	static const struct {
++		const char *name;
++		unsigned char c2;
++	} presets[] = {
++		{"preset_set", 0x03}, {"preset_goto", 0x07}, {"preset_clear", 0x05},
++	};
++	char *cmd = strtok(line, " \t\r\n");
++	unsigned int i;
++
++	if (!cmd)
++		return;
++	if (!strcmp(cmd, "stop")) {
++		move_stop(fd);
++	} else if (!strcmp(cmd, "query")) {
++		put(fd, query9a, sizeof(query9a));
++	} else if (!strcmp(cmd, "trace")) {
++		char *secs = strtok(NULL, " \t\r\n");
++
++		trace_until = now_ms() + 1000L * (secs ? atoi(secs) : 10);
++	} else if (!strcmp(cmd, "raw")) {
++		unsigned char b[32];
++		size_t n = 0;
++		char *tok;
++
++		while (n < sizeof(b) && (tok = strtok(NULL, " \t\r\n")))
++			b[n++] = (unsigned char)strtoul(tok, NULL, 16);
++		put(fd, b, n);
++	} else if (!strcmp(cmd, "day") || !strcmp(cmd, "night")) {
++		night_mode = cmd[0] == 'n';
++		logm(LOG_DEBUG, "%s mode", night_mode ? "night" : "day");
++	} else {
++		for (i = 0; i < sizeof(presets) / sizeof(*presets); i++)
++			if (!strcmp(cmd, presets[i].name)) {
++				char *arg = strtok(NULL, " \t\r\n");
++				int n = arg ? atoi(arg) : 0;
++
++				if (n < 1 || n > 255) {
++					logm(LOG_WARNING, "%s: preset 1-255 expected", cmd);
++					return;
++				}
++				pelco(fd, 0x00, presets[i].c2, 0x00, (unsigned char)n);
++				break;
++			}
++		if (i < sizeof(presets) / sizeof(*presets)) {
++			logm(LOG_DEBUG, "command %s", cmd);
++			return;
++		}
++		for (i = 0; i < sizeof(verbs) / sizeof(*verbs); i++)
++			if (!strcmp(cmd, verbs[i].name)) {
++				unsigned char d1 = verbs[i].d1, d2 = verbs[i].d2;
++				int lvl = 5;
++				long ms = 0;
++				char *arg;
++
++				while ((arg = strtok(NULL, " \t\r\n")))
++					if (!strncmp(arg, "ms=", 3))
++						ms = atol(arg + 3);
++					else
++						lvl = atoi(arg);
++				if (lvl < 1)
++					lvl = 1;
++				if (lvl > 10)
++					lvl = 10;
++				if (verbs[i].axes & 1)
++					d1 = pt_speed[lvl - 1];
++				if (verbs[i].axes & 2)
++					d2 = pt_speed[lvl - 1];
++				move(fd, verbs[i].name, verbs[i].c1, verbs[i].c2, d1, d2, ms);
++				break;
++			}
++		if (i == sizeof(verbs) / sizeof(*verbs)) {
++			logm(LOG_WARNING, "unknown command: %s", cmd);
++			return;
++		}
++	}
++	logm(LOG_DEBUG, "command %s", cmd);
++}
++
++static int fifo_open(const char *path)
++{
++	mkfifo(path, 0600);
++	/* O_RDWR keeps a writer open, so the FIFO never reports EOF between clients */
++	return open(path, O_RDWR | O_NONBLOCK);
++}
++
++static void fifo_poll(int ffd, int fd)
++{
++	static char buf[256];
++	static size_t len;
++	ssize_t n;
++	char *nl;
++
++	while ((n = read(ffd, buf + len, sizeof(buf) - 1 - len)) > 0) {
++		len += (size_t)n;
++		buf[len] = 0;
++		while ((nl = strchr(buf, '\n'))) {
++			*nl = 0;
++			command(fd, buf);
++			memmove(buf, nl + 1, len - (size_t)(nl + 1 - buf) + 1);
++			len -= (size_t)(nl + 1 - buf);
++		}
++		if (len == sizeof(buf) - 1)
++			len = 0;
++	}
++}
++
++int main(int argc, char **argv)
++{
++	const char *port = "/dev/ttyS2", *fifo = "/run/lensd.cmd";
++	unsigned char f[16] = {0x51, 0x01, 0x04, 0x78, 0x01, 0x0d};
++	long period, next, last_check = 0, frames = 0;
++	int hz = 25, fd, ffd, opt;
++
++	while ((opt = getopt(argc, argv, "p:f:s:r:vP")) != -1) {
++		switch (opt) {
++		case 'p': port = optarg; break;
++		case 'f': fifo = optarg; break;
++		case 's': status_path = optarg; break;
++		case 'r': hz = atoi(optarg); break;
++		case 'v': verbose = 1; break;
++		case 'P': pelco_only = 1; break;
++		default:
++			fprintf(stderr, "usage: lensd [-p port] [-f fifo] [-s status] [-r hz] [-v] [-P]\n");
++			return 2;
++		}
++	}
++	openlog("lensd", LOG_PID, LOG_DAEMON);
++	if (hz < 1 || hz > 60)
++		hz = 25;
++	period = 1000 / hz;
++
++	if ((fd = port_open(port)) < 0) {
++		logm(LOG_ERR, "%s: %s", port, strerror(errno));
++		return 1;
++	}
++	if (!pelco_only && isp_load()) {
++		logm(LOG_ERR, "MI init failed");
++		return 1;
++	}
++	/* Stats exist only once rvd has the ISP channel up. Skipped in -P
++	 * (pelco-only) mode: a manual-focus Pelco-D head has no SoC AF feed. */
++	while (!pelco_only) {
++		unsigned int a, b;
++
++		if (!af_values(&a, &b))
++			break;
++		sleep(1);
++	}
++	if (!pelco_only)
++		af_apply();
++	if (!pelco_only)
++		handshake(fd);
++	status_write();
++	put(fd, query9a, sizeof(query9a));
++	ffd = fifo_open(fifo);
++
++	f[10] = 0x01;	/* OEM AF + day/night frame tail (f[11]/f[13] set per frame) */
++	f[12] = 0x03;
++	f[14] = 0x00;
++	for (next = now_ms();;) {
++		unsigned int fva, fvb;
++
++		if (!pelco_only && !af_values(&fva, &fvb)) {
++			f[6] = fva >> 8;
++			f[7] = fva & 0xff;
++			f[8] = fvb >> 8;
++			f[9] = fvb & 0xff;
++			if (gpio_val(IRCUT_DAY_GPIO) == 1)
++				night_mode = 0;
++			else if (gpio_val(IRCUT_NIGHT_GPIO) == 1)
++				night_mode = 1;
++			f[11] = night_mode ? 0x01 : 0x00;	/* day/night -> IR-cut filter */
++			f[13] = night_mode ? 0x32 : 0x00;
++			sum_tail(f, sizeof(f));
++			put(fd, f, sizeof(f));
++			if (now_ms() < trace_until)
++				logm(LOG_INFO, "t=%ld FVa %u FVb %u", now_ms() % 100000, fva, fvb);
++			else if (verbose && ++frames % (hz * 5) == 0)
++				logm(LOG_DEBUG, "FVa %u FVb %u", fva, fvb);
++		}
++		rx_drain(fd);
++		if (ffd >= 0)
++			fifo_poll(ffd, fd);
++		if (motion.verb && now_ms() >= motion.until) {
++			logm(LOG_DEBUG, "%s timed out", motion.verb);
++			move_stop(fd);
++		}
++		if (!pelco_only && now_ms() - last_check > 5000) {
++			last_check = now_ms();
++			if (!af_config_current())
++				af_apply();
++		}
++		next += period;
++		while (now_ms() < next)
++			usleep(2000);
++		if (now_ms() - next > 1000)
++			next = now_ms();
++	}
++	return 0;
++}
+diff --git a/package/thingino-lensd/files/onvif-ptz.json b/package/thingino-lensd/files/onvif-ptz.json
+new file mode 100644
+index 000000000..047c82a4e
+--- /dev/null
++++ b/package/thingino-lensd/files/onvif-ptz.json
+@@ -0,0 +1,25 @@
++{
++  "ptz": {
++    "min_step_x": -1,
++    "max_step_x": 1,
++    "min_step_y": -1,
++    "max_step_y": 1,
++    "min_step_z": 0,
++    "max_step_z": 65535,
++    "zoom": true,
++    "get_position": "/usr/sbin/lensctl position",
++    "is_moving": "/usr/sbin/lensctl moving",
++    "move_x": "/usr/sbin/lensctl pan %f",
++    "move_y": "/usr/sbin/lensctl tilt %f",
++    "move_both": "/usr/sbin/lensctl pantilt %f %f",
++    "move_in": "/usr/sbin/lensctl zoom_in",
++    "move_out": "/usr/sbin/lensctl zoom_out",
++    "move_stop": "/usr/sbin/lensctl stop %s",
++    "get_presets": "/usr/sbin/lensctl presets",
++    "set_preset": "/usr/sbin/lensctl preset_set %d %s",
++    "move_preset": "/usr/sbin/lensctl preset_goto %d",
++    "remove_preset": "/usr/sbin/lensctl preset_clear %d",
++    "goto_home_position": "/usr/sbin/lensctl home",
++    "set_home_position": "/usr/sbin/lensctl home_set"
++  }
++}
+diff --git a/package/thingino-lensd/files/raptor-hook b/package/thingino-lensd/files/raptor-hook
+new file mode 100755
+index 000000000..62808bccc
+--- /dev/null
++++ b/package/thingino-lensd/files/raptor-hook
+@@ -0,0 +1,6 @@
++#!/bin/sh
++# Raptor runs this with "stop" before any of its daemons go down and with
++# "start" once they are back. lensd reads the ISP every frame; a call that
++# lands while rvd tears the ISP channel down oopses the vendor MI module and
++# leaves the MI device locked, so the next rvd hangs opening it.
++exec /etc/init.d/S33lensd "$1"
+diff --git a/package/thingino-lensd/files/stock_af.h b/package/thingino-lensd/files/stock_af.h
+new file mode 100644
+index 000000000..817eb486f
+--- /dev/null
++++ b/package/thingino-lensd/files/stock_af.h
+@@ -0,0 +1,53 @@
++/* Stock JL12D2 AF configuration, read off a running stock firmware (
++ * V3.3.2.4) with MI_ISP_CUS3A_GetAF*, 2026-10-25. Applied with the matching
++ * MI_ISP_CUS3A_SetAF* so the focus values match stock's scale; the other nine
++ * AF structs are identical on both firmwares. */
++
++/* 264 bytes; 13 differ from the 1230 default */
++static const unsigned char STOCK_AFWINDOW[264] = {
++	0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00,
++	0x13, 0x00, 0x00, 0x00, 0xeb, 0x03, 0x00, 0x00, 0xeb, 0x03, 0x00, 0x00,
++	0xaa, 0x00, 0x00, 0x00, 0xaa, 0x00, 0x00, 0x00, 0x52, 0x03, 0x00, 0x00,
++	0x52, 0x03, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++	0xff, 0x02, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00,
++	0x00, 0x00, 0x00, 0x00, 0xff, 0x03, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00,
++	0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00,
++	0xff, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
++	0xff, 0x01, 0x00, 0x00, 0xff, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
++	0x00, 0x01, 0x00, 0x00, 0xff, 0x02, 0x00, 0x00, 0xff, 0x01, 0x00, 0x00,
++	0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0xff, 0x03, 0x00, 0x00,
++	0xff, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
++	0xff, 0x00, 0x00, 0x00, 0xff, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
++	0x00, 0x02, 0x00, 0x00, 0xff, 0x01, 0x00, 0x00, 0xff, 0x02, 0x00, 0x00,
++	0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0xff, 0x02, 0x00, 0x00,
++	0xff, 0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
++	0xff, 0x03, 0x00, 0x00, 0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++	0x00, 0x03, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0xff, 0x03, 0x00, 0x00,
++	0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0xff, 0x01, 0x00, 0x00,
++	0xff, 0x03, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00,
++	0xff, 0x02, 0x00, 0x00, 0xff, 0x03, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00,
++	0x00, 0x03, 0x00, 0x00, 0xff, 0x03, 0x00, 0x00, 0xff, 0x03, 0x00, 0x00,
++};
++
++/* 84 bytes; 42 differ from the 1230 default */
++static const unsigned char STOCK_AFFILTER[84] = {
++	0x14, 0x00, 0x25, 0x00, 0x14, 0x00, 0x00, 0x31, 0x40, 0x0d, 0x00, 0x00,
++	0xff, 0x03, 0x00, 0x00, 0xff, 0x03, 0x0d, 0x00, 0x0b, 0x00, 0x0d, 0x00,
++	0xc0, 0x35, 0x80, 0x0d, 0x00, 0x00, 0xff, 0x03, 0x00, 0x00, 0xff, 0x03,
++	0x01, 0x00, 0x14, 0x00, 0x27, 0x04, 0x14, 0x00, 0x80, 0x08, 0xc0, 0x0c,
++	0x01, 0x00, 0x1a, 0x00, 0x00, 0x00, 0x1a, 0x02, 0x80, 0x24, 0x80, 0x09,
++	0x01, 0x00, 0x0d, 0x00, 0x1a, 0x04, 0x0d, 0x00, 0x00, 0x3e, 0x00, 0x0f,
++	0x01, 0x00, 0x0f, 0x00, 0x00, 0x00, 0x0f, 0x02, 0xc0, 0x39, 0x80, 0x0c,
++};
++
++/* 90 bytes; 1 differ from the 1230 default */
++static const unsigned char STOCK_AFFILTERSQ[90] = {
++	0x00, 0x00, 0xff, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++	0x00, 0x00, 0x06, 0x07, 0x07, 0x06, 0x06, 0x06, 0x07, 0x06, 0x06, 0x07,
++	0x06, 0x06, 0x00, 0x00, 0x20, 0x00, 0x20, 0x01, 0x20, 0x03, 0x80, 0x04,
++	0x20, 0x06, 0x00, 0x08, 0x80, 0x0c, 0x20, 0x0f, 0xff, 0x11, 0x7f, 0x18,
++	0x1f, 0x1c, 0xff, 0x1f, 0x06, 0x07, 0x07, 0x06, 0x06, 0x06, 0x07, 0x06,
++	0x06, 0x07, 0x06, 0x06, 0x00, 0x00, 0x20, 0x00, 0x20, 0x01, 0x20, 0x03,
++	0x80, 0x04, 0x20, 0x06, 0x00, 0x08, 0x80, 0x0c, 0x20, 0x0f, 0xff, 0x11,
++	0x7f, 0x18, 0x1f, 0x1c, 0xff, 0x1f,
++};
+diff --git a/package/thingino-lensd/thingino-lensd.mk b/package/thingino-lensd/thingino-lensd.mk
+new file mode 100644
+index 000000000..5c8cdd8b1
+--- /dev/null
++++ b/package/thingino-lensd/thingino-lensd.mk
+@@ -0,0 +1,56 @@
++################################################################################
++#
++# thingino-lensd
++#
++################################################################################
++
++THINGINO_LENSD_VERSION = 1.1
++THINGINO_LENSD_SITE_METHOD = local
++THINGINO_LENSD_SITE = $(THINGINO_LENSD_PKGDIR)/files
++
++THINGINO_LENSD_DEPENDENCIES = sigmastar-lib
++
++ifeq ($(BR2_PACKAGE_THINGINO_WEBUI),y)
++# The web UI PTZ plugin: installed after thingino-webui so that its plugin
++# assembly (a target-finalize hook) finds lensd.webui.json.
++THINGINO_LENSD_DEPENDENCIES += thingino-webui
++
++define THINGINO_LENSD_INSTALL_WWW_CMDS
++	$(INSTALL) -D -m 0644 $(@D)/www/a/preview-lensd.js \
++		$(TARGET_DIR)/var/www/a/preview-lensd.js
++	$(INSTALL) -D -m 0755 $(@D)/www/x/json-lensd.cgi \
++		$(TARGET_DIR)/var/www/x/json-lensd.cgi
++	$(INSTALL) -D -m 0644 $(@D)/lensd.webui.json \
++		$(TARGET_DIR)/var/www/a/plugins/lensd.webui.json
++endef
++endif
++
++# The same vendor drop sigmastar-lib installs; see SIGMASTAR_LIB_BLOBS.
++THINGINO_LENSD_MI_LIBS = $(SIGMASTAR_LIB_DIR)/$(SOC_FAMILY)/lib/$(SIGMASTAR_DROP)/$(SIGMASTAR_LIBC)/$(SIGMASTAR_GCC)
++
++# Linked, not dlopened: libmi_isp and libcus3a call each other, and uClibc
++# resolves a dlopened library's lazy calls only against libraries loaded
++# before it, so no dlopen order works. --no-as-needed keeps libcus3a and
++# libispalgo, which lensd itself does not call.
++define THINGINO_LENSD_BUILD_CMDS
++	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -Os -s -Wall -Wextra \
++		-o $(@D)/lensd $(@D)/lensd.c -L$(THINGINO_LENSD_MI_LIBS) \
++		-Wl,--no-as-needed -lmi_isp -lcus3a -lispalgo -lmi_sys \
++		-lmi_common -lcam_os_wrapper -lcam_fs_wrapper \
++		-Wl,--allow-shlib-undefined -ldl
++endef
++
++# /usr/bin/motors is what turns the ONVIF server's PTZ on (/bin -> usr/bin);
++# /etc/raptor.d/lensd has raptor stop lensd before rvd goes down.
++define THINGINO_LENSD_INSTALL_TARGET_CMDS
++	$(INSTALL) -D -m 0755 $(@D)/lensd $(TARGET_DIR)/usr/sbin/lensd
++	$(INSTALL) -D -m 0755 $(@D)/lensctl $(TARGET_DIR)/usr/sbin/lensctl
++	$(INSTALL) -D -m 0755 $(@D)/motors $(TARGET_DIR)/usr/bin/motors
++	$(INSTALL) -D -m 0755 $(@D)/S33lensd $(TARGET_DIR)/etc/init.d/S33lensd
++	$(INSTALL) -D -m 0755 $(@D)/raptor-hook $(TARGET_DIR)/etc/raptor.d/lensd
++	$(INSTALL) -D -m 0644 $(@D)/onvif-ptz.json \
++		$(TARGET_DIR)/usr/share/lensd/onvif-ptz.json
++	$(THINGINO_LENSD_INSTALL_WWW_CMDS)
++endef
++
++$(eval $(generic-package))

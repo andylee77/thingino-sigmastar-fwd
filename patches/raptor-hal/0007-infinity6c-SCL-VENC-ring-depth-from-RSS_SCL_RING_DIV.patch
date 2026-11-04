@@ -1,0 +1,100 @@
+From c93e90d8fbf147054f95dbe77b1e33d54a08a72d Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 13:13:08 -0500
+Subject: [PATCH] infinity6c: SCL->VENC ring depth from RSS_SCL_RING_DIV
+
+The main encoder reads its frame out of the SCL ring while the scaler is
+still writing it, and the ring held a quarter frame -- about 10 ms of slack
+at 25 fps. The same engine also encodes the cascade sub and every IDR, so
+an encoder that starts late is lapped: MI counts a RewindCnt on the VENC
+input port, drops the frame, and the next one is an IDR.
+
+On a YMF46D (1440p main, 720p sub) 80% of main frames rewound: the main
+turned to all IDRs at half rate (~205 KB each, 21 Mbit/s against a 3 Mbit/s
+target, deaf to CBR, VBR and QP floors) and the sub fell to 13 fps, with no
+client connected. The IDRs' own encode time kept it there. A sibling unit
+on the same config rewound 6% and recovered between bursts.
+
+RSS_SCL_RING_DIV now picks the depth -- 4 (a quarter, still the default),
+2 or 1 (a whole frame) -- and the depth in use is logged. Each step costs
+MMA, width x height x 1.5 / div.
+---
+ src/infinity6c/hal_framesource.c | 37 ++++++++++++++++++++++++++++----
+ 1 file changed, 33 insertions(+), 4 deletions(-)
+
+diff --git a/src/infinity6c/hal_framesource.c b/src/infinity6c/hal_framesource.c
+index 6fad202..39926b0 100644
+--- a/src/infinity6c/hal_framesource.c
++++ b/src/infinity6c/hal_framesource.c
+@@ -28,6 +28,7 @@
+ #include "infinity6c_state.h"
+ 
+ #include <ctype.h>
++#include <stdlib.h>
+ 
+ /* ================================================================
+  * FORMAT MAPPING
+@@ -269,14 +270,40 @@ static int i6c_snr_select(infinity6c_state_t *st, unsigned short width, unsigned
+  * POOL
+  * ================================================================ */
+ 
++/*
++ * i6c_scl_ring_div -- the ring holds 1/div of a frame.
++ *
++ * The main encoder reads its frame out of this ring while the scaler is still
++ * writing it. When the encoder starts late -- the same engine also encodes the
++ * cascade sub, and every IDR -- the scaler laps it: MI counts a RewindCnt on the
++ * VENC input port, the frame is lost, and the next one is an IDR. A quarter
++ * frame, the vendor reference, leaves about 10 ms of slack at 25 fps. Under a
++ * 1440p main with a 720p sub that was not enough on a YMF46D: 80% of main frames
++ * rewound, the stream turned to all IDRs at half rate, and the IDRs' own encode
++ * time kept it there.
++ *
++ * RSS_SCL_RING_DIV picks the depth: 4 = a quarter (the default), 2 = a half,
++ * 1 = a whole frame. Each step down costs MMA, width x height x 1.5 / div.
++ */
++static unsigned int i6c_scl_ring_div(void)
++{
++    const char *env = getenv("RSS_SCL_RING_DIV");
++    int div = env ? atoi(env) : 4;
++
++    if (div != 1 && div != 2 && div != 4) {
++        HAL_LOG_WARN("infinity6c: RSS_SCL_RING_DIV=%s is not 1, 2 or 4 -- using 4", env);
++        div = 4;
++    }
++    return (unsigned int)div;
++}
++
+ /*
+  * i6c_pool_configure -- the private ring pool SCL hands frames out of.
+  *
+  * Not a tuning step. A stage that passes frames on through a ring needs a pool
+  * of its own configured before it starts, and the ring line count is how much of
+- * a frame accumulates before the next stage may begin on it -- a quarter of the
+- * frame here, which is what the vendor's own reference uses and what keeps the
+- * encoder from waiting on a whole frame.
++ * a frame accumulates before the next stage may begin on it -- a fraction of the
++ * frame, see i6c_scl_ring_div.
+  */
+ static int i6c_pool_configure(infinity6c_state_t *st)
+ {
+@@ -290,13 +317,15 @@ static int i6c_pool_configure(infinity6c_state_t *st)
+     pool.config.ring.device = I6C_SCL_DEV;
+     pool.config.ring.maxWidth = st->plane.capt.width;
+     pool.config.ring.maxHeight = st->plane.capt.height;
+-    pool.config.ring.ringLine = st->plane.capt.height / 4;
++    pool.config.ring.ringLine = st->plane.capt.height / i6c_scl_ring_div();
+ 
+     if ((ret = st->sys.config_pool(I6C_SOC_ID, &pool)) != 0) {
+         HAL_LOG_ERR("MI_SYS_ConfigPrivateMMAPool(SCL ring) failed: %d", ret);
+         return RSS_ERR_IO;
+     }
+ 
++    HAL_LOG_INFO("infinity6c: SCL ring %u of %u lines", pool.config.ring.ringLine,
++                 st->plane.capt.height);
+     return RSS_OK;
+ }
+ 
+-- 
+2.43.0
+

@@ -1,0 +1,1808 @@
+From 9a6e534a5c904e1b614bb6a65598cc4a20d4810f Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 08:19:15 -0500
+Subject: [PATCH 01/21] sigmastar: vendor packages (sdk, lib, u-boot)
+
+---
+ package/sigmastar-lib/Config.in               |  15 +
+ package/sigmastar-lib/sigmastar-lib.mk        |  54 ++
+ ...0001-infinity6c-gc8613-sensor-driver.patch | 752 ++++++++++++++++++
+ package/sigmastar-sdk/Config.in               |  27 +
+ package/sigmastar-sdk/files/S20sigmastar      |  53 ++
+ .../sigmastar-sdk/files/script/load_sigmastar | 180 +++++
+ package/sigmastar-sdk/files/script/zoom.sh    | 183 +++++
+ package/sigmastar-sdk/sigmastar-sdk.mk        | 200 +++++
+ package/sigmastar-sensor-headers/Config.in    |  12 +
+ .../sigmastar-sensor-headers.mk               |  40 +
+ ...rop-retrospective-rootfs-auto-sizing.patch |  64 ++
+ package/sigmastar-uboot/Config.in             |  19 +
+ package/sigmastar-uboot/sigmastar-uboot.mk    |  97 +++
+ 13 files changed, 1696 insertions(+)
+ create mode 100644 package/sigmastar-lib/Config.in
+ create mode 100644 package/sigmastar-lib/sigmastar-lib.mk
+ create mode 100644 package/sigmastar-sdk/0001-infinity6c-gc8613-sensor-driver.patch
+ create mode 100644 package/sigmastar-sdk/Config.in
+ create mode 100644 package/sigmastar-sdk/files/S20sigmastar
+ create mode 100644 package/sigmastar-sdk/files/script/load_sigmastar
+ create mode 100755 package/sigmastar-sdk/files/script/zoom.sh
+ create mode 100644 package/sigmastar-sdk/sigmastar-sdk.mk
+ create mode 100644 package/sigmastar-sensor-headers/Config.in
+ create mode 100644 package/sigmastar-sensor-headers/sigmastar-sensor-headers.mk
+ create mode 100644 package/sigmastar-uboot/0001-cmd_sf-drop-retrospective-rootfs-auto-sizing.patch
+ create mode 100644 package/sigmastar-uboot/Config.in
+ create mode 100644 package/sigmastar-uboot/sigmastar-uboot.mk
+
+diff --git a/package/sigmastar-lib/Config.in b/package/sigmastar-lib/Config.in
+new file mode 100644
+index 000000000..7cf6a712a
+--- /dev/null
++++ b/package/sigmastar-lib/Config.in
+@@ -0,0 +1,15 @@
++config BR2_PACKAGE_SIGMASTAR_LIB
++	bool "sigmastar-lib"
++	depends on BR2_SOC_VENDOR_SIGMASTAR
++	help
++	  Prebuilt SigmaStar MI userspace libraries for the configured
++	  Infinity family.
++
++	  The Raptor HAL dlopens these rather than linking them, so they are
++	  not link-time dependencies -- but an image without them has daemons
++	  that start and then fail at the first HAL call.
++
++	  Normally selected by sigmastar-sdk rather than chosen directly;
++	  neither half of the vendor stack is useful alone.
++
++	  https://github.com/johnchia/sigmastar-lib
+diff --git a/package/sigmastar-lib/sigmastar-lib.mk b/package/sigmastar-lib/sigmastar-lib.mk
+new file mode 100644
+index 000000000..ce5b4e226
+--- /dev/null
++++ b/package/sigmastar-lib/sigmastar-lib.mk
+@@ -0,0 +1,54 @@
++################################################################################
++#
++# sigmastar-lib
++#
++# Prebuilt SigmaStar MI userspace libraries. Nothing to compile -- the package
++# is a fetch plus an install step.
++#
++# Companion to sigmastar-sdk, which holds the kernel side. The split follows
++# thingino's Ingenic convention: ingenic-lib is prebuilt userspace, ingenic-sdk
++# is kernel-side.
++#
++# The Raptor HAL *dlopens* these rather than linking them, so nothing here is a
++# link-time dependency -- but an image without them has daemons that start and
++# then fail at the first HAL call.
++#
++################################################################################
++
++SIGMASTAR_LIB_SITE_METHOD = git
++# Local mirror of https://github.com/johnchia/sigmastar-lib, kept by
++# mirror-sigmastar-deps.sh so the build does not depend on that repository.
++SIGMASTAR_LIB_SITE = file://$(HOME)/src/mirrors/git/johnchia__sigmastar-lib.git
++SIGMASTAR_LIB_SITE_BRANCH = main
++SIGMASTAR_LIB_VERSION = cd3c621fdb9e60e7f567ec6146af44ebeddc2630
++SIGMASTAR_LIB_LICENSE = PROPRIETARY
++SIGMASTAR_LIB_REDISTRIBUTE = NO
++
++# Same shape as ingenic-lib.mk resolves: family, content type, then release,
++# C library and toolchain version. A second family, release or libc is a
++# directory in the repo rather than a change here.
++#
++# The last three come from soc/sigmastar/<family>.mk, which is also where
++# sigmastar-sdk reads them for its kernel modules. They describe the *vendor's*
++# build, not ours -- these libraries were compiled with GCC 9.1.0 against glibc
++# long before this tree's toolchain existed, and the path has to name what is in
++# the repo. The vendor names a drop by its build date, so 0607 is 2022-06-07,
++# read from the stamp the libraries carry rather than inferred:
++#
++#   strings libmi_sys.so | grep 'Sigmastar Module'
++#
++# Defining them once, outside both packages, is what stops this repository and
++# sigmastar-sdk being pinned to different vendor builds -- a pairing insmod
++# accepts and that then fails at symbol resolution.
++#
++# Not SIGMASTAR_LIB_DIR: pkg-generic.mk defines <PKG>_DIR as the package build
++# directory, so that name is silently overwritten and the path collapses to
++# $(@D). ingenic-lib.mk calls its equivalent SDK_LIB_DIR for the same reason.
++SIGMASTAR_LIB_BLOBS = $(@D)/$(SOC_FAMILY)/lib/$(SIGMASTAR_DROP)/$(SIGMASTAR_LIBC)/$(SIGMASTAR_GCC)
++
++define SIGMASTAR_LIB_INSTALL_TARGET_CMDS
++	$(INSTALL) -m 755 -d $(TARGET_DIR)/usr/lib
++	$(INSTALL) -m 644 -t $(TARGET_DIR)/usr/lib $(SIGMASTAR_LIB_BLOBS)/*.so
++endef
++
++$(eval $(generic-package))
+diff --git a/package/sigmastar-sdk/0001-infinity6c-gc8613-sensor-driver.patch b/package/sigmastar-sdk/0001-infinity6c-gc8613-sensor-driver.patch
+new file mode 100644
+index 000000000..fb220ae31
+--- /dev/null
++++ b/package/sigmastar-sdk/0001-infinity6c-gc8613-sensor-driver.patch
+@@ -0,0 +1,752 @@
++From: Andy <andylee77@users.noreply.github.com>
++Subject: [PATCH] infinity6c: GC8613 sensor driver
++
++Adds sensor_gc8613_mipi.c, a from-source driver for the GalaxyCore GC8613
++(3840x2160 10-bit, 4-lane MIPI), with its init table, gain curve and timing
++reversed from the vendor module. Load with chmap=1 lane_num=4.
++
++It builds against the sensor-src headers that match 1230's mi.ko (the set
++before fe5d953), which sigmastar-sensor-headers supplies.
++
++---
++diff --git a/infinity6c/sensor-src/sensor_gc8613_mipi.c b/infinity6c/sensor-src/sensor_gc8613_mipi.c
++new file mode 100644
++index 0000000..72a968e
++--- /dev/null
+++++ b/infinity6c/sensor-src/sensor_gc8613_mipi.c
++@@ -0,0 +1,735 @@
+++/*
+++ * sensor_gc8613_mipi.c - GalaxyCore GC8613 (8MP, MIPI 4-lane, 10-bit) driver
+++ * for SigmaStar Infinity6C (SSC378DE) under the ms_cus_sensor framework.
+++ *
+++ * Written from source against johnchia's sensor-src/include/drv_ms_cus_sensor.h
+++ * so the ms_cus_sensor ABI/offsets match the 1230 mi.ko by construction
+++ * (the OEM prebuilt .ko ABI-crashes mi.ko). Register tables, gain curve, mode
+++ * timing and power sequence were reverse-engineered from the unit's own OEM
+++ * driver gc8613YA_MIPI_10bit_v2.2_20241015.ko (build 202410151157). Template:
+++ * sensor_gc4653_mipi.c (same GalaxyCore register conventions).
+++ *
+++ * Target: Anpviz IPC-D3B83B-S / UVision MC-A85. Load: chmap=1 lane_num=4.
+++ * ISP IQ reuses the IMX307 profile (OEM iqfile0-3 -> imx307_iqfile.bin).
+++ * GPL-2.0.
+++ */
+++
+++#ifdef __cplusplus
+++extern "C"
+++{
+++#endif
+++
+++#include <drv_sensor_common.h>
+++#include <sensor_i2c_api.h>
+++#include <drv_sensor.h>
+++
+++#ifdef __cplusplus
+++}
+++#endif
+++
+++SENSOR_DRV_ENTRY_IMPL_BEGIN_EX(gc8613);
+++
+++#ifndef ARRAY_SIZE
+++#define ARRAY_SIZE CAM_OS_ARRAY_SIZE
+++#endif
+++
+++//============================================
+++// MIPI / mode config (3840x2160 @30fps, 10-bit, 4-lane)
+++//============================================
+++#define SENSOR_MIPI_LANE_NUM        (4)     /* load-bearing: GC8613 is 4-lane */
+++
+++#define SENSOR_ISP_TYPE             ISP_EXT
+++#define SENSOR_IFBUS_TYPE           CUS_SENIF_BUS_MIPI
+++#define SENSOR_MIPI_HSYNC_MODE      PACKET_HEADER_EDGE1
+++#define SENSOR_DATAPREC             CUS_DATAPRECISION_10
+++#define SENSOR_DATAMODE             CUS_SEN_10TO12_9000
+++#define SENSOR_BAYERID              CUS_BAYER_RG
+++#define SENSOR_RGBIRID              CUS_RGBIR_NONE
+++#define SENSOR_ORIT                 CUS_ORIT_M0F0
+++
+++/* MIPI pixel clock the SoC CSI receiver runs at (OEM: SetCSI_Clk = 216M). */
+++#define SENSOR_CSI_CLK              CUS_CSI_CLK_216M
+++
+++/* Timing (from OEM mode: vts=2250@30fps, row time 14.814us). */
+++#define Preview_line_period         14814   /* ns per line */
+++#define vts_linefreq                67500   /* vts = vts_linefreq / fps  */
+++#define vts_linefreq_milli          67500000
+++#define vts_30fps                   2250
+++#define Preview_WIDTH               3840
+++#define Preview_HEIGHT              2160
+++#define Preview_MAX_FPS             30
+++#define Preview_MIN_FPS             5
+++
+++/* Gain: 1x = 1024. OEM max AE gain = 0xC2000 (776x incl. digital). */
+++#define SENSOR_MAX_GAIN             (794624)
+++#define SENSOR_AE_MIN_GAIN          (1024)
+++#define SENSOR_DGAIN_MAX            (1024)  /* digital gain cap, 64 = 1x -> 16x */
+++
+++/* I2C: 16-bit reg / 8-bit data, slave 0x62, 200kHz. */
+++#define SENSOR_I2C_ADDR             0x62
+++#define SENSOR_I2C_SPEED            200000
+++#define SENSOR_I2C_LEGACY           I2C_NORMAL_MODE
+++#define SENSOR_I2C_FMT              I2C_FMT_A16D8
+++
+++/* MCLK (OEM: CUS_CMU_CLK_24MHZ). */
+++#define Preview_MCLK_SPEED          CUS_CMU_CLK_24MHZ
+++
+++/* Pin polarities (OEM init_handle). */
+++#define SENSOR_PWDN_POL             CUS_CLK_POL_POS
+++#define SENSOR_RST_POL              CUS_CLK_POL_NEG
+++#define SENSOR_VSYNC_POL            CUS_CLK_POL_NEG
+++#define SENSOR_HSYNC_POL            CUS_CLK_POL_NEG
+++#define SENSOR_PCLK_POL             CUS_CLK_POL_POS
+++
+++#define SENSOR_DBG 0
+++
+++#if defined (SENSOR_MODULE_VERSION)
+++#define TO_STR_NATIVE(e) #e
+++#define TO_STR_PROXY(m, e) m(e)
+++#define MACRO_TO_STRING(e) TO_STR_PROXY(TO_STR_NATIVE, e)
+++static char *sensor_module_version = MACRO_TO_STRING(SENSOR_MODULE_VERSION);
+++module_param(sensor_module_version, charp, S_IRUGO);
+++#endif
+++
+++static int pCus_SetAEGain(ms_cus_sensor *handle, u32 gain);
+++static int pCus_SetAEUSecs(ms_cus_sensor *handle, u32 us);
+++static int pCus_SetFPS(ms_cus_sensor *handle, u32 fps);
+++
+++typedef struct {
+++    struct {
+++        u32 vts;
+++        u32 fps;
+++        u32 line;
+++        u32 final_gain;
+++    } expo;
+++    bool gain_dirty;
+++    bool expo_dirty;
+++    bool vts_dirty;
+++    bool orient_dirty;
+++    I2C_ARRAY tVts_reg[2];
+++    I2C_ARRAY tGain_reg[12];
+++    I2C_ARRAY tExpo_reg[2];
+++    I2C_ARRAY tMirror_reg1[9];
+++    I2C_ARRAY tMirror_reg2[4];
+++} gc8613_params;
+++
+++/* Chip ID: reg 0x03f0 == 0x86, reg 0x03f2 == 0x23  (combined 0x8623). */
+++const static I2C_ARRAY Sensor_id_table[] =
+++{
+++    {0x03f0, 0x86},
+++    {0x03f2, 0x23},
+++};
+++
+++typedef struct {
+++    u32 gain;               /* AE gain, 1x = 1024 */
+++    u16 again[8];           /* 0x0614,0x0615,0x0225,0x1467,0x1468,0x00b8,0x00b9,0x1447 */
+++} Gain_ARRAY;
+++
+++/* 3840x2160 10-bit linear init table (175 entries), reversed from OEM .ko. */
+++const static I2C_ARRAY Sensor_init_table[] =
+++{
+++    {0x03fe,0xf0}, {0x03fe,0x00}, {0x03fe,0x10}, {0x0a38,0x01}, {0x0a20,0x19}, {0x061b,0x17},
+++    {0x061c,0x50}, {0x061d,0x06}, {0x061e,0x87}, {0x061f,0x05}, {0x0a21,0x10}, {0x0a31,0xfb},
+++    {0x0a34,0x40}, {0x0a35,0x08}, {0x0a37,0x46}, {0x0314,0x50}, {0x0315,0x00}, {0x031c,0xce},
+++    {0x0219,0x47}, {0x0342,0x03}, {0x0343,0x20}, {0x0259,0x08}, {0x025a,0x96}, {0x0340,0x08},
+++    {0x0341,0xca}, {0x0351,0x00}, {0x0345,0x02}, {0x0347,0x02}, {0x0348,0x0f}, {0x0349,0x18},
+++    {0x034a,0x08}, {0x034b,0x88}, {0x034f,0xf0}, {0x0094,0x0f}, {0x0095,0x00}, {0x0096,0x08},
+++    {0x0097,0x70}, {0x0099,0x0c}, {0x009b,0x0c}, {0x060c,0x06}, {0x060e,0x20}, {0x060f,0x0f},
+++    {0x070c,0x06}, {0x070e,0x20}, {0x070f,0x0f}, {0x0087,0x50}, {0x141b,0x03}, {0x0907,0xd5},
+++    {0x0909,0x06}, {0x0901,0x0e}, {0x0902,0x0b}, {0x0904,0x08}, {0x0908,0x09}, {0x0903,0xc5},
+++    {0x090c,0x09}, {0x0905,0x10}, {0x0906,0x00}, {0x072a,0x7c}, {0x0724,0x2b}, {0x0727,0x2b},
+++    {0x072b,0x1c}, {0x073e,0x40}, {0x0078,0x88}, {0x0618,0x01}, {0x1466,0x12}, {0x1468,0x07},
+++    {0x1467,0x07}, {0x0709,0x40}, {0x0719,0x40}, {0x1469,0x80}, {0x146a,0xc0}, {0x146b,0x03},
+++    {0x1480,0x02}, {0x1481,0x80}, {0x1484,0x08}, {0x1485,0xc0}, {0x1430,0x80}, {0x1407,0x10},
+++    {0x1408,0x16}, {0x1409,0x03}, {0x1434,0x04}, {0x1447,0x75}, {0x1470,0x10}, {0x1471,0x13},
+++    {0x1438,0x00}, {0x143a,0x00}, {0x024b,0x02}, {0x0245,0xc7}, {0x025b,0x07}, {0x02bb,0x77},
+++    {0x0612,0x01}, {0x0613,0x26}, {0x0243,0x66}, {0x0087,0x53}, {0x0053,0x05}, {0x0089,0x02},
+++    {0x0002,0xeb}, {0x005a,0x0c}, {0x0040,0x83}, {0x0075,0x54}, {0x0205,0x0c}, {0x0202,0x01},
+++    {0x0203,0x27}, {0x061a,0x02}, {0x03fe,0x00}, {0x0106,0x78}, {0x0136,0x00}, {0x0181,0xf0},
+++    {0x0185,0x01}, {0x0180,0x46}, {0x0106,0x38}, {0x010d,0xc0}, {0x010e,0x12}, {0x0113,0x02},
+++    {0x0114,0x03}, {0x0100,0x09}, {0x0004,0x0f}, {0x0219,0x47}, {0x0054,0x98}, {0x0076,0x01},
+++    {0x0052,0x02}, {0x021a,0x10}, {0x0430,0x10}, {0x0431,0x10}, {0x0432,0x10}, {0x0433,0x10},
+++    {0x0434,0x6d}, {0x0435,0x6d}, {0x0436,0x6d}, {0x0437,0x6d}, {0x0704,0x03}, {0x0706,0x02},
+++    {0x0716,0x02}, {0x0708,0xc8}, {0x0718,0xc8}, {0x071d,0xdc}, {0x071e,0x05}, {0x031f,0x01},
+++    {0x031f,0x00}, {0x0a67,0x80}, {0x0a54,0x0e}, {0x0a65,0x10}, {0x0a98,0x04}, {0x05be,0x00},
+++    {0x05a9,0x01}, {0x0089,0x02}, {0x0aa0,0x00}, {0x0023,0x00}, {0x0022,0x00}, {0x0025,0x00},
+++    {0x0024,0x00}, {0x0028,0x0f}, {0x0029,0x18}, {0x002a,0x08}, {0x002b,0x88}, {0x0317,0x1c},
+++    {0x0a70,0x03}, {0x0a82,0x00}, {0x0a83,0xe0}, {0x0a71,0x00}, {0x0a72,0x02}, {0x0a73,0x60},
+++    {0x0a75,0x41}, {0x0a70,0x03}, {0x0a5a,0x80}, {0xffff,0x14}, {0x0089,0x02}, {0x05be,0x01},
+++    {0x0a70,0x00}, {0x0080,0x02}, {0x0a67,0x00}, {0x024b,0x02}, {0x0220,0x80}, {0x0058,0x00},
+++    {0x0059,0x04},
+++};
+++
+++const I2C_ARRAY PatternTbl[] = {
+++};
+++
+++/* AE gain register writeback sequence (12 regs, OEM order).
+++ * [0]/[3] 0x031d are fixed-order toggles; [1..9] carry gain_table.again;
+++ * [10]/[11] carry the digital-gain split (0x0064 int, 0x0065 frac/64). */
+++const static I2C_ARRAY gain_reg[] = {
+++    {0x031d, 0x2d},
+++    {0x0614, 0x00},
+++    {0x0615, 0x00},
+++    {0x031d, 0x28},
+++    {0x0225, 0x00},
+++    {0x1467, 0x0e},
+++    {0x1468, 0x12},
+++    {0x00b8, 0x01},
+++    {0x00b9, 0x00},
+++    {0x1447, 0x75},
+++    {0x0064, 0x01},
+++    {0x0065, 0x00},
+++};
+++
+++const static I2C_ARRAY expo_reg[] = {
+++    {0x0203, 0xd0}, /* expo[7:0]  */
+++    {0x0202, 0x05}, /* expo[13:8] */
+++};
+++
+++const static I2C_ARRAY vts_reg[] = {
+++    {0x0340, 0x05}, /* vts[13:8] */
+++    {0x0341, 0xdc}, /* vts[7:0]  */
+++};
+++
+++/* Base mirror/flip sequences (OEM .data defaults = M0F0 case). */
+++const static I2C_ARRAY mirror_reg1[] = {
+++    {0x022c, 0x00}, {0x0063, 0x00}, {0x0a67, 0x80}, {0x0a98, 0x04},
+++    {0x05be, 0x00}, {0x05a9, 0x01}, {0x0a70, 0x03}, {0x0a73, 0x60},
+++    {0x0a5a, 0x80},
+++};
+++const static I2C_ARRAY mirror_reg2[] = {
+++    {0x05be, 0x01}, {0x0a70, 0x00}, {0x0080, 0x02}, {0x0a67, 0x00},
+++};
+++
+++/* 26-entry gain curve, columns = again[0..7] mapping to
+++ * 0x0614,0x0615,0x0225,0x1467,0x1468,0x00b8,0x00b9,0x1447 (OEM .ko). */
+++static Gain_ARRAY gain_table[] = {
+++    {  1024, {0x00, 0x00, 0x00, 0x07, 0x07, 0x01, 0x00, 0x77}},
+++    {  1171, {0x90, 0x02, 0x00, 0x07, 0x07, 0x01, 0x09, 0x77}},
+++    {  1431, {0x01, 0x00, 0x00, 0x08, 0x08, 0x01, 0x19, 0x77}},
+++    {  1703, {0x91, 0x02, 0x00, 0x08, 0x08, 0x01, 0x2a, 0x77}},
+++    {  2014, {0x02, 0x00, 0x00, 0x09, 0x09, 0x01, 0x3d, 0x77}},
+++    {  2305, {0x00, 0x00, 0x00, 0x07, 0x07, 0x02, 0x10, 0x75}},
+++    {  2717, {0x90, 0x02, 0x00, 0x07, 0x07, 0x02, 0x29, 0x75}},
+++    {  3261, {0x01, 0x00, 0x00, 0x08, 0x08, 0x03, 0x0b, 0x75}},
+++    {  3825, {0x91, 0x02, 0x00, 0x08, 0x08, 0x03, 0x2f, 0x75}},
+++    {  4547, {0x02, 0x00, 0x00, 0x08, 0x08, 0x04, 0x1c, 0x75}},
+++    {  5401, {0x92, 0x02, 0x00, 0x09, 0x09, 0x05, 0x11, 0x75}},
+++    {  6658, {0x03, 0x00, 0x00, 0x0a, 0x0a, 0x06, 0x20, 0x75}},
+++    {  7771, {0x93, 0x02, 0x00, 0x0b, 0x0b, 0x07, 0x25, 0x75}},
+++    {  8686, {0x00, 0x00, 0x01, 0x0c, 0x0c, 0x08, 0x1e, 0x75}},
+++    { 10164, {0x90, 0x02, 0x01, 0x0d, 0x0d, 0x09, 0x3b, 0x75}},
+++    { 12214, {0x01, 0x00, 0x01, 0x0d, 0x0d, 0x0b, 0x3b, 0x75}},
+++    { 14390, {0x91, 0x02, 0x01, 0x0e, 0x0e, 0x0e, 0x03, 0x75}},
+++    { 16978, {0x02, 0x00, 0x01, 0x0f, 0x0f, 0x10, 0x25, 0x75}},
+++    { 20315, {0x92, 0x02, 0x01, 0x10, 0x10, 0x13, 0x35, 0x75}},
+++    { 24329, {0x03, 0x00, 0x01, 0x11, 0x11, 0x17, 0x30, 0x75}},
+++    { 28775, {0x93, 0x02, 0x01, 0x13, 0x13, 0x1c, 0x06, 0x75}},
+++    { 33905, {0x04, 0x00, 0x01, 0x14, 0x14, 0x21, 0x07, 0x75}},
+++    { 40836, {0x94, 0x02, 0x01, 0x15, 0x15, 0x27, 0x38, 0x75}},
+++    { 48525, {0x05, 0x00, 0x01, 0x17, 0x17, 0x2f, 0x18, 0x75}},
+++    { 57487, {0x95, 0x02, 0x01, 0x19, 0x19, 0x38, 0x09, 0x75}},
+++    { 67450, {0x06, 0x00, 0x01, 0x1a, 0x1a, 0x41, 0x37, 0x75}},
+++};
+++
+++static int g_sensor_ae_min_gain = SENSOR_AE_MIN_GAIN;
+++
+++#undef SENSOR_NAME
+++#define SENSOR_NAME gc8613
+++
+++#define SensorReg_Read(_reg,_data)   (handle->i2c_bus->i2c_rx(handle->i2c_bus, &(handle->i2c_cfg),_reg,_data))
+++#define SensorReg_Write(_reg,_data)  (handle->i2c_bus->i2c_tx(handle->i2c_bus, &(handle->i2c_cfg),_reg,_data))
+++#define SensorRegArrayW(_reg,_len)   (handle->i2c_bus->i2c_array_tx(handle->i2c_bus, &(handle->i2c_cfg),(_reg),(_len)))
+++#define SensorRegArrayR(_reg,_len)   (handle->i2c_bus->i2c_array_rx(handle->i2c_bus, &(handle->i2c_cfg),(_reg),(_len)))
+++
+++static int cus_camsensor_release_handle(ms_cus_sensor *handle);
+++static int pCus_AEStatusNotify(ms_cus_sensor *handle, CUS_CAMSENSOR_AE_STATUS_NOTIFY status);
+++
+++/////////////////// power on/off ///////////////////
+++static int pCus_poweron(ms_cus_sensor *handle, u32 idx)
+++{
+++    ISensorIfAPI *sensor_if = handle->sensor_if_api;
+++
+++    sensor_if->SetIOPad(idx, handle->sif_bus, handle->interface_attr.attr_mipi.mipi_lane_num);
+++    sensor_if->SetCSI_Clk(idx, SENSOR_CSI_CLK);
+++    sensor_if->SetCSI_Lane(idx, handle->interface_attr.attr_mipi.mipi_lane_num, 1);
+++    sensor_if->SetCSI_LongPacketType(idx, 0, 0x1C00, 0);
+++
+++    sensor_if->PowerOff(idx, !handle->pwdn_POLARITY);
+++    SENSOR_USLEEP(1000);
+++    sensor_if->Reset(idx, handle->reset_POLARITY);
+++    SENSOR_USLEEP(1000);
+++    sensor_if->PowerOff(idx, handle->pwdn_POLARITY);
+++    SENSOR_USLEEP(1000);
+++    sensor_if->Reset(idx, !handle->reset_POLARITY);
+++    SENSOR_USLEEP(1000);
+++
+++    sensor_if->MCLK(idx, 1, handle->mclk);
+++    SENSOR_USLEEP(5000);
+++    return SUCCESS;
+++}
+++
+++static int pCus_poweroff(ms_cus_sensor *handle, u32 idx)
+++{
+++    ISensorIfAPI *sensor_if = handle->sensor_if_api;
+++    sensor_if->PowerOff(idx, !handle->pwdn_POLARITY);
+++    sensor_if->Reset(idx, handle->reset_POLARITY);
+++    SENSOR_USLEEP(1000);
+++    sensor_if->SetCSI_Clk(idx, CUS_CSI_CLK_DISABLE);
+++    sensor_if->MCLK(idx, 0, handle->mclk);
+++    return SUCCESS;
+++}
+++
+++/////////////////// id / init ///////////////////
+++static int pCus_GetSensorID(ms_cus_sensor *handle, u32 *id)
+++{
+++    int i, n;
+++    int table_length = ARRAY_SIZE(Sensor_id_table);
+++    I2C_ARRAY id_from_sensor[ARRAY_SIZE(Sensor_id_table)];
+++
+++    for (n = 0; n < table_length; ++n) {
+++        id_from_sensor[n].reg = Sensor_id_table[n].reg;
+++        id_from_sensor[n].data = 0;
+++    }
+++
+++    *id = 0;
+++    if (table_length > 8) table_length = 8;
+++
+++    for (n = 0; n < 4; ++n) {
+++        if (n > 2) return FAIL;
+++        if (SensorRegArrayR((I2C_ARRAY*)id_from_sensor, table_length) == SUCCESS)
+++            break;
+++        else
+++            continue;
+++    }
+++
+++    for (i = 0; i < table_length; ++i) {
+++        if (id_from_sensor[i].data != Sensor_id_table[i].data)
+++            return FAIL;
+++        *id = ((*id) + id_from_sensor[i].data) << 8;
+++    }
+++    *id >>= 8;
+++
+++    return SUCCESS;
+++}
+++
+++static int gc8613_SetPatternMode(ms_cus_sensor *handle, u32 mode)
+++{
+++    return SUCCESS;
+++}
+++
+++static int pCus_init(ms_cus_sensor *handle)
+++{
+++    int i, cnt;
+++    for (i = 0; i < ARRAY_SIZE(Sensor_init_table); i++) {
+++        if (Sensor_init_table[i].reg == 0xffff) {
+++            msleep(Sensor_init_table[i].data);
+++        } else {
+++            cnt = 0;
+++            while (SensorReg_Write(Sensor_init_table[i].reg, Sensor_init_table[i].data) != SUCCESS) {
+++                cnt++;
+++                if (cnt >= 10)
+++                    return FAIL;
+++                msleep(10);
+++            }
+++        }
+++    }
+++    return SUCCESS;
+++}
+++
+++/////////////////// resolution ///////////////////
+++static int pCus_GetVideoResNum(ms_cus_sensor *handle, u32 *ulres_num)
+++{
+++    *ulres_num = handle->video_res_supported.num_res;
+++    return SUCCESS;
+++}
+++
+++static int pCus_GetVideoRes(ms_cus_sensor *handle, u32 res_idx, cus_camsensor_res **res)
+++{
+++    u32 num_res = handle->video_res_supported.num_res;
+++    if (res_idx >= num_res)
+++        return FAIL;
+++    *res = &handle->video_res_supported.res[res_idx];
+++    return SUCCESS;
+++}
+++
+++static int pCus_GetCurVideoRes(ms_cus_sensor *handle, u32 *cur_idx, cus_camsensor_res **res)
+++{
+++    u32 num_res = handle->video_res_supported.num_res;
+++    *cur_idx = handle->video_res_supported.ulcur_res;
+++    if (*cur_idx >= num_res)
+++        return FAIL;
+++    *res = &handle->video_res_supported.res[*cur_idx];
+++    return SUCCESS;
+++}
+++
+++static int pCus_SetVideoRes(ms_cus_sensor *handle, u32 res_idx)
+++{
+++    u32 num_res = handle->video_res_supported.num_res;
+++    if (res_idx >= num_res)
+++        return FAIL;
+++    switch (res_idx) {
+++        case 0:
+++            handle->video_res_supported.ulcur_res = 0;
+++            handle->pCus_sensor_init = pCus_init;
+++            break;
+++        default:
+++            break;
+++    }
+++    return SUCCESS;
+++}
+++
+++/////////////////// orientation ///////////////////
+++static int pCus_GetOrien(ms_cus_sensor *handle, CUS_CAMSENSOR_ORIT *orit)
+++{
+++    *orit = handle->orient;
+++    return SUCCESS;
+++}
+++
+++/* Mirror/flip data per orientation, reversed from OEM SetOrien. The register
+++ * addresses are mirror_reg1[]/mirror_reg2[]; only the data bytes change. */
+++static int pCus_SetOrien(ms_cus_sensor *handle, CUS_CAMSENSOR_ORIT orit)
+++{
+++    gc8613_params *params = (gc8613_params *)handle->private_data;
+++    /* mr1 data[0..8] for regs 022c,0063,0a67,0a98,05be,05a9,0a70,0a73,0a5a */
+++    static const u8 mr1[4][9] = {
+++        /* M0F0 */ {0x00,0x00,0x80,0x04,0x00,0x01,0x03,0x60,0x80},
+++        /* M1F0 */ {0x00,0x05,0x80,0x04,0x00,0x01,0x03,0x61,0x80},
+++        /* M0F1 */ {0x01,0x02,0x80,0x04,0x00,0x01,0x03,0x62,0x80},
+++        /* M1F1 */ {0x01,0x07,0x80,0x04,0x00,0x01,0x03,0x63,0x80},
+++    };
+++    /* mr2 data[0..3] for regs 05be,0a70,0080,0a67 (same for all orientations) */
+++    static const u8 mr2[4] = {0x01,0x00,0x02,0x00};
+++    int sel, i;
+++
+++    switch (orit) {
+++        case CUS_ORIT_M0F0: sel = 0; break;
+++        case CUS_ORIT_M1F0: sel = 1; break;
+++        case CUS_ORIT_M0F1: sel = 2; break;
+++        case CUS_ORIT_M1F1: sel = 3; break;
+++        default: return FAIL;
+++    }
+++    for (i = 0; i < 9; i++)
+++        params->tMirror_reg1[i].data = mr1[sel][i];
+++    for (i = 0; i < 4; i++)
+++        params->tMirror_reg2[i].data = mr2[i];
+++
+++    handle->orient = orit;
+++    params->orient_dirty = true;
+++    return SUCCESS;
+++}
+++
+++/////////////////// fps ///////////////////
+++static int pCus_GetFPS(ms_cus_sensor *handle)
+++{
+++    gc8613_params *params = (gc8613_params *)handle->private_data;
+++    return params->expo.fps;
+++}
+++
+++static int pCus_SetFPS(ms_cus_sensor *handle, u32 fps)
+++{
+++    int vts = 0;
+++    gc8613_params *params = (gc8613_params *)handle->private_data;
+++
+++    if (fps >= Preview_MIN_FPS && fps <= Preview_MAX_FPS) {
+++        params->expo.fps = fps;
+++        params->expo.vts = vts_linefreq / fps;
+++    } else if (fps >= 5000 && fps <= 30000) {
+++        params->expo.fps = fps;
+++        params->expo.vts = vts_linefreq_milli / fps;
+++    } else {
+++        return FAIL;
+++    }
+++
+++    if ((params->expo.line) > (params->expo.vts) - 4)
+++        vts = params->expo.line + 4;
+++    else
+++        vts = params->expo.vts;
+++
+++    params->tVts_reg[0].data = (vts >> 8) & 0x003f;
+++    params->tVts_reg[1].data = (vts >> 0) & 0x00ff;
+++    params->vts_dirty = true;
+++    return SUCCESS;
+++}
+++
+++/////////////////// exposure ///////////////////
+++static int pCus_GetAEUSecs(ms_cus_sensor *handle, u32 *us)
+++{
+++    gc8613_params *params = (gc8613_params *)handle->private_data;
+++    u32 lines = 0;
+++
+++    lines  = (u32)(params->tExpo_reg[0].data & 0xff);
+++    lines |= (u32)(params->tExpo_reg[1].data & 0x3f) << 8;
+++    *us = (lines * Preview_line_period) / 1000;   /* fits u32: <=2250*14814 */
+++    return SUCCESS;
+++}
+++
+++static int pCus_SetAEUSecs(ms_cus_sensor *handle, u32 us)
+++{
+++    u32 lines = 0, vts = 0;
+++    gc8613_params *params = (gc8613_params *)handle->private_data;
+++
+++    lines = (1000 * us) / Preview_line_period;   /* us AE-clamped <=200000 */
+++    if (lines < 1) lines = 1;
+++
+++    if (lines > params->expo.vts - 4)
+++        vts = lines + 4;
+++    else
+++        vts = params->expo.vts;
+++
+++    params->expo.line = lines;
+++    params->tExpo_reg[0].data = (lines) & 0x00ff;
+++    params->tExpo_reg[1].data = (lines >> 8) & 0x003f;
+++    params->tVts_reg[0].data = (vts >> 8) & 0x003f;
+++    params->tVts_reg[1].data = (vts >> 0) & 0x00ff;
+++
+++    params->expo_dirty = true;
+++    params->vts_dirty = true;
+++    return SUCCESS;
+++}
+++
+++/////////////////// gain ///////////////////
+++static int pCus_GetAEGain(ms_cus_sensor *handle, u32 *gain)
+++{
+++    gc8613_params *params = (gc8613_params *)handle->private_data;
+++    u32 again = SENSOR_AE_MIN_GAIN, dgain;
+++    u8 i;
+++
+++    for (i = 0; i < ARRAY_SIZE(gain_table); i++) {
+++        if ((gain_table[i].again[0] == params->tGain_reg[1].data) &&
+++            (gain_table[i].again[1] == params->tGain_reg[2].data) &&
+++            (gain_table[i].again[2] == params->tGain_reg[4].data) &&
+++            (gain_table[i].again[3] == params->tGain_reg[5].data) &&
+++            (gain_table[i].again[4] == params->tGain_reg[6].data) &&
+++            (gain_table[i].again[5] == params->tGain_reg[7].data) &&
+++            (gain_table[i].again[6] == params->tGain_reg[8].data) &&
+++            (gain_table[i].again[7] == params->tGain_reg[9].data)) {
+++            again = gain_table[i].gain;
+++            break;
+++        }
+++    }
+++
+++    dgain = ((params->tGain_reg[10].data & 0xf) << 6) + (params->tGain_reg[11].data & 0x3f);
+++    *gain = (again * dgain) / 64;   /* fits u32: <=67450*1024 */
+++    return SUCCESS;
+++}
+++
+++static int pCus_SetAEGain(ms_cus_sensor *handle, u32 gain)
+++{
+++    gc8613_params *params = (gc8613_params *)handle->private_data;
+++    u32 dgain;
+++    u8 i, tmp;
+++
+++    params->expo.final_gain = gain;
+++
+++    if (gain < SENSOR_AE_MIN_GAIN)
+++        gain = SENSOR_AE_MIN_GAIN;
+++    else if (gain > SENSOR_MAX_GAIN)
+++        gain = SENSOR_MAX_GAIN;
+++
+++    tmp = ARRAY_SIZE(gain_table) - 1;
+++    for (i = 1; i < ARRAY_SIZE(gain_table); i++) {
+++        if ((gain >= gain_table[i-1].gain) && (gain < gain_table[i].gain)) {
+++            tmp = i - 1;
+++            break;
+++        }
+++    }
+++
+++    dgain = (gain * 64) / gain_table[tmp].gain;
+++    if (dgain > SENSOR_DGAIN_MAX)
+++        dgain = SENSOR_DGAIN_MAX;
+++
+++    /* analog gain registers (fixed-order 0x031d toggles already preset) */
+++    params->tGain_reg[0].data = 0x2d;
+++    params->tGain_reg[1].data = gain_table[tmp].again[0];
+++    params->tGain_reg[2].data = gain_table[tmp].again[1];
+++    params->tGain_reg[3].data = 0x28;
+++    params->tGain_reg[4].data = gain_table[tmp].again[2];
+++    params->tGain_reg[5].data = gain_table[tmp].again[3];
+++    params->tGain_reg[6].data = gain_table[tmp].again[4];
+++    params->tGain_reg[7].data = gain_table[tmp].again[5];
+++    params->tGain_reg[8].data = gain_table[tmp].again[6];
+++    params->tGain_reg[9].data = gain_table[tmp].again[7];
+++    /* digital gain: 64 = 1x, integer part to 0x0064, frac/64 to 0x0065 */
+++    params->tGain_reg[10].data = (dgain >> 6) & 0xff;
+++    params->tGain_reg[11].data = dgain & 0x3f;
+++
+++    params->gain_dirty = true;
+++    return SUCCESS;
+++}
+++
+++static int pCus_GetAEMinMaxUSecs(ms_cus_sensor *handle, u32 *min, u32 *max)
+++{
+++    *min = 30;
+++    *max = 1000000 / Preview_MIN_FPS;
+++    return SUCCESS;
+++}
+++
+++static int pCus_GetAEMinMaxGain(ms_cus_sensor *handle, u32 *min, u32 *max)
+++{
+++    *min = handle->sat_mingain;
+++    *max = SENSOR_MAX_GAIN;
+++    return SUCCESS;
+++}
+++
+++static int gc8613_GetShutterInfo(struct __ms_cus_sensor* handle, CUS_SHUTTER_INFO *info)
+++{
+++    info->length = sizeof(CUS_SHUTTER_INFO);
+++    info->max = 1000000000 / Preview_MIN_FPS;
+++    info->min = Preview_line_period;
+++    info->step = Preview_line_period;
+++    return SUCCESS;
+++}
+++
+++static int pCus_setCaliData_gain_linearity(ms_cus_sensor* handle, CUS_GAIN_GAP_ARRAY* pArray, u32 num)
+++{
+++    return SUCCESS;
+++}
+++
+++/////////////////// AE status notify ///////////////////
+++static int pCus_AEStatusNotify(ms_cus_sensor *handle, CUS_CAMSENSOR_AE_STATUS_NOTIFY status)
+++{
+++    gc8613_params *params = (gc8613_params *)handle->private_data;
+++    switch (status) {
+++        case CUS_FRAME_INACTIVE:
+++            break;
+++        case CUS_FRAME_ACTIVE:
+++            if (params->orient_dirty) {
+++                SensorRegArrayW((I2C_ARRAY*)params->tMirror_reg1, ARRAY_SIZE(mirror_reg1));
+++                msleep(20);
+++                SensorRegArrayW((I2C_ARRAY*)params->tMirror_reg2, ARRAY_SIZE(mirror_reg2));
+++                params->orient_dirty = false;
+++            }
+++            if (params->gain_dirty) {
+++                SensorRegArrayW((I2C_ARRAY*)params->tGain_reg, ARRAY_SIZE(gain_reg));
+++                params->gain_dirty = false;
+++            }
+++            if (params->expo_dirty) {
+++                SensorRegArrayW((I2C_ARRAY*)params->tExpo_reg, ARRAY_SIZE(expo_reg));
+++                params->expo_dirty = false;
+++            }
+++            if (params->vts_dirty) {
+++                SensorRegArrayW((I2C_ARRAY*)params->tVts_reg, ARRAY_SIZE(vts_reg));
+++                params->vts_dirty = false;
+++            }
+++            break;
+++        default:
+++            break;
+++    }
+++    return SUCCESS;
+++}
+++
+++/////////////////// init handle ///////////////////
+++int cus_camsensor_init_handle(ms_cus_sensor* drv_handle)
+++{
+++    ms_cus_sensor *handle = drv_handle;
+++    gc8613_params *params;
+++
+++    if (!handle)
+++        return FAIL;
+++    if (handle->private_data == NULL)
+++        return FAIL;
+++
+++    params = (gc8613_params *)handle->private_data;
+++    memcpy(params->tGain_reg,    gain_reg,    sizeof(gain_reg));
+++    memcpy(params->tExpo_reg,    expo_reg,    sizeof(expo_reg));
+++    memcpy(params->tVts_reg,     vts_reg,     sizeof(vts_reg));
+++    memcpy(params->tMirror_reg1, mirror_reg1, sizeof(mirror_reg1));
+++    memcpy(params->tMirror_reg2, mirror_reg2, sizeof(mirror_reg2));
+++
+++    strcpy(handle->model_id, "gc8613_MIPI");
+++
+++    handle->isp_type    = SENSOR_ISP_TYPE;
+++    handle->sif_bus     = SENSOR_IFBUS_TYPE;
+++    handle->data_prec   = SENSOR_DATAPREC;
+++    handle->data_mode   = SENSOR_DATAMODE;
+++    handle->bayer_id    = SENSOR_BAYERID;
+++    handle->RGBIR_id    = SENSOR_RGBIRID;
+++    handle->orient      = SENSOR_ORIT;
+++
+++    handle->interface_attr.attr_mipi.mipi_lane_num = (lane_num > 0) ? lane_num : SENSOR_MIPI_LANE_NUM;
+++    handle->interface_attr.attr_mipi.mipi_data_format = CUS_SEN_INPUT_FORMAT_RGB;
+++    handle->interface_attr.attr_mipi.mipi_yuv_order = 0;
+++    handle->interface_attr.attr_mipi.mipi_hsync_mode = SENSOR_MIPI_HSYNC_MODE;
+++    handle->interface_attr.attr_mipi.mipi_hdr_mode = CUS_HDR_MODE_NONE;
+++    handle->interface_attr.attr_mipi.mipi_hdr_virtual_channel_num = 0;
+++
+++    handle->video_res_supported.num_res = 1;
+++    handle->video_res_supported.ulcur_res = 0;
+++    handle->video_res_supported.res[0].width = Preview_WIDTH;
+++    handle->video_res_supported.res[0].height = Preview_HEIGHT;
+++    handle->video_res_supported.res[0].max_fps = Preview_MAX_FPS;
+++    handle->video_res_supported.res[0].min_fps = Preview_MIN_FPS;
+++    handle->video_res_supported.res[0].crop_start_x = 0;
+++    handle->video_res_supported.res[0].crop_start_y = 0;
+++    handle->video_res_supported.res[0].nOutputWidth = Preview_WIDTH;
+++    handle->video_res_supported.res[0].nOutputHeight = Preview_HEIGHT;
+++    strcpy(handle->video_res_supported.res[0].strResDesc, "3840x2160@30fps");
+++
+++    handle->i2c_cfg.mode    = SENSOR_I2C_LEGACY;
+++    handle->i2c_cfg.fmt     = SENSOR_I2C_FMT;
+++    handle->i2c_cfg.address = i2c_slave_id ? (u16)i2c_slave_id : SENSOR_I2C_ADDR;
+++    handle->i2c_cfg.speed   = SENSOR_I2C_SPEED;
+++
+++    handle->mclk = Preview_MCLK_SPEED;
+++
+++    handle->pwdn_POLARITY  = SENSOR_PWDN_POL;
+++    handle->reset_POLARITY = SENSOR_RST_POL;
+++    handle->VSYNC_POLARITY = SENSOR_VSYNC_POL;
+++    handle->HSYNC_POLARITY = SENSOR_HSYNC_POL;
+++    handle->PCLK_POLARITY  = SENSOR_PCLK_POL;
+++
+++    handle->ae_gain_delay    = 2;
+++    handle->ae_shutter_delay = 2;
+++    handle->ae_gain_ctrl_num = 1;
+++    handle->ae_shutter_ctrl_num = 1;
+++
+++    handle->sat_mingain = g_sensor_ae_min_gain;
+++
+++    handle->pCus_sensor_release = cus_camsensor_release_handle;
+++    handle->pCus_sensor_init    = pCus_init;
+++    handle->pCus_sensor_poweron = pCus_poweron;
+++    handle->pCus_sensor_poweroff = pCus_poweroff;
+++
+++    handle->pCus_sensor_GetSensorID    = pCus_GetSensorID;
+++    handle->pCus_sensor_GetVideoResNum = pCus_GetVideoResNum;
+++    handle->pCus_sensor_GetVideoRes    = pCus_GetVideoRes;
+++    handle->pCus_sensor_GetCurVideoRes = pCus_GetCurVideoRes;
+++    handle->pCus_sensor_SetVideoRes    = pCus_SetVideoRes;
+++
+++    handle->pCus_sensor_GetOrien = pCus_GetOrien;
+++    handle->pCus_sensor_SetOrien = pCus_SetOrien;
+++    handle->pCus_sensor_GetFPS   = pCus_GetFPS;
+++    handle->pCus_sensor_SetFPS   = pCus_SetFPS;
+++    handle->pCus_sensor_SetPatternMode = gc8613_SetPatternMode;
+++
+++    handle->pCus_sensor_AEStatusNotify = pCus_AEStatusNotify;
+++    handle->pCus_sensor_GetAEUSecs = pCus_GetAEUSecs;
+++    handle->pCus_sensor_SetAEUSecs = pCus_SetAEUSecs;
+++    handle->pCus_sensor_GetAEGain  = pCus_GetAEGain;
+++    handle->pCus_sensor_SetAEGain  = pCus_SetAEGain;
+++    handle->pCus_sensor_GetAEMinMaxGain  = pCus_GetAEMinMaxGain;
+++    handle->pCus_sensor_GetAEMinMaxUSecs = pCus_GetAEMinMaxUSecs;
+++    handle->pCus_sensor_setCaliData_gain_linearity = pCus_setCaliData_gain_linearity;
+++    handle->pCus_sensor_GetShutterInfo = gc8613_GetShutterInfo;
+++
+++    params->expo.vts  = vts_30fps;
+++    params->expo.fps  = Preview_MAX_FPS;
+++    params->expo.line = 100;
+++    params->gain_dirty   = false;
+++    params->expo_dirty   = false;
+++    params->vts_dirty    = false;
+++    params->orient_dirty = false;
+++    return SUCCESS;
+++}
+++
+++int cus_camsensor_release_handle(ms_cus_sensor *handle)
+++{
+++    return SUCCESS;
+++}
+++
+++SENSOR_DRV_ENTRY_IMPL_END_EX(gc8613,
+++                            cus_camsensor_init_handle,
+++                            NULL,
+++                            NULL,
+++                            gc8613_params);
+diff --git a/package/sigmastar-sdk/Config.in b/package/sigmastar-sdk/Config.in
+new file mode 100644
+index 000000000..2a4ec5571
+--- /dev/null
++++ b/package/sigmastar-sdk/Config.in
+@@ -0,0 +1,27 @@
++config BR2_PACKAGE_SIGMASTAR_SDK
++	bool "sigmastar-sdk"
++	depends on BR2_SOC_VENDOR_SIGMASTAR
++	depends on BR2_LINUX_KERNEL
++	select BR2_PACKAGE_SIGMASTAR_LIB
++	# The 1230-matching sensor headers for the sensor-src build.
++	select BR2_PACKAGE_SIGMASTAR_SENSOR_HEADERS if BR2_SIGMASTAR_SENSOR_SOURCE
++	help
++	  The kernel side of the SigmaStar vendor stack: the prebuilt mi_*
++	  and mhal kernel modules, the sensor drivers built from source for
++	  the configured Infinity family, the ISP tuning blobs and the VENC
++	  firmware.
++
++	  The vendor modules are prebuilt against Linux 4.9.84, which is why
++	  this board pins that kernel: insmod checks vermagic and a mismatch
++	  is fatal. The sensor drivers are compiled here and have no such
++	  constraint; one is chosen at runtime by load_sigmastar from the
++	  U-Boot `sensor` variable.
++
++	  Selects sigmastar-lib, which carries the MI userspace libraries
++	  the Raptor HAL dlopens. Neither half is useful alone.
++
++	  https://github.com/johnchia/sigmastar-sdk
++
++# The 1230-matching sensor headers it selects; a hidden symbol, so here rather
++# than in the top-level Config.in.
++source "$BR2_EXTERNAL_THINGINO_PATH/package/sigmastar-sensor-headers/Config.in"
+diff --git a/package/sigmastar-sdk/files/S20sigmastar b/package/sigmastar-sdk/files/S20sigmastar
+new file mode 100644
+index 000000000..9997d084c
+--- /dev/null
++++ b/package/sigmastar-sdk/files/S20sigmastar
+@@ -0,0 +1,53 @@
++#!/bin/sh
++#
++# Load the SigmaStar MI kernel modules.
++#
++# WHY S20, AND WHY RAPTOR IS NOT RENAMED
++#
++# The only real constraint is that the MI modules are in and /dev/mi_* exists
++# before rvd opens the HAL. thingino installs Raptor at S31raptor.
++#
++# OpenIPC solves the same ordering the other way round: its module load lives
++# in S70vendor, so it has to rename upstream's S31raptor to S95raptor to get
++# behind it. That rename is forced by *OpenIPC's* init layout, not by anything
++# about this hardware, and reproducing it here would cost two things for no
++# gain: an edit to thingino-raptor.mk's install path, and a patch to
++# thingino-agent-adapter-raptor, which hardcodes /etc/init.d/S31raptor in two
++# places (its detection probe and its streamer-restart action). Loading early
++# instead leaves both untouched.
++#
++# S20 is safe this early because:
++#   - CONFIG_DEVTMPFS_MOUNT=y, so /dev is populated by the kernel and does not
++#     wait on mdev. The one node devtmpfs does not create, /dev/mi_poll, is
++#     mknod'd by load_sigmastar itself.
++#   - S30mdev only runs `mdev -s` and sets the hotplug helper; it does not
++#     remount /dev, so the node created here survives it.
++#   - fw_printenv works from S03mac onward, which is earlier still.
++#
++# If Raptor ever does move to S95, this can stay where it is -- late loading
++# is what needs justifying, not early.
++
++case "$1" in
++	start)
++		echo -c 15 "Loading SigmaStar vendor modules"
++		load_sigmastar -i
++		;;
++
++	stop)
++		# Deliberately a no-op. Unloading the MI stack in reverse is not
++		# reliable while anything still holds a buffer, and the only caller
++		# is shutdown, where the reboot does it properly.
++		true
++		;;
++
++	restart)
++		load_sigmastar -i
++		;;
++
++	*)
++		echo "Usage: $0 {start|stop|restart}"
++		exit 1
++		;;
++esac
++
++exit 0
+diff --git a/package/sigmastar-sdk/files/script/load_sigmastar b/package/sigmastar-sdk/files/script/load_sigmastar
+new file mode 100644
+index 000000000..1432c6b57
+--- /dev/null
++++ b/package/sigmastar-sdk/files/script/load_sigmastar
+@@ -0,0 +1,180 @@
++#!/bin/sh
++#
++# Insert the SigmaStar MI kernel modules and bind the sensor driver.
++#
++# Ported from OpenIPC (general/package/sigmastar-sdk-infinity6e). Three
++# deliberate changes from their version:
++#
++#   1. The module directory is derived from `uname -r` rather than hardcoded
++#      to 4.9.84. The modules are installed under the kernel release Buildroot
++#      probed, and hardcoding it here means a kernel bump silently loads
++#      nothing -- the loop just finds no files and every later insmod fails
++#      with a message about the module, not about the path.
++#   2. The OpenIPC-specific bits are gone: the `fpv` check against
++#      /etc/os-release, and the OpenIPC logger tag.
++#   3. There is no sensor autodetection. The U-Boot `sensor` variable is the
++#      per-unit override; when it is unset the build-time name installed at
++#      /usr/share/sensor/model is used instead.
++#
++# The i2c probe used to come from OpenIPC's ipctool. That package is gone, and
++# thingino's own detector (sensor-info/sinfo) is Ingenic-only, so this platform
++# has no native probe to fall back on yet. Restore autodetection here once
++# sensor-info learns SigmaStar -- do not reintroduce ipctool.
++#
++# Argument: accepted and ignored, so the init script's `-i` keeps working. It
++# used to mean "trust the stored variable rather than re-probing", a
++# distinction with no meaning now that the variable is the only source.
++
++MODULE=/lib/modules/$(uname -r)/sigmastar
++SENSOR=$(fw_printenv -n sensor 2>/dev/null)
++
++# A full sysupgrade erases the environment, so the variable cannot be the only
++# source: without this the camera does not stream until it is re-entered by
++# hand, and there is no remote recovery. The environment is never written back
++# -- it stays the per-unit override and wins wherever it exists.
++# model is written by sigmastar-sdk-infinity6e from SENSOR_1_MODEL.
++if [ -z "$SENSOR" ] && [ -r /usr/share/sensor/model ]; then
++	SENSOR=$(cat /usr/share/sensor/model)
++	SENSOR_FROM_BUILD=1
++fi
++
++log() { echo "$@" | logger -s -t sigmastar; }
++
++set_sensor() {
++	case $SENSOR in
++		gc8613)
++			insmod $MODULE/sensor_${SENSOR}_mipi.ko chmap=1 lane_num=4
++			;;
++		gc2053 | gc4653 | imx274 | imx307 | imx335 | imx347 | imx415 | sc501ai | sc8235 | os04a10 | os04c10)
++			insmod $MODULE/sensor_${SENSOR}_mipi.ko chmap=1
++			;;
++		tp9950)
++			insmod $MODULE/sensor_${SENSOR}_mipi.ko chmap=1 mode=3 channel=0
++			;;
++		tp9951)
++			insmod $MODULE/sensor_${SENSOR}_mipi.ko chmap=1 mode=0 channel=2
++			;;
++		*)
++			log "unsupported sensor - $SENSOR"
++			return 1
++			;;
++	esac
++}
++
++# The module set is per family and the two barely overlap. Infinity6E has
++# mhal, mi_mipitx, mi_divp and mi_vpe; Infinity6C ships none of them and needs
++# mi_vcodec -- which carries the MHAL_* symbols mi_venc links against -- plus
++# mi_isp, mi_scl and mi_aio. 6E's list on 6C leaves mi_venc and the sensor
++# driver with unresolved symbols and nothing streams.
++#
++# The device tree is the only family source that is correct before any module
++# is loaded.
++SOC_COMPAT=$(tr -d '\0' </proc/device-tree/compatible 2>/dev/null)
++
++# Load order is the vendor's and is not arbitrary -- mi_sys owns the buffer
++# pool every later module registers against, and 6E's mi_venc wants the VENC
++# firmware path at insmod time.
++insert_ko_infinity6e() {
++	insmod $MODULE/mhal.ko
++	insmod $MODULE/mi_common.ko
++	insmod $MODULE/mi_sys.ko cmdQBufSize=768 logBufSize=256
++	insmod $MODULE/mi_rgn.ko
++	insmod $MODULE/mi_ldc.ko
++	insmod $MODULE/mi_ai.ko
++	insmod $MODULE/mi_ao.ko
++	insmod $MODULE/mi_mipitx.ko
++	insmod $MODULE/mi_sensor.ko
++	insmod $MODULE/mi_shadow.ko
++	insmod $MODULE/mi_divp.ko
++	insmod $MODULE/mi_vif.ko
++	insmod $MODULE/mi_vpe.ko
++	insmod $MODULE/mi_venc.ko fw_path=/etc/firmware/chagall.bin
++}
++
++# 6C ships in two shapes. From the 2024-12 drop the whole MI stack is one
++# mi.ko; before that it is nineteen modules whose load order matters. Which one
++# is installed is a build-time choice, but testing for the file keeps this
++# script independent of it.
++#
++# g_ModParamPath and the VENC firmware path both default to /config paths that
++# thingino does not have. vdisp_bufq_depth is the vendor's own value from
++# script/demo.sh.
++insert_ko_infinity6c_mono() {
++	insmod $MODULE/mi.ko \
++		g_ModParamPath=/etc/firmware/modparam.json \
++		vdisp_bufq_depth=4 \
++		drv_codec40_common.fw_load_path=/etc/firmware/chagall.bin
++}
++
++# Order is modules.dep's, verified on an SSC377QE. 6C's mi_sys rejects
++# cmdQBufSize and logBufSize by name. sensor_config only registers /dev/srcfg
++# and configures nothing until something writes to it.
++#
++# 6C loads the VENC firmware through mi_vcodec, not mi_venc, and the parameter
++# carries the vendor's per-object prefix. Without it the driver keeps its
++# compiled-in /config/venc_fw path, finds nothing, and MI_VENC_CreateDev fails.
++insert_ko_infinity6c() {
++	if [ -f $MODULE/mi.ko ]; then
++		insert_ko_infinity6c_mono
++		return
++	fi
++
++	insmod $MODULE/mi_common.ko
++	insmod $MODULE/mi_sys.ko
++	insmod $MODULE/mi_rgn.ko
++	insmod $MODULE/mi_vif.ko
++	insmod $MODULE/mi_sensor.ko
++	insmod $MODULE/mi_isp.ko
++	insmod $MODULE/mi_ldc.ko
++	insmod $MODULE/mi_shadow.ko
++	insmod $MODULE/mi_scl.ko
++	insmod $MODULE/mi_vcodec.ko \
++		drv_codec40_common.fw_load_path=/etc/firmware/chagall.bin
++	insmod $MODULE/mi_venc.ko
++	insmod $MODULE/mi_aio.ko
++	insmod $MODULE/mi_ai.ko
++	insmod $MODULE/mi_ao.ko
++	insmod $MODULE/sensor_config.ko
++}
++
++insert_ko() {
++	case "$SOC_COMPAT" in
++		*infinity6c*) insert_ko_infinity6c ;;
++		*)            insert_ko_infinity6e ;;
++	esac
++
++	# mi_poll registers a chrdev with no class, so devtmpfs does not create
++	# the node for it. Everything else under /dev/mi_* appears on its own.
++	MAJOR=$(awk '$2=="mi_poll" {print $1}' /proc/devices)
++	[ -n "$MAJOR" ] && mknod /dev/mi_poll c "$MAJOR" 0
++	echo isproot /etc/firmware >/dev/ispmid
++}
++
++if [ ! -d "$MODULE" ]; then
++	log "no vendor modules at $MODULE"
++	exit 1
++fi
++
++if [ ! -e /sys/module/mi_common ]; then
++	insert_ko
++fi
++
++if [ -z "$SENSOR" ]; then
++	log "no sensor identified -- set the U-Boot 'sensor' variable"
++	exit 1
++fi
++
++# Named explicitly: a board whose sensor differs from the target's is corrected
++# by setting the variable, and the log is the only place that is visible.
++[ -n "$SENSOR_FROM_BUILD" ] && log "U-Boot 'sensor' unset, using build-time $SENSOR"
++
++# Re-binding: drop whatever driver is already bound before inserting one.
++DRIVER=$(ls /sys/module | grep "$SENSOR")
++if [ -n "$DRIVER" ]; then
++	rmmod $DRIVER
++fi
++
++log "sensor $SENSOR"
++set_sensor
++
++exit $?
+diff --git a/package/sigmastar-sdk/files/script/zoom.sh b/package/sigmastar-sdk/files/script/zoom.sh
+new file mode 100755
+index 000000000..567308d68
+--- /dev/null
++++ b/package/sigmastar-sdk/files/script/zoom.sh
+@@ -0,0 +1,183 @@
++#!/bin/sh
++
++if [ -z "$1" ]; then
++	echo Usage: $0 [start], [restart], [1-30,31,32,33]
++	exit 0
++fi
++
++function zoom_start {
++  stty -F /dev/ttyS2 9600 raw -echo -onlcr
++  sleep .5
++  printf '\x54\x65\x6D\x0D' >/dev/ttyS2
++  sleep .5
++  printf '\x81\x01\x04\x38\x03\xFF' >/dev/ttyS2
++}
++
++function zoom_restart {
++  printf '\x81\x01\x04\x00\x03\xFF' >/dev/ttyS2
++  sleep 17
++  printf '\x54\x65\x6D\x0D' >/dev/ttyS2
++  sleep 2
++  printf '\x81\x01\x04\x38\x03\xFF' >/dev/ttyS2
++}
++
++zoom_1() {
++	printf '\x81\x01\x04\x47\x00\x00\x00\x00\xFF\x81\x01\x04\x48\x06\x05\x02\x00\xFF' > /dev/ttyS2
++}
++
++zoom_2() {
++	printf '\x81\x01\x04\x47\x00\x06\x00\x00\xFF\x81\x01\x04\x48\x06\x0D\x04\x08\xFF' > /dev/ttyS2
++}
++
++zoom_3() {
++	printf '\x81\x01\x04\x47\x00\x09\x0B\x00\xFF\x81\x01\x04\x48\x07\x02\x09\x0E\xFF' > /dev/ttyS2
++}
++
++zoom_4() {
++	printf '\x81\x01\x04\x47\x00\x09\x0F\x00\xFF\x81\x01\x04\x48\x07\x02\x0F\x08\xFF' > /dev/ttyS2
++}
++
++zoom_5() {
++	printf '\x81\x01\x04\x47\x01\x00\x00\x00\xFF\x81\x01\x04\x48\x07\x0C\x09\x08\xFF' > /dev/ttyS2
++}
++
++zoom_6() {
++	printf '\x81\x01\x04\x47\x01\x03\x00\x00\xFF\x81\x01\x04\x48\x08\x01\x0B\x02\xFF' > /dev/ttyS2
++}
++
++zoom_7() {
++	printf '\x81\x01\x04\x47\x01\x06\x00\x00\xFF\x81\x01\x04\x48\x08\x07\x01\x08\xFF' > /dev/ttyS2
++}
++
++zoom_8() {
++	printf '\x81\x01\x04\x47\x01\x09\x00\x00\xFF\x81\x01\x04\x48\x08\x0C\x07\x0E\xFF' > /dev/ttyS2
++}
++
++zoom_9() {
++	printf '\x81\x01\x04\x47\x01\x09\x0F\x00\xFF\x81\x01\x04\x48\x08\x0E\x06\x0D\xFF' > /dev/ttyS2
++}
++
++zoom_10() {
++	printf '\x81\x01\x04\x47\x02\x00\x00\x00\xFF\x81\x01\x04\x48\x09\x0A\x00\x0B\xFF' > /dev/ttyS2
++}
++
++zoom_11() {
++	printf '\x81\x01\x04\x47\x02\x02\x00\x00\xFF\x81\x01\x04\x48\x09\x0D\x0B\x0D\xFF' > /dev/ttyS2
++}
++
++zoom_12() {
++	printf '\x81\x01\x04\x47\x02\x06\x00\x00\xFF\x81\x01\x04\x48\x0A\x04\x08\x0B\xFF' > /dev/ttyS2
++}
++
++zoom_13() {
++	printf '\x81\x01\x04\x47\x02\x09\x00\x00\xFF\x81\x01\x04\x48\x0A\x08\x0A\x07\xFF' > /dev/ttyS2
++}
++
++zoom_14() {
++	printf '\x81\x01\x04\x47\x02\x0B\x0F\x00\xFF\x81\x01\x04\x48\x0A\x0A\x0D\x02\xFF' > /dev/ttyS2
++}
++
++zoom_15() {
++	printf '\x81\x01\x04\x47\x02\x0F\x0F\x00\xFF\x81\x01\x04\x48\x0A\x08\x02\x0E\xFF' > /dev/ttyS2
++}
++
++zoom_16() {
++	printf '\x81\x01\x04\x47\x03\x02\x00\x00\xFF\x81\x01\x04\x48\x0A\x03\x0E\x06\xFF' > /dev/ttyS2
++}
++
++zoom_17() {
++	printf '\x81\x01\x04\x47\x03\x02\x0F\x00\xFF\x81\x01\x04\x48\x0A\x01\x08\x0D\xFF' > /dev/ttyS2
++}
++
++zoom_18() {
++	printf '\x81\x01\x04\x47\x03\x04\x0F\x00\xFF\x81\x01\x04\x48\x09\x0A\x0C\x0E\xFF' > /dev/ttyS2
++}
++
++zoom_19() {
++	printf '\x81\x01\x04\x47\x03\x07\x00\x00\xFF\x81\x01\x04\x48\x09\x00\x0F\x03\xFF' > /dev/ttyS2
++}
++
++zoom_20() {
++	printf '\x81\x01\x04\x47\x03\x08\x00\x00\xFF\x81\x01\x04\x48\x08\x0B\x02\x04\xFF' > /dev/ttyS2
++}
++
++zoom_21() {
++	printf '\x81\x01\x04\x47\x03\x0C\x00\x00\xFF\x81\x01\x04\x48\x06\x05\x0F\x02\xFF' > /dev/ttyS2
++}
++
++zoom_22() {
++	printf '\x81\x01\x04\x47\x03\x0D\x00\x00\xFF\x81\x01\x04\x48\x05\x0D\x03\x05\xFF' > /dev/ttyS2
++}
++
++zoom_23() {
++	printf '\x81\x01\x04\x47\x03\x0E\x00\x00\xFF\x81\x01\x04\x48\x05\x03\x09\x06\xFF' > /dev/ttyS2
++}
++
++zoom_24() {
++	printf '\x81\x01\x04\x47\x03\x0E\x09\x00\xFF\x81\x01\x04\x48\x04\x0F\x02\x00\xFF' > /dev/ttyS2
++}
++
++zoom_25() {
++	printf '\x81\x01\x04\x47\x03\x0E\x0A\x00\xFF\x81\x01\x04\x48\x04\x0E\x05\x0D\xFF' > /dev/ttyS2
++}
++
++zoom_26() {
++	printf '\x81\x01\x04\x47\x03\x0E\x0E\x00\xFF\x81\x01\x04\x48\x04\x0B\x09\x0B\xFF' > /dev/ttyS2
++}
++
++zoom_27() {
++	printf '\x81\x01\x04\x47\x03\x0F\x05\x00\xFF\x81\x01\x04\x48\x04\x06\x0F\x08\xFF' > /dev/ttyS2
++}
++
++zoom_28() {
++	printf '\x81\x01\x04\x47\x03\x0F\x08\x00\xFF\x81\x01\x04\x48\x04\x04\x0D\x0C\xFF' > /dev/ttyS2
++}
++
++zoom_29() {
++	printf '\x81\x01\x04\x47\x03\x0F\x0F\x00\xFF\x81\x01\x04\x48\x03\x0F\x01\x0C\xFF' > /dev/ttyS2
++}
++
++zoom_30() {
++	printf '\x81\x01\x04\x47\x04\x00\x00\x00\xFF\x81\x01\x04\x48\x03\x0D\x0F\x00\xFF' > /dev/ttyS2
++}
++
++function zoom_31 {
++  if [ `yaml-cli -g .video0.size` == '1920x1080' ]  ; then 
++  cli -s .video0.crop 0x0x1920x1080 && killall -10 majestic
++
++  elif [ `yaml-cli -g .video0.size` == '3200x1800' ]  ; then 
++  cli -s .video0.crop 0x0x3200x1800 && killall -10 majestic
++
++  elif [ `yaml-cli -g .video0.size` == '3840x2160' ]  ; then 
++  cli -s .video0.crop 0x0x3840x2160 && killall -10 majestic
++
++  fi
++}
++
++function zoom_32 {
++  if [ `yaml-cli -g .video0.size` == '1920x1080' ]  ; then 
++  cli -s .video0.crop 320x180x1280x720 && killall -10 majestic
++
++  elif [ `yaml-cli -g .video0.size` == '3200x1800' ]  ; then 
++  cli -s .video0.crop 960x540x1280x720 && killall -10 majestic
++
++  elif [ `yaml-cli -g .video0.size` == '3840x2160' ]  ; then 
++  cli -s .video0.crop 1280x720x1280x720 && killall -10 majestic
++
++  fi
++}
++
++function zoom_33 {
++  if [ `yaml-cli -g .video0.size` == '1920x1080' ]  ; then 
++  cli -s .video0.crop 640x360x640x360 && killall -10 majestic
++
++  elif [ `yaml-cli -g .video0.size` == '3200x1800' ]  ; then 
++  cli -s .video0.crop 1280x720x640x360 && killall -10 majestic
++
++  elif [ `yaml-cli -g .video0.size` == '3840x2160' ]  ; then 
++  cli -s .video0.crop 1600x900x640x360 && killall -10 majestic
++
++  fi
++}
++
++zoom_$1
+diff --git a/package/sigmastar-sdk/sigmastar-sdk.mk b/package/sigmastar-sdk/sigmastar-sdk.mk
+new file mode 100644
+index 000000000..1c4864ea8
+--- /dev/null
++++ b/package/sigmastar-sdk/sigmastar-sdk.mk
+@@ -0,0 +1,200 @@
++################################################################################
++#
++# sigmastar-sdk
++#
++# The kernel side of the SigmaStar vendor stack: prebuilt MI modules, sensor
++# drivers built from source, and the tuning and firmware blobs the ISP and
++# encoder read at runtime. Userspace lives in sigmastar-lib.
++#
++# The split follows thingino's Ingenic convention -- ingenic-lib is prebuilt
++# userspace, ingenic-sdk is kernel-side and mixes prebuilt firmware archives
++# with source compiled at build time. This does the same.
++#
++# One package per repository, deliberately: two packages pinning one repo means
++# two clones and two hashes that can drift apart.
++#
++################################################################################
++
++SIGMASTAR_SDK_SITE_METHOD = git
++# Local mirror of https://github.com/johnchia/sigmastar-sdk, kept by
++# mirror-sigmastar-deps.sh so the build does not depend on that repository.
++SIGMASTAR_SDK_SITE = file://$(HOME)/src/mirrors/git/johnchia__sigmastar-sdk.git
++SIGMASTAR_SDK_SITE_BRANCH = drop-1230
++SIGMASTAR_SDK_VERSION = bdfbbdd67407974372e1f07478b1edb2e22fce1a
++SIGMASTAR_SDK_LICENSE = PROPRIETARY (mi modules), GPL-2.0 (sensor drivers)
++SIGMASTAR_SDK_REDISTRIBUTE = NO
++
++SIGMASTAR_SDK_DEPENDENCIES = linux
++
++# Two kernel releases that must agree, from two different places.
++#
++# KREL is where the modules go on the target, and has to match what uname
++# reports. LINUX_VERSION_PROBED gives that -- but it expands to a *backquoted
++# shell command*, not a $(shell), so it only works inside a recipe. It must not
++# reach anything make consumes directly: in MODULE_SUBDIRS the backticks never
++# run and the embedded $(MAKE) leaks through as a path.
++#
++# SIGMASTAR_KREL is where the payload sits inside the repo, a property of the
++# fetched tree. soc/sigmastar/<family>.mk states it.
++#
++# They are required to be equal: the vendor modules are prebuilt and insmod
++# checks vermagic, which is why core-sigmastar.fragment pins the kernel. A
++# mismatch fails loudly here, at a path that does not exist, rather than on the
++# board.
++#
++# KERNEL_VERSION is deliberately NOT used for either. kernels/sigmastar.mk sets
++# it to the family's series ("5.10", "4.9"), which only names directories.
++SIGMASTAR_SDK_KREL = $(LINUX_VERSION_PROBED)
++
++# The repository is keyed by family first: every artifact below is built for one
++# chip. Indexing without $(SOC_FAMILY) is what previously let an Infinity6B0
++# build resolve Infinity6E's MI modules.
++SIGMASTAR_SDK_FAMILY = $(@D)/$(SOC_FAMILY)
++
++# Prebuilt vendor modules, keyed by the build they came from and not merely by
++# kernel release. Across a single vendor release the <libc>/<gcc> trees are not
++# one source built several ways: mi_sys.ko differs by 27-29 imported kernel
++# symbols between them, differs in `depends=`, and the trees ship different
++# module sets. vermagic is byte-identical across all of them and
++# CONFIG_MODVERSIONS is off, so insmod accepts a foreign module and it fails
++# later at symbol resolution, or misbehaves. Nothing at load time catches it,
++# which is why the whole flavour is spelled out in the path.
++#
++# The components come from soc/sigmastar/<family>.mk, which is also where
++# sigmastar-lib reads them: the two repositories hold halves of one vendor build
++# and a single definition keeps their pins in step. See the repo's PROVENANCE.
++SIGMASTAR_SDK_KMOD = $(SIGMASTAR_SDK_FAMILY)/kmod-$(SIGMASTAR_KREL)-$(SIGMASTAR_DROP)-$(SIGMASTAR_LIBC)-$(SIGMASTAR_GCC)
++
++# The runtime blobs are keyed by drop as well as by family. All three are read
++# by the drop that ships them and two are validated: the encoder refuses a
++# chagall.bin from another drop outright, and the ISP refuses a sensor-iq bin
++# whose major version does not match -- then falls back to generic tuning and
++# comes up with visibly wrong colour rather than failing. See the repo's
++# PROVENANCE.
++SIGMASTAR_SDK_BLOB = $(SIGMASTAR_SDK_FAMILY)/$(1)/$(SIGMASTAR_DROP)
++
++# Sensor drivers. Source-built for every drop whose headers are available, which
++# is why this is family-keyed rather than drop-keyed -- see the repo's
++# PROVENANCE for the one case where it is not enough.
++#
++# Every driver the family has is built and installed. Selecting one is a runtime
++# decision made by load_sigmastar from the U-Boot `sensor` variable; narrowing
++# the build to the sensor on the development board is exactly what this must not
++# do. INSTALL_MOD_DIR puts them in /lib/modules/<release>/sigmastar, alongside
++# the prebuilt vendor modules and where load_sigmastar looks.
++#
++# A drop that sets SIGMASTAR_SENSOR := prebuilt ships its own drivers in the
++# kmod directory instead, and the source build is skipped entirely: the two
++# install to the same names, so building both would overwrite the vendor's copy
++# with one compiled against the wrong ms_cus_sensor layout -- which fails
++# silently, at MI_SNR_QueryResCount, rather than at load.
++ifneq ($(SIGMASTAR_SENSOR),prebuilt)
++SIGMASTAR_SDK_MODULE_SUBDIRS = $(SOC_FAMILY)/sensor-src
++SIGMASTAR_SDK_MODULE_MAKE_OPTS = \
++	SENSOR_VERSION=$(SOC_FAMILY) \
++	INSTALL_MOD_DIR=$(SOC_VENDOR) \
++	KSRC=$(LINUX_DIR)
++endif
++
++# Infinity6C's sensor-src, at this pin, carries release_0907's framework
++# headers, which do not match the 1230 drop's mi.ko. The ones that do come from
++# sigmastar-sensor-headers (see there) and replace them before the drivers
++# build. Config.in selects that package with BR2_SIGMASTAR_SENSOR_SOURCE.
++ifeq ($(BR2_PACKAGE_SIGMASTAR_SENSOR_HEADERS),y)
++SIGMASTAR_SDK_DEPENDENCIES += sigmastar-sensor-headers
++ifeq ($(SOC_FAMILY),infinity6c)
++define SIGMASTAR_SDK_SENSOR_HEADERS
++	$(INSTALL) -m 0644 -t $(@D)/infinity6c/sensor-src/include \
++		$(STAGING_DIR)/usr/share/sigmastar-sensor-headers/infinity6c/*.h
++endef
++SIGMASTAR_SDK_PRE_CONFIGURE_HOOKS += SIGMASTAR_SDK_SENSOR_HEADERS
++endif
++endif
++
++# Board-specific tuning, path relative to the BR2_EXTERNAL root as ingenic-sdk
++# reads it. Left unset the stock blob is installed.
++ifneq ($(call qstrip,$(BR2_SENSOR_1_IQ_FILE)),)
++SIGMASTAR_SDK_IQ_OVERRIDE = \
++	$(BR2_EXTERNAL_THINGINO_PATH)/$(call qstrip,$(BR2_SENSOR_1_IQ_FILE))
++endif
++
++define SIGMASTAR_SDK_INSTALL_TARGET_CMDS
++	$(INSTALL) -m 755 -d $(TARGET_DIR)/lib/modules/$(SIGMASTAR_SDK_KREL)/sigmastar
++	$(INSTALL) -m 644 -t $(TARGET_DIR)/lib/modules/$(SIGMASTAR_SDK_KREL)/sigmastar \
++		$(SIGMASTAR_SDK_KMOD)/*
++
++	# /etc/firmware is what MI_ISP_GetIspRoot reports on this board, so CUS3A
++	# reads its iqfile from here at AE/AWB init. chagall.bin is VENC firmware
++	# and only shares the directory.
++	#
++	# Both are per drop as well as per chip -- the encoder rejects a chagall.bin
++	# from another drop by version.
++	#
++	# On infinity6c (MI 3.0) libcus3a names that file by channel mask, not
++	# index: LoadIqFile builds "%s/iqfile%d.bin" from (1 << chn), so ISP
++	# channel 0 reads iqfile1.bin -- and the drops ship only iqfile0.bin.
++	# Without it CUS3A's AWB never initialises (gains stay at 1.0x, the
++	# picture is green) and every MI_ISP_AE/AWB query returns success with an
++	# all-zero payload. Alias it, as the OEM firmware does (iqfile0..3 are
++	# links to one file there).
++	$(INSTALL) -m 755 -d $(TARGET_DIR)/etc/firmware
++	$(INSTALL) -m 644 -t $(TARGET_DIR)/etc/firmware \
++		$(call SIGMASTAR_SDK_BLOB,iqfile)/*
++	$(if $(filter infinity6c,$(SOC_FAMILY)), \
++		ln -sf iqfile0.bin $(TARGET_DIR)/etc/firmware/iqfile1.bin)
++	$(INSTALL) -m 644 -t $(TARGET_DIR)/etc/firmware \
++		$(call SIGMASTAR_SDK_BLOB,venc_fw)/*
++
++	# mi.ko reads this at insmod via g_ModParamPath, whose compiled-in default
++	# is a /config path thingino does not have. Only drops that ship one have
++	# the directory; 0907 passes the same settings as module parameters.
++	if [ -d "$(call SIGMASTAR_SDK_BLOB,modparam)" ]; then \
++		$(INSTALL) -m 644 -t $(TARGET_DIR)/etc/firmware \
++			$(call SIGMASTAR_SDK_BLOB,modparam)/*; \
++	fi
++
++	# One sensor per target, in the shape ingenic-sdk installs: the blob under
++	# /usr/share/sensor, an /etc/sensor symlink, and a model file.
++	#
++	# The plain <sensor>.bin name is required. raptor resolves the tuning by
++	# the lowercased driver-module name, so ingenic-sdk's -$(SOC_FAMILY) suffix
++	# would not be found and the board would come up on the generic tuning with
++	# visibly wrong colour.
++	#
++	# All the family's bins stay in the repo -- another target selects its own.
++	if [ -n "$(SENSOR_1_MODEL)" ]; then \
++		$(INSTALL) -m 755 -d $(TARGET_DIR)/usr/share/sensor; \
++		ln -sf /usr/share/sensor $(TARGET_DIR)/etc/sensor; \
++		if [ -n "$(SIGMASTAR_SDK_IQ_OVERRIDE)" ] && \
++		   [ -f "$(SIGMASTAR_SDK_IQ_OVERRIDE)" ]; then \
++			$(INSTALL) -D -m 644 $(SIGMASTAR_SDK_IQ_OVERRIDE) \
++				$(TARGET_DIR)/usr/share/sensor/$(SENSOR_1_MODEL).bin; \
++		elif [ -f "$(call SIGMASTAR_SDK_BLOB,sensor-iq)/$(SENSOR_1_MODEL).bin" ]; then \
++			$(INSTALL) -D -m 644 \
++				$(call SIGMASTAR_SDK_BLOB,sensor-iq)/$(SENSOR_1_MODEL).bin \
++				$(TARGET_DIR)/usr/share/sensor/$(SENSOR_1_MODEL).bin; \
++		else \
++			echo "WARNING: sigmastar-sdk: no IQ tuning for $(SENSOR_1_MODEL) on"\
++			     "$(SOC_FAMILY) drop $(SIGMASTAR_DROP). The sensor is driven, but"\
++			     "the ISP falls back to generic tuning and colour will be visibly"\
++			     "wrong. Supply one via BR2_SENSOR_1_IQ_FILE, or add"\
++			     "$(SOC_FAMILY)/sensor-iq/$(SIGMASTAR_DROP)/$(SENSOR_1_MODEL).bin"\
++			     "to sigmastar-sdk."; \
++		fi; \
++		echo $(SENSOR_1_MODEL) > $(TARGET_DIR)/usr/share/sensor/model; \
++	fi
++
++	$(INSTALL) -m 755 -d $(TARGET_DIR)/usr/bin
++	$(INSTALL) -m 755 -t $(TARGET_DIR)/usr/bin \
++		$(SIGMASTAR_SDK_PKGDIR)/files/script/*
++
++	$(INSTALL) -D -m 755 $(SIGMASTAR_SDK_PKGDIR)/files/S20sigmastar \
++		$(TARGET_DIR)/etc/init.d/S20sigmastar
++endef
++
++# Only when there is something to compile. kernel-module with no MODULE_SUBDIRS
++# builds $(@D) itself, and the repository root has no Kbuild.
++ifneq ($(SIGMASTAR_SENSOR),prebuilt)
++$(eval $(kernel-module))
++endif
++$(eval $(generic-package))
+diff --git a/package/sigmastar-sensor-headers/Config.in b/package/sigmastar-sensor-headers/Config.in
+new file mode 100644
+index 000000000..6e2c415c3
+--- /dev/null
++++ b/package/sigmastar-sensor-headers/Config.in
+@@ -0,0 +1,12 @@
++config BR2_PACKAGE_SIGMASTAR_SENSOR_HEADERS
++	bool
++	help
++	  The Infinity6C sensor-framework headers that match the 1230 MI
++	  drop's mi.ko (ms_cus_sensor with spi_cfg/spi_bus), for
++	  sigmastar-sdk's sensor-src build. sigmastar-sdk selects it when
++	  BR2_SIGMASTAR_SENSOR_SOURCE is set; nothing else uses it.
++
++	  Fetched at a pinned commit of openipc/sensors, the collection
++	  sigmastar-sdk's sensor-src was taken from. The files are
++	  SigmaStar's and carry no license: they are fetched at build
++	  time, never carried in this tree.
+diff --git a/package/sigmastar-sensor-headers/sigmastar-sensor-headers.mk b/package/sigmastar-sensor-headers/sigmastar-sensor-headers.mk
+new file mode 100644
+index 000000000..0291ea792
+--- /dev/null
++++ b/package/sigmastar-sensor-headers/sigmastar-sensor-headers.mk
+@@ -0,0 +1,40 @@
++################################################################################
++#
++# sigmastar-sensor-headers
++#
++# The six Infinity6C sensor-framework headers sigmastar-sdk's sensor-src must
++# be built against for the 1230 drop. sigmastar-sdk at its pin carries the
++# release_0907 set (fe5d953 there took sensor-src from release_0907), whose
++# ms_cus_sensor has no spi_cfg/spi_bus: 1230's mi.ko keeps its SPI handle at
++# handle+0x4c and dereferences it after init_handle, and with the 0907 layout
++# that slot is an AE field, so every driver built from it oopsed in
++# DrvSensorSPIAttach. The set before fe5d953 matches the 1230 prebuilts
++# (i2c_cfg at 0x2c, spi_bus at 0x4c).
++#
++# That set came from openipc/sensors, and it is byte-identical there (same git
++# blobs) at the commit sigmastar-sdk's PROVENANCE names, 8143e4d:
++# sigmastar/infinity6c/include/. This package fetches it from there instead of
++# carrying SigmaStar's text in a patch. The headers are SigmaStar's, marked
++# confidential, and carry no license: not redistributed.
++#
++################################################################################
++
++SIGMASTAR_SENSOR_HEADERS_SITE_METHOD = git
++# Local mirror of https://github.com/openipc/sensors, kept by
++# mirror-sigmastar-deps.sh so the build does not depend on that repository.
++SIGMASTAR_SENSOR_HEADERS_SITE = file://$(HOME)/src/mirrors/git/openipc__sensors.git
++SIGMASTAR_SENSOR_HEADERS_VERSION = 8143e4da181d39d569572519595ce4b7e1a9a02d
++SIGMASTAR_SENSOR_HEADERS_LICENSE = PROPRIETARY
++SIGMASTAR_SENSOR_HEADERS_REDISTRIBUTE = NO
++
++SIGMASTAR_SENSOR_HEADERS_INSTALL_STAGING = YES
++SIGMASTAR_SENSOR_HEADERS_INSTALL_TARGET = NO
++
++# Staged where sigmastar-sdk copies them from; nothing is compiled here.
++define SIGMASTAR_SENSOR_HEADERS_INSTALL_STAGING_CMDS
++	$(INSTALL) -d -m 0755 $(STAGING_DIR)/usr/share/sigmastar-sensor-headers/infinity6c
++	$(INSTALL) -m 0644 -t $(STAGING_DIR)/usr/share/sigmastar-sensor-headers/infinity6c \
++		$(@D)/sigmastar/infinity6c/include/*.h
++endef
++
++$(eval $(generic-package))
+diff --git a/package/sigmastar-uboot/0001-cmd_sf-drop-retrospective-rootfs-auto-sizing.patch b/package/sigmastar-uboot/0001-cmd_sf-drop-retrospective-rootfs-auto-sizing.patch
+new file mode 100644
+index 000000000..4faa3ae8d
+--- /dev/null
++++ b/package/sigmastar-uboot/0001-cmd_sf-drop-retrospective-rootfs-auto-sizing.patch
+@@ -0,0 +1,64 @@
++From: thingino-firmware sigmastar fork
++Subject: [PATCH] cmd_sf: drop the retrospective rootfs partition auto-sizing
++
++`sf probe` ended by reading the squashfs superblock already in flash and
++setting rootmtd/rootsize from it. Two properties made that unusable here.
++
++It is retrospective. The superblock it reads describes the image that is
++already on the chip, not the one being written, so the partition is always
++sized for the previous image. The first image to cross the 5120k threshold
++cannot be flashed at all: mtd3 is still 5120k at that moment and flashcp
++refuses it.
++
++It is also unconditional and runs before `run setargs` expands ${rootmtd},
++so it overwrites the stored environment in RAM on every boot. `fw_setenv
++rootmtd` can never take effect, which makes the stored value misleading
++rather than merely unused.
++
++This tree sizes the kernel and rootfs partitions to the built images at
++build time and ships the result in the environment. Boot-time auto-sizing
++is redundant against that, and worse, the two disagree: the build says one
++size and `sf probe` says another, with the bootloader winning.
++
++Removing the block leaves `sf probe` doing only what its name says. The
++declarations go with it because magic/bytes/buf/file have no other use in
++the function.
++
++This is OpenIPC-specific code. Mainline U-Boot and SigmaStar's vendor tree
++have no equivalent, so nothing upstream of this fork depends on it.
++
++--- a/common/cmd_sf.c
+++++ b/common/cmd_sf.c
++@@ -171,32 +171,6 @@
++ 	flash = new;
++ #endif
++ 
++-	char buf[64];
++-	unsigned int magic, bytes;
++-
++-	if (spi_flash_read(flash, CONFIG_ENV_ROOTADDR, sizeof(buf), buf)) {
++-		printf("Failed to read from SPI flash\n");
++-		return 1;
++-	}
++-
++-	memcpy(&magic, &buf[0], sizeof(magic));
++-	memcpy(&bytes, &buf[40], sizeof(bytes));
++-
++-	if (magic == 0x73717368) {
++-		if (bytes + 0x1000 < 0x500000) {
++-			setenv("rootmtd", "5120k");
++-		} else {
++-			setenv("rootmtd", "8192k");
++-		}
++-	}
++-
++-	ulong file = getenv_ulong("filesize", 16, 0);
++-	if (file < 0x500000) {
++-		setenv("rootsize", "0x500000");
++-	} else {
++-		setenv("rootsize", "0x800000");
++-	}
++-
++ 	return 0;
++ }
++ 
+diff --git a/package/sigmastar-uboot/Config.in b/package/sigmastar-uboot/Config.in
+new file mode 100644
+index 000000000..e064b4bcf
+--- /dev/null
++++ b/package/sigmastar-uboot/Config.in
+@@ -0,0 +1,19 @@
++config BR2_PACKAGE_SIGMASTAR_UBOOT
++	bool "sigmastar-uboot"
++	depends on BR2_SOC_VENDOR_SIGMASTAR
++	help
++	  U-Boot for SigmaStar Infinity6-family SoCs, from OpenIPC's fork of
++	  the vendor tree.
++
++	  Builds a NOR boot image (BOOT.bin) into images/ and installs nothing
++	  to the target. Producing it does not flash it: the boot partition is
++	  the one place on this board where a bad write cannot be recovered in
++	  software, so writing it needs a serial console and an SPI flash clip
++	  on the bench.
++
++	  A sibling of thingino-uboot rather than a variant of it. That package
++	  is Ingenic silicon end to end -- jz_sfc flash controllers, per-SoC
++	  isvp_* board defconfigs, a MIPS SPL -- and has no SigmaStar path to
++	  extend.
++
++	  https://github.com/openipc/u-boot-sigmastar
+diff --git a/package/sigmastar-uboot/sigmastar-uboot.mk b/package/sigmastar-uboot/sigmastar-uboot.mk
+new file mode 100644
+index 000000000..bba409f2d
+--- /dev/null
++++ b/package/sigmastar-uboot/sigmastar-uboot.mk
+@@ -0,0 +1,97 @@
++################################################################################
++#
++# sigmastar-uboot
++#
++# U-Boot for SigmaStar Infinity6-family SoCs, from OpenIPC's fork of the vendor
++# tree. Builds a NOR boot image into images/ and installs nothing to the target.
++#
++# The artifact is not u-boot.bin. A SigmaStar NOR boot image is a container the
++# mask ROM reads, assembled by make_boot_spinor.sh from four pieces at fixed
++# offsets in the first 128KB -- IPL at 0, MXP_SF at 60k, IPL_CUST at 64k -- with
++# the compressed U-Boot appended at 128k. The first three are vendor blobs
++# carried in the tree; only the tail is built here. Flashing u-boot.bin instead
++# produces a board that does not boot and cannot be recovered over the network.
++#
++# The SoC model reaches the compiler as a define rather than a defconfig: one
++# defconfig covers the whole family. PRODUCT_SOC does NOT select DDR timing --
++# it is stringified into the "soc=" environment variable and used only to build
++# TFTP filenames (u-boot-${soc}-nor.bin, uImage.${soc}); see
++# include/configs/sstar-common.h. DDR init lives in the IPL/GCIS blobs, which
++# are per family, not per part: make_boot_spinor.sh takes the family and there
++# is one ipl/infinity6c/ set. Upstream's build.sh iterates ssc377 ssc377d
++# ssc377de ssc377qe ssc378de ssc378qe over that single build, so the bootloader
++# binary differs between those parts in name only.
++#
++# Building this does not flash it, and nothing in the image references it. The
++# boot partition is the only one on this board where a bad write cannot be
++# undone in software.
++#
++################################################################################
++
++SIGMASTAR_UBOOT_VERSION = bf77aff5d44f34d14b89b3f4014aa8dda9834794
++SIGMASTAR_UBOOT_SITE = https://github.com/openipc/u-boot-sigmastar
++SIGMASTAR_UBOOT_SITE_METHOD = git
++SIGMASTAR_UBOOT_LICENSE = GPL-2.0+ (u-boot), PROPRIETARY (ipl/)
++SIGMASTAR_UBOOT_LICENSE_FILES = Licenses/gpl-2.0.txt
++SIGMASTAR_UBOOT_REDISTRIBUTE = NO
++SIGMASTAR_UBOOT_INSTALL_IMAGES = YES
++SIGMASTAR_UBOOT_INSTALL_TARGET = NO
++SIGMASTAR_UBOOT_INSTALL_STAGING = NO
++
++# From thingino.mk's exported environment, not from .config: the model reaches
++# Kconfig too, but the family is derived there and never written back. Both are
++# checked below because an empty one here builds a target named "_defconfig" and
++# fails several steps later with nothing naming the cause.
++SIGMASTAR_UBOOT_SOC_MODEL = $(SOC_MODEL)
++SIGMASTAR_UBOOT_SOC_FAMILY = $(SOC_FAMILY)
++
++# Only when the package is actually selected. external.mk includes every
++# package .mk for every build, and a toolchain producer has no SoC at all.
++ifeq ($(BR2_PACKAGE_SIGMASTAR_UBOOT),y)
++ifeq ($(SIGMASTAR_UBOOT_SOC_MODEL),)
++$(error sigmastar-uboot: SOC_MODEL is empty -- expected it exported by thingino.mk)
++endif
++ifeq ($(SIGMASTAR_UBOOT_SOC_FAMILY),)
++$(error sigmastar-uboot: SOC_FAMILY is empty -- expected it exported by thingino.mk)
++endif
++endif
++
++# For mkenvimage, which the post-image script uses to build the environment
++# image describing the partition table. host-uboot-tools installs it
++# unconditionally. BR2_PACKAGE_HOST_UBOOT_TOOLS_ENVIMAGE is a different thing
++# and not what is wanted here -- it asks Buildroot to generate an environment
++# image from a static source file, which cannot express a table whose sizes
++# come from the images this build produces.
++SIGMASTAR_UBOOT_DEPENDENCIES = host-uboot-tools
++
++SIGMASTAR_UBOOT_MAKE_ENV = ARCH=arm CROSS_COMPILE="$(TARGET_CROSS)"
++
++define SIGMASTAR_UBOOT_CONFIGURE_CMDS
++	$(SIGMASTAR_UBOOT_MAKE_ENV) $(MAKE1) -C $(@D) \
++		$(SIGMASTAR_UBOOT_SOC_FAMILY)_defconfig
++endef
++
++# -std=gnu11 because this tree predates C23 and GCC 16 defaults to it. Its
++# include/fwfs.h carries
++#
++#     #ifndef bool
++#     typedef unsigned char       bool;
++#     #endif
++#
++# which guards against bool being a *macro* from stdbool.h. Under C23 it is a
++# keyword instead, so the guard passes and the typedef is rejected. Infinity6C
++# is where this surfaces -- infinity6c_defconfig builds fs/firmwarefs and the
++# Infinity6E one does not -- but the flag is set for every family, since it
++# describes the age of the source rather than anything about a chip.
++define SIGMASTAR_UBOOT_BUILD_CMDS
++	$(SIGMASTAR_UBOOT_MAKE_ENV) $(MAKE) -C $(@D) \
++		KCFLAGS="-DPRODUCT_SOC=$(SIGMASTAR_UBOOT_SOC_MODEL) -std=gnu11"
++	cd $(@D) && $(SHELL) make_boot_spinor.sh $(SIGMASTAR_UBOOT_SOC_FAMILY)
++endef
++
++define SIGMASTAR_UBOOT_INSTALL_IMAGES_CMDS
++	$(INSTALL) -D -m 0644 $(@D)/BOOT.bin \
++		$(BINARIES_DIR)/u-boot-$(SIGMASTAR_UBOOT_SOC_MODEL)-nor.bin
++endef
++
++$(eval $(generic-package))

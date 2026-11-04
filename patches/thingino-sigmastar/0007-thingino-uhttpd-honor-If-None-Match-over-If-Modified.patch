@@ -1,0 +1,118 @@
+From 5b2e0951b9a24ec3947cf1c4a09bd3df0b56c3b3 Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 08:19:15 -0500
+Subject: [PATCH 07/21] thingino-uhttpd: honor If-None-Match over
+ If-Modified-Since; cache policy
+
+---
+ ...ne-match-overrides-if-modified-since.patch | 24 +++++++++++++++++++
+ package/thingino-uhttpd/files/S60uhttpd       |  8 +++++++
+ package/thingino-uhttpd/files/uhttpd          |  3 +++
+ .../thingino-uhttpd/files/uhttpd-cache.json   | 12 ++++++++++
+ package/thingino-uhttpd/thingino-uhttpd.mk    |  3 +++
+ 5 files changed, 50 insertions(+)
+ create mode 100644 package/thingino-uhttpd/0007-file-if-none-match-overrides-if-modified-since.patch
+ create mode 100644 package/thingino-uhttpd/files/uhttpd-cache.json
+
+diff --git a/package/thingino-uhttpd/0007-file-if-none-match-overrides-if-modified-since.patch b/package/thingino-uhttpd/0007-file-if-none-match-overrides-if-modified-since.patch
+new file mode 100644
+index 000000000..a1cd75df1
+--- /dev/null
++++ b/package/thingino-uhttpd/0007-file-if-none-match-overrides-if-modified-since.patch
+@@ -0,0 +1,24 @@
++file: let If-None-Match override If-Modified-Since
++
++RFC 9110 section 13.2.2 evaluates If-None-Match first and has a
++recipient ignore If-Modified-Since when both are present. uhttpd checked
++the date first, so a conditional GET carrying a newer date than the file
++got 304 Not Modified even when the entity tag did not match. That is
++what a browser sends after the same address was served by another
++camera (or another firmware) with a newer file: it then keeps the stale
++copy.
++
++--- a/file.c
+++++ b/file.c
++@@ -421,7 +421,10 @@
++ 	char *hdr = uh_file_header(cl, HDR_IF_MODIFIED_SINCE);
++ 	time_t t;
++ 
++-	if (!hdr)
+++	/* RFC 9110 13.2.2: If-None-Match decides when present. A browser that
+++	 * cached the same URL from another host (an address reused by another
+++	 * camera) sends that host's newer date, and the date alone says 304. */
+++	if (!hdr || uh_file_header(cl, HDR_IF_NONE_MATCH))
++ 		return true;
++ 
++ 	t = uh_file_date2unix(hdr);
+diff --git a/package/thingino-uhttpd/files/S60uhttpd b/package/thingino-uhttpd/files/S60uhttpd
+index d09528bef..57c36223b 100644
+--- a/package/thingino-uhttpd/files/S60uhttpd
++++ b/package/thingino-uhttpd/files/S60uhttpd
+@@ -17,6 +17,7 @@ UHTTPD_HTTPS_LISTEN="${UHTTPD_HTTPS_LISTEN:-443}"
+ UHTTPD_PORTAL_HTTP_LISTEN="${UHTTPD_PORTAL_HTTP_LISTEN:-172.16.0.1:80}"
+ UHTTPD_PORTAL_HTTPS_LISTEN="${UHTTPD_PORTAL_HTTPS_LISTEN:-172.16.0.1:443}"
+ UHTTPD_ERROR_HANDLER="${UHTTPD_ERROR_HANDLER:-/x/legacy-url-recovery.cgi}"
++UHTTPD_HANDLER="${UHTTPD_HANDLER:-/etc/uhttpd-cache.json}"
+ 
+ build_uhttpd_args() {
+ 	local docroot="$1"
+@@ -37,6 +38,13 @@ build_uhttpd_args() {
+ 		args="$args -E $error_handler"
+ 	fi
+ 
++	# Cache policy: runtime config and CGI answers are never cached, the
++	# rest is revalidated on every use. Without it a browser that last saw
++	# another camera at this address keeps that camera's footer and config.
++	if [ -r "$UHTTPD_HANDLER" ]; then
++		args="$args -H $UHTTPD_HANDLER"
++	fi
++
+ 	if [ -n "$EXTRA_ARGS" ]; then
+ 		args="$args $EXTRA_ARGS"
+ 	fi
+diff --git a/package/thingino-uhttpd/files/uhttpd b/package/thingino-uhttpd/files/uhttpd
+index 29edccb0d..86978a8bf 100644
+--- a/package/thingino-uhttpd/files/uhttpd
++++ b/package/thingino-uhttpd/files/uhttpd
+@@ -32,6 +32,9 @@ UHTTPD_HTTPS_LISTEN="443"
+ UHTTPD_PORTAL_HTTP_LISTEN="172.16.0.1:80"
+ UHTTPD_ERROR_HANDLER="/x/legacy-url-recovery.cgi"
+ 
++# Request handler (uhttpd -H) that sets the Cache-Control policy
++UHTTPD_HANDLER="/etc/uhttpd-cache.json"
++
+ # Additional uhttpd arguments
+ # Add any extra arguments here
+ EXTRA_ARGS=""
+diff --git a/package/thingino-uhttpd/files/uhttpd-cache.json b/package/thingino-uhttpd/files/uhttpd-cache.json
+new file mode 100644
+index 000000000..5e7a6de4f
+--- /dev/null
++++ b/package/thingino-uhttpd/files/uhttpd-cache.json
+@@ -0,0 +1,12 @@
++{
++	"request": [
++		[ "if", [ "regex", "REQUEST_URI", "^/a/runtime-config\\.js" ], [
++			[ "no-cache" ],
++			[ "add-header", "Cache-Control", "no-store" ]
++		], [ "if", [ "regex", "REQUEST_URI", "^/x/" ],
++			[ "add-header", "Cache-Control", "no-store" ],
++			[ "if", [ "not", [ "regex", "REQUEST_URI", "^/onvif/" ] ],
++				[ "add-header", "Cache-Control", "no-cache" ] ]
++		] ]
++	]
++}
+diff --git a/package/thingino-uhttpd/thingino-uhttpd.mk b/package/thingino-uhttpd/thingino-uhttpd.mk
+index 6faf10809..8f1460168 100644
+--- a/package/thingino-uhttpd/thingino-uhttpd.mk
++++ b/package/thingino-uhttpd/thingino-uhttpd.mk
+@@ -77,6 +77,9 @@ define THINGINO_UHTTPD_INSTALL_CONFIG
+ 		$(TARGET_DIR)/etc/init.d/S60uhttpd
+ 	$(INSTALL) -D -m 0644 $(THINGINO_UHTTPD_PKGDIR)/files/uhttpd \
+ 		$(TARGET_DIR)/etc/default/uhttpd
++	# Cache-Control policy, loaded by S60uhttpd with -H
++	$(INSTALL) -D -m 0644 $(THINGINO_UHTTPD_PKGDIR)/files/uhttpd-cache.json \
++		$(TARGET_DIR)/etc/uhttpd-cache.json
+ endef
+ 
+ THINGINO_UHTTPD_POST_INSTALL_TARGET_HOOKS += THINGINO_UHTTPD_INSTALL_CONFIG

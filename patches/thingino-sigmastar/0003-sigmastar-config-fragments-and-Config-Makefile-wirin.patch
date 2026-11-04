@@ -1,0 +1,359 @@
+From ba0d43a840eaa8cf3803883150fba166af5ab501 Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 08:19:15 -0500
+Subject: [PATCH 03/21] sigmastar: config fragments and Config/Makefile wiring
+
+---
+ Config.in                                 |  11 +-
+ Config.soc.in                             |  13 ++-
+ Makefile                                  |   2 +
+ Makefile.ota                              |   7 ++
+ Makefile.utils                            |  34 +++++-
+ configs/fragments/core-sigmastar.fragment | 129 ++++++++++++++++++++++
+ configs/fragments/soc-sigmastar.fragment  |  15 +++
+ configs/fragments/uclibc/gnu-hash.config  |   1 +
+ 8 files changed, 208 insertions(+), 4 deletions(-)
+ create mode 100644 configs/fragments/core-sigmastar.fragment
+ create mode 100644 configs/fragments/soc-sigmastar.fragment
+ create mode 100644 configs/fragments/uclibc/gnu-hash.config
+
+diff --git a/Config.in b/Config.in
+index 49105ddfc..c13966970 100644
+--- a/Config.in
++++ b/Config.in
+@@ -71,6 +71,7 @@ menuconfig BR2_THINGINO_SYSTEM_PACKAGES
+ 	# Vendor-specific system packages live in one block per vendor; see
+ 	# package/thingino-system/Config.<vendor>.in.
+ 	select BR2_THINGINO_SYSTEM_PACKAGES_INGENIC if BR2_SOC_VENDOR_INGENIC
++	select BR2_THINGINO_SYSTEM_PACKAGES_SIGMASTAR if BR2_SOC_VENDOR_SIGMASTAR
+ 	select BR2_PACKAGE_THINGINO_CORE
+ 	select BR2_PACKAGE_THINGINO_JCT
+ 	select BR2_PACKAGE_THINGINO_KOPT
+@@ -78,7 +79,9 @@ menuconfig BR2_THINGINO_SYSTEM_PACKAGES
+ 	select BR2_PACKAGE_THINGINO_ONVIF if BR2_THINGINO_DEV_IPCAM
+ 	select BR2_PACKAGE_THINGINO_WEBUI
+ 	select BR2_PACKAGE_UBOOT_TOOLS
+-	select BR2_TARGET_UBOOT
++	# Ingenic only: a SigmaStar board keeps its vendor bootloader, or builds
++	# one through sigmastar-uboot, never through BR2_TARGET_UBOOT.
++	select BR2_TARGET_UBOOT if BR2_SOC_VENDOR_INGENIC
+ 	select BR2_THINGINO_PACKAGES
+ 	# buildroot package configuration
+ 	select BR2_PACKAGE_DROPBEAR_SMALL if BR2_PACKAGE_DROPBEAR
+@@ -124,6 +127,9 @@ source "$BR2_EXTERNAL_THINGINO_PATH/package/mbedtls-certgen/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/open-tx-isp/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/openimp/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-isp/Config.in"
++source "$BR2_EXTERNAL_THINGINO_PATH/package/sigmastar-lib/Config.in"
++source "$BR2_EXTERNAL_THINGINO_PATH/package/sigmastar-sdk/Config.in"
++source "$BR2_EXTERNAL_THINGINO_PATH/package/sigmastar-uboot/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/spi-tmi8152/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/subzeroclaw/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/telegrambot/Config.in"
+@@ -139,6 +145,7 @@ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-gpio/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-httpd-ssl/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-isp-inspector/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-jct/Config.in"
++source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-lensd/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-libble/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-libcurl/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-libubox/Config.in"
+@@ -146,6 +153,7 @@ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-mmc/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-motors/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-sensor-info/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-mxml/Config.in"
++source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-nettest/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-nimble/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-odhcp6c/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-onvif/Config.in"
+@@ -156,6 +164,7 @@ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-ssl/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-secureboop/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-system/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-system/Config.ingenic.in"
++source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-system/Config.sigmastar.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-sysupgrade/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-uboot/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-ubus/Config.in"
+diff --git a/Config.soc.in b/Config.soc.in
+index ab5bcedb9..d4834cadb 100644
+--- a/Config.soc.in
++++ b/Config.soc.in
+@@ -44,10 +44,20 @@ config BR2_SIGMASTAR_SOC_MODEL
+ 	  Enter the SigmaStar SoC model name for your device (e.g., ssc30kq).
+ 	  This value is used to automatically derive the SoC family.
+ 
+-	  Supported models: ssc30kq
++	  Supported models: ssc30kq, ssc377, ssc377d, ssc377de, ssc377qe,
++	  ssc378de, ssc378qe
+ 
+ 	  Note: Model name is case-insensitive.
+ 
++config BR2_SIGMASTAR_SENSOR_SOURCE
++	bool "Build sensor drivers from source"
++	depends on BR2_SOC_VENDOR_SIGMASTAR
++	help
++	  Build the sensor drivers in sigmastar-sdk's sensor-src instead of
++	  installing the ones the MI drop ships prebuilt. Needed for a sensor
++	  the drop has no prebuilt driver for. Families default to whichever
++	  their drop supports (see soc/sigmastar/<family>.mk).
++
+ config BR2_SOC_FAMILY
+ 	string
+ 	default "t10" if BR2_INGENIC_SOC_MODEL = "t10l" || BR2_INGENIC_SOC_MODEL = "t10n" || BR2_INGENIC_SOC_MODEL = "t10a"
+@@ -64,6 +74,7 @@ config BR2_SOC_FAMILY
+ 	# Only one vendor's model symbol is ever non-empty, so the two halves of
+ 	# this chain cannot both match and their order does not matter.
+ 	default "infinity6e" if BR2_SIGMASTAR_SOC_MODEL = "ssc30kq"
++	default "infinity6c" if BR2_SIGMASTAR_SOC_MODEL = "ssc377" || BR2_SIGMASTAR_SOC_MODEL = "ssc377d" || BR2_SIGMASTAR_SOC_MODEL = "ssc377de" || BR2_SIGMASTAR_SOC_MODEL = "ssc377qe" || BR2_SIGMASTAR_SOC_MODEL = "ssc378de" || BR2_SIGMASTAR_SOC_MODEL = "ssc378qe"
+ 
+ config BR2_SOC_RAM_MB
+ 	int "RAM size in MB"
+diff --git a/Makefile b/Makefile
+index 487793017..f755bc8d8 100644
+--- a/Makefile
++++ b/Makefile
+@@ -300,6 +300,8 @@ NPROC := $(shell nproc)
+ SED_CONFIG_VARS = sed \
+ 	's/\$$[(]BR2_HOSTARCH[)]/$(BR2_HOSTARCH)/g; \
+ 	 s/\$$[(]SOC_ARCH[)]/$(SOC_ARCH)/g; \
++	 s/\$$[(]SOC_CPU[)]/$(SOC_CPU)/g; \
++	 s/\$$[(]SOC_FPU[)]/$(SOC_FPU)/g; \
+ 	 s/\$$[(]SOC_TARGET_ARCH[)]/$(SOC_TARGET_ARCH)/g; \
+ 	 s/\$$[(]TOOLCHAIN_SOC_TAG[)]/$(TOOLCHAIN_SOC_TAG)/g; \
+ 	 s/\$$[(]SOC_MODEL[)]/$(SOC_MODEL)/g; \
+diff --git a/Makefile.ota b/Makefile.ota
+index 297eb63fc..59d5b2685 100644
+--- a/Makefile.ota
++++ b/Makefile.ota
+@@ -84,6 +84,13 @@ else ifeq ($(BR2_THINGINO_FLASH_NAND),y)
+ 	@$(ORANGE) "Device IP: $(CAMERA_IP_ADDRESS)"
+ 	@if [ $(FIRMWARE_BIN_FULL_SIZE) -gt $(FLASH_SIZE) ]; then $(RED) "OVERSIZE"; fi
+ 	@echo "Image: $(FIRMWARE_BIN_FULL)"
++else ifeq ($(SOC_VENDOR),sigmastar)
++	# board/sigmastar/post-image.sh already printed the layout it wrote and
++	# failed on overflow; the Ingenic partition report below does not apply.
++	@$(SCRIPTS_DIR)/generate_release_artifacts.sh "$(OUTPUT_DIR)"
++	@$(ORANGE) "Camera: $(CAMERA)"
++	@$(ORANGE) "Device IP: $(CAMERA_IP_ADDRESS)"
++	@echo "Image: $(FIRMWARE_BIN_FULL)"
+ else
+ 	$(info Aligned at: $(ALIGN_BLOCK))
+ 	$(info U-Boot Env: $(shell strings $(UB_ENV_BIN) 2>/dev/null | grep "^mtdparts" || echo "mtdparts not found"))
+diff --git a/Makefile.utils b/Makefile.utils
+index 6b016bef9..9b48e06a7 100644
+--- a/Makefile.utils
++++ b/Makefile.utils
+@@ -29,7 +29,26 @@ $(OUTPUT_DIR)/.config:
+ 	@$(TEAL) "$@"
+ 	$(MAKE) force-config
+ 
+-ifeq ($(BR2_PACKAGE_THINGINO_KOPT_MMC0_BOOT),y)
++ifeq ($(SOC_VENDOR),sigmastar)
++# board/sigmastar/post-image.sh owns this vendor's NOR layout end to end: it
++# sizes the kernel and rootfs partitions to the images actually built, writes
++# the environment describing them, and assembles the firmware image.
++#
++# BR2_ROOTFS_POST_IMAGE_SCRIPT names it, but Buildroot runs post-image scripts
++# only from target-post-image, reachable via world/all, and this Makefile builds
++# rootfs-squashfs directly. Left to the generic SFC path below, a SigmaStar
++# board gets an Ingenic environment: jz_sfc mtdparts the kernel cannot match,
++# env at the wrong offset, and no LX_MEM/mma_heap carveout.
++#
++# The script writes u-boot-env.bin and $(FIRMWARE_NAME_FULL) itself, so neither
++# $(UB_ENV_BIN) nor the assembly below is a prerequisite here.
++$(FIRMWARE_BIN_FULL): $(U_BOOT_BIN) $(KERNEL_BIN) $(ROOTFS_BIN)
++	@$(TEAL) "$@"
++	CAMERA=$(CAMERA) SOC_MODEL=$(SOC_MODEL) FLASH_SIZE_MB=$(FLASH_SIZE_MB) \
++	HOST_DIR=$(HOST_DIR) \
++	$(BR2_EXTERNAL)/board/sigmastar/post-image.sh $(OUTPUT_DIR)/images
++
++else ifeq ($(BR2_PACKAGE_THINGINO_KOPT_MMC0_BOOT),y)
+ # MMC SD card image layout:
+ #   Block 0:      INGE header (total size + descriptor terminator)
+ #   Block 1-33:   Reserved
+@@ -256,10 +275,21 @@ endif
+ 	fi
+ 	exit
+ 
+-# Rebuild U-Boot with actual partition sizes after rootfs is ready
++# Rebuild U-Boot with actual partition sizes after rootfs is ready.
++#
++# Ingenic only: its U-Boot has the partition table compiled in. SigmaStar's
++# comes from sigmastar-uboot, which Buildroot has already installed under
++# SOC_UBOOT_BIN by now, and reads its table from the environment, so there is
++# nothing to feed back -- and uboot-dirclean does not exist without
++# BR2_TARGET_UBOOT.
+ $(U_BOOT_BIN): $(U_BOOT_ENV_TXT)
++ifeq ($(SOC_VENDOR),sigmastar)
++	@test -f $@ || { echo "ERROR: $@ not found -- is BR2_PACKAGE_SIGMASTAR_UBOOT set?"; exit 1; }
++	@touch $@
++else
+ 	$(info -------------------------------- $@ (rebuilding with actual partition sizes))
+ 	$(call thingino_run_build,$(BR2_MAKE) $(BR2_MAKE_JOBS) host-libyaml host-uboot-tools uboot-dirclean uboot)
++endif
+ 
+ $(UB_ENV_BIN): $(U_BOOT_ENV_TXT)
+ 	@$(TEAL) "$@"
+diff --git a/configs/fragments/core-sigmastar.fragment b/configs/fragments/core-sigmastar.fragment
+new file mode 100644
+index 000000000..c18ce1c34
+--- /dev/null
++++ b/configs/fragments/core-sigmastar.fragment
+@@ -0,0 +1,129 @@
++# SigmaStar counterpart to core.fragment.
++#
++# One core fragment per vendor rather than overrides layered on core.fragment:
++# that file hardcodes board/ingenic/$(SOC_ARCH)/... for the kernel config,
++# selects BR2_TARGET_UBOOT with an Ingenic JZ SFC flash controller, and strips
++# Ingenic vendor libraries. Overriding those from a later fragment would leave
++# the Ingenic values in .config for olddefconfig to trip over.
++#
++# Everything not vendor-specific is kept identical to core.fragment, so the two
++# can be diffed to see exactly what the vendor changes.
++
++BR2_CCACHE=y
++BR2_CCACHE_USE_BASEDIR=y
++BR2_USE_CCACHE=1
++BR2_OPTIMIZE_S=y
++BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_THINGINO_PATH)/package/all-patches"
++BR2_PER_PACKAGE_DIRECTORIES=y
++
++# The toolchain fragment is picked by name from TYPE/GCC/LIBC alone
++# (TOOLCHAIN_FRAGMENT_FILE in the Makefile), which has no vendor in it, so its
++# URL names a toolchain this vendor does not have. The camera defconfig
++# re-points URL and PREFIX at the ARM toolchain afterwards -- see the comment
++# there. Must track the gcc version the camera defconfig declares: Buildroot
++# hard-checks the declared version against the real toolchain at configure
++# time, and a version with no ext-gccNN-<libc>.fragment fails force-config.
++# uClibc, as in core.fragment: the MI libraries need libc.so.0.
++BR2_THINGINO_TOOLCHAIN_TYPE_EXTERNAL=y
++BR2_THINGINO_TOOLCHAIN_GCC_16=y
++BR2_THINGINO_TOOLCHAIN_LIBC_UCLIBC=y
++
++BR2_TARGET_GENERIC_HOSTNAME="thingino-$(SOC_MODEL)"
++BR2_TARGET_GENERIC_ISSUE="Welcome to Thingino firmware"
++
++BR2_ROOTFS_MERGED_USR=y
++# BR2_TARGET_GENERIC_REMOUNT_ROOTFS_RW is not set
++BR2_TARGET_GENERIC_PASSWD_SHA512=y
++BR2_TARGET_GENERIC_ROOT_PASSWD="root"
++BR2_SYSTEM_DEFAULT_PATH="/bin:/sbin:/usr/bin:/usr/sbin"
++# BR2_TARGET_TZ_INFO is not set
++BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_THINGINO_PATH)/overlay"
++BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_THINGINO_PATH)/scripts/rootfs_script.sh"
++
++# Kernel: a fork of OpenIPC's sigmastar-* trees, pinned by hash, one branch per
++# family. KERNEL_SITE and KERNEL_HASH come from kernels/sigmastar.mk, because
++# each family carries its own vendor BSP -- see that file.
++#
++# It was fetched as archive/sigmastar-$(SOC_FAMILY).tar.gz, which names a branch
++# rather than a commit: the tree could change under a build with nothing in the
++# image recording what was used. The fork exists so the vendor fixes this port
++# needs are commits with a history instead of a patch directory, and so the
++# revision is pinned.
++#
++# No BR2_LINUX_KERNEL_CUSTOM_REPO_BRANCH here -- Buildroot has no such symbol
++# (linux/Config.in defines only _REPO_VERSION), so the line in core.fragment is
++# inert. The hash is the only thing that selects the revision.
++BR2_LINUX_KERNEL=y
++BR2_LINUX_KERNEL_CUSTOM_GIT=y
++BR2_LINUX_KERNEL_CUSTOM_REPO_URL="$(KERNEL_SITE)"
++BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="$(KERNEL_HASH)"
++BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
++BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="$(BR2_EXTERNAL_THINGINO_PATH)/board/sigmastar/$(SOC_FAMILY)/kernel/$(KERNEL_VERSION)/$(SOC_FAMILY).config"
++
++# This vendor's own patch directory, per family, named explicitly so
++# core.fragment's Ingenic one can never apply here. Infinity6E needs no patch
++# for the Sun/Solaris section flags binutils 2.42+ rejects -- that is a commit in
++# its branch of the fork -- but Infinity6B0's branch is unmodified upstream, so
++# it carries the same fix as a patch.
++BR2_LINUX_KERNEL_PATCH="$(BR2_EXTERNAL_THINGINO_PATH)/board/sigmastar/$(SOC_FAMILY)/patches/linux"
++
++BR2_LINUX_KERNEL_UIMAGE=y
++# XZ rather than LZMA: with the ARMTHUMB filter the patch directory above
++# restores, XZ is ~86KB smaller here than lzma -9.
++BR2_LINUX_KERNEL_XZ=y
++# BR2_LINUX_KERNEL_INSTALL_TARGET is not set
++
++BR2_PACKAGE_HOST_BUILDSCOPE=y
++BR2_PACKAGE_HOST_MTD=y
++# Host tools come from the distro where possible rather than being rebuilt, so
++# BR2_PACKAGE_HOST_UBOOT_TOOLS is not selected here. Note that does not avoid
++# the build: buildroot/linux/Config.in:252 hard-selects it from
++# BR2_LINUX_KERNEL_UIMAGE, so any uImage target builds mkimage from source
++# whatever this file says. Listing it here as well would only make it look
++# like our choice. Dropping it would mean giving up uImage, which vendor
++# U-Boot needs.
++BR2_PACKAGE_BUSYBOX_CONFIG="$(BR2_EXTERNAL_THINGINO_PATH)/package/busybox/busybox.config"
++# BR2_PACKAGE_COREUTILS is not set
++BR2_PACKAGE_OVERRIDE_FILE="$(BR2_EXTERNAL_THINGINO_PATH)/package/thingino-overrides.mk"
++BR2_PACKAGE_MDNSD=y
++BR2_PACKAGE_MDNSD_HTTP_SERVICE=y
++BR2_PACKAGE_MDNSD_MQUERY=y
++# BR2_PACKAGE_MDNSD_SSH_SERVICE is not set
++BR2_PACKAGE_THINGINO_ODHCP6C=y
++
++# The application layer. Deliberately the same set core.fragment selects, so a
++# SigmaStar board is a thingino camera and not a subset of one. Packages whose
++# helpers this board has no hardware for still build; the agent's capability
++# probes report them false at runtime and the web UI hides the controls.
++BR2_PACKAGE_THINGINO_AGENT=y
++BR2_PACKAGE_THINGINO_DIAG=y
++BR2_PACKAGE_THINGINO_HA=y
++BR2_PACKAGE_THINGINO_SYSTEM=y
++BR2_PACKAGE_THINGINO_SYSUPGRADE=y
++# Tools > Bandwidth test: iperf3 (off until switched on) and link health.
++BR2_PACKAGE_THINGINO_NETTEST=y
++# Carried here for the same reason core.fragment carries it: the VPN choice
++# defaults to NONE, so the camera baseline is what turns WireGuard on.
++BR2_PACKAGE_THINGINO_VPN_WIREGUARD=y
++
++# Omitted on purpose, unlike core.fragment:
++#   BR2_PACKAGE_THINGINO_GPIO / _LEDD / _DAYNIGHT  - Ingenic GPIO register access
++#   BR2_PACKAGE_THINGINO_KOPT_IPV6  - the family kernel configs have IPv6 off,
++#                                     and boards on an OEM flash layout have a
++#                                     fixed kernel partition to fit
++#   BR2_TARGET_UBOOT and BR2_PACKAGE_THINGINO_UBOOT_*  - vendor U-Boot is kept
++#   BR2_STRIP_EXCLUDE_FILES="libimp.so ..."  - Ingenic vendor libraries
++#   BR2_TARGET_LDFLAGS="-z max-page-size=0x1000"  - MIPS page-size workaround
++
++BR2_PACKAGE_THINGINO_MOSQUITTO_20X=y
++# BR2_PACKAGE_THINGINO_MOSQUITTO_212 is not set
++# BR2_PACKAGE_MOSQUITTO_BROKER is not set
++# BR2_PACKAGE_MOSQUITTO_APPS is not set
++
++# Flashed per-partition against the vendor partition table, so no full-chip
++# image is packed and no CPIO initramfs is needed. See the camera defconfig.
++BR2_TARGET_ROOTFS_SQUASHFS=y
++BR2_TARGET_ROOTFS_SQUASHFS_BS_256K=y
++BR2_TARGET_ROOTFS_SQUASHFS4_XZ=y
++BR2_TARGET_ROOTFS_SQUASHFS_EXTREME_COMP=y
++# BR2_TARGET_ROOTFS_TAR is not set
+diff --git a/configs/fragments/soc-sigmastar.fragment b/configs/fragments/soc-sigmastar.fragment
+new file mode 100644
+index 000000000..427018d76
+--- /dev/null
++++ b/configs/fragments/soc-sigmastar.fragment
+@@ -0,0 +1,15 @@
++BR2_arm=y
++# Not every SigmaStar family is the same core: Infinity6E and Infinity6B0 are
++# Cortex-A7, Infinity6C is Cortex-A35. soc/sigmastar/<family>.mk names it.
++BR2_$(SOC_CPU)=y
++# Has to track the CPU. neon-vfpv4 is an ARMv7 FPU; pairing it with an ARMv8-A
++# core leaves GCC reporting __ARM_ARCH 8 while refusing the instructions that
++# implies, which surfaces far away -- mbedTLS enables its ARMv8 AES path and
++# then fails to inline vaesdq_u8 with "target specific option mismatch".
++BR2_ARM_FPU_$(SOC_FPU)=y
++BR2_ARM_INSTRUCTIONS_THUMB2=y
++
++# BR2_SOC_VENDOR_SIGMASTAR is declared in the camera defconfig, not here.
++# Fragments are appended to .config but never included as makefiles, so a vendor
++# set only in a fragment reaches Kconfig while thingino.mk still reads it as
++# empty and dispatches to Ingenic.
+diff --git a/configs/fragments/uclibc/gnu-hash.config b/configs/fragments/uclibc/gnu-hash.config
+new file mode 100644
+index 000000000..b8fbe37ac
+--- /dev/null
++++ b/configs/fragments/uclibc/gnu-hash.config
+@@ -0,0 +1 @@
++LDSO_GNU_HASH_SUPPORT=y

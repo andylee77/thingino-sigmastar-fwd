@@ -1,0 +1,1153 @@
+From b61d32531d0ab123e3cce7d36dd6deea33f97032 Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 08:19:16 -0500
+Subject: [PATCH 14/21] thingino-nettest: Tools Bandwidth test (iperf3 + link
+ rate)
+
+---
+ package/thingino-nettest/Config.in            |  23 ++
+ package/thingino-nettest/files/S92nettest     |  25 ++
+ package/thingino-nettest/files/miiread.c      |  42 ++
+ package/thingino-nettest/files/nettest        | 276 +++++++++++++
+ .../thingino-nettest/files/nettest.webui.json |  28 ++
+ .../files/www/a/tool-nettest.js               | 378 ++++++++++++++++++
+ .../files/www/tool-nettest.html               | 144 +++++++
+ .../files/www/x/json-nettest.cgi              | 114 ++++++
+ package/thingino-nettest/thingino-nettest.mk  |  42 ++
+ 9 files changed, 1072 insertions(+)
+ create mode 100644 package/thingino-nettest/Config.in
+ create mode 100755 package/thingino-nettest/files/S92nettest
+ create mode 100644 package/thingino-nettest/files/miiread.c
+ create mode 100755 package/thingino-nettest/files/nettest
+ create mode 100644 package/thingino-nettest/files/nettest.webui.json
+ create mode 100644 package/thingino-nettest/files/www/a/tool-nettest.js
+ create mode 100644 package/thingino-nettest/files/www/tool-nettest.html
+ create mode 100755 package/thingino-nettest/files/www/x/json-nettest.cgi
+ create mode 100644 package/thingino-nettest/thingino-nettest.mk
+
+diff --git a/package/thingino-nettest/Config.in b/package/thingino-nettest/Config.in
+new file mode 100644
+index 000000000..4425ae04d
+--- /dev/null
++++ b/package/thingino-nettest/Config.in
+@@ -0,0 +1,23 @@
++config BR2_PACKAGE_THINGINO_NETTEST
++	bool "thingino-nettest"
++	depends on BR2_TOOLCHAIN_HAS_ATOMIC # iperf3
++	depends on BR2_TOOLCHAIN_HAS_THREADS # iperf3
++	select BR2_PACKAGE_IPERF3
++	help
++	  Network testing from the camera, on the web UI's Tools >
++	  Bandwidth test page and as the nettest command:
++
++	  - the Ethernet link's health: speed, duplex, what the switch
++	    port advertises, error counters and the live TCP
++	    retransmit rate, which shows a lossy switch or cable at a
++	    glance;
++	  - an iperf3 server for tests from a PC or another camera. It
++	    answers anyone who can reach the camera, so it is off
++	    unless switched on, and switches itself off again after a
++	    set time unless it is set to start at boot;
++	  - iperf3 tests run from the camera to another host, TCP or
++	    UDP, in either direction.
++
++comment "thingino-nettest needs a toolchain w/ threads"
++	depends on BR2_TOOLCHAIN_HAS_ATOMIC
++	depends on !BR2_TOOLCHAIN_HAS_THREADS
+diff --git a/package/thingino-nettest/files/S92nettest b/package/thingino-nettest/files/S92nettest
+new file mode 100755
+index 000000000..026844d4e
+--- /dev/null
++++ b/package/thingino-nettest/files/S92nettest
+@@ -0,0 +1,25 @@
++#!/bin/sh
++# S92nettest -- start the iperf3 server at boot when the Bandwidth test page's
++# "start at boot" is on (nettest.server_boot in /etc/thingino.json). Off by
++# default: the server answers anyone who can reach the camera.
++
++NETTEST=/usr/sbin/nettest
++
++case "$1" in
++start)
++	[ "$(jct /etc/thingino.json get nettest.server_boot 2>/dev/null)" = true ] || exit 0
++	echo "Starting iperf3 server..."
++	$NETTEST server start 0 >/dev/null
++	;;
++stop)
++	$NETTEST server stop >/dev/null
++	;;
++restart)
++	"$0" stop
++	"$0" start
++	;;
++*)
++	echo "Usage: $0 {start|stop|restart}"
++	exit 1
++	;;
++esac
+diff --git a/package/thingino-nettest/files/miiread.c b/package/thingino-nettest/files/miiread.c
+new file mode 100644
+index 000000000..4a18fa590
+--- /dev/null
++++ b/package/thingino-nettest/files/miiread.c
+@@ -0,0 +1,42 @@
++/* miiread [ifname] -- print a NIC's MII registers 0-7 (BMCR, BMSR, PHY id,
++ * our advertisement, the link partner's, autoneg expansion) through
++ * SIOCGMIIPHY/SIOCGMIIREG. Read-only. Busybox has no mii-tool and these
++ * images carry no ethtool; nettest reads register 5 to say what the switch
++ * port advertises. */
++#include <linux/mii.h>
++#include <linux/sockios.h>
++#include <net/if.h>
++#include <stdio.h>
++#include <string.h>
++#include <sys/ioctl.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++int main(int argc, char **argv)
++{
++	struct ifreq ifr;
++	struct mii_ioctl_data *mii = (struct mii_ioctl_data *)&ifr.ifr_data;
++	int fd = socket(AF_INET, SOCK_DGRAM, 0);
++
++	if (fd < 0) {
++		perror("socket");
++		return 1;
++	}
++	memset(&ifr, 0, sizeof(ifr));
++	strncpy(ifr.ifr_name, argc > 1 ? argv[1] : "eth0", IFNAMSIZ - 1);
++	if (ioctl(fd, SIOCGMIIPHY, &ifr) < 0) {
++		perror("SIOCGMIIPHY");
++		return 1;
++	}
++	printf("phy_addr=%u\n", mii->phy_id);
++	for (int r = 0; r < 8; r++) {
++		mii->reg_num = r;
++		if (ioctl(fd, SIOCGMIIREG, &ifr) < 0) {
++			perror("SIOCGMIIREG");
++			return 1;
++		}
++		printf("reg%d=0x%04x\n", r, mii->val_out);
++	}
++	close(fd);
++	return 0;
++}
+diff --git a/package/thingino-nettest/files/nettest b/package/thingino-nettest/files/nettest
+new file mode 100755
+index 000000000..921d7040f
+--- /dev/null
++++ b/package/thingino-nettest/files/nettest
+@@ -0,0 +1,276 @@
++#!/bin/sh
++# nettest -- the camera end of the web UI's Tools > Bandwidth test page, also
++# usable over ssh. Every command but run prints JSON.
++#
++#   nettest status                   link, switch port, counters, server, test
++#   nettest server start [MIN] [PORT]
++#                                    iperf3 server, off again after MIN minutes
++#                                    (default 30; 0 = until stopped)
++#   nettest server stop
++#   nettest run HOST tcp|udp send|receive SECONDS [MBPS] [PORT]
++#                                    iperf3 test from this camera, in the
++#                                    background; MBPS caps TCP (0 = no cap)
++#                                    and sets the UDP rate
++#   nettest result                   the last test, {"state":"idle|running|done"}
++#
++# The server answers anyone who can reach the camera, so it is off unless
++# switched on, and switches itself off again unless asked to stay up (the
++# page's "start at boot", nettest.server_boot in /etc/thingino.json).
++
++CONFIG=/etc/thingino.json
++IPERF3=/usr/bin/iperf3
++RUN=/run/nettest
++SERVER_PID=$RUN/server.pid
++SERVER_PORT=$RUN/server.port
++DEADLINE=$RUN/server.deadline
++TIMER_PID=$RUN/timer.pid
++CLIENT_PID=$RUN/client.pid
++TEST=$RUN/test.json
++RESULT=$RUN/result.json
++DEFAULT_PORT=5201
++MAX_SECONDS=60
++
++mkdir -p "$RUN"
++
++die() {
++	echo "$*" >&2
++	exit 1
++}
++
++# alive <pidfile> <word>: the pid in the file is running and is ours (its
++# command line has <word>), not a later process that reused the number.
++alive() {
++	[ -s "$1" ] && grep -q "$2" "/proc/$(cat "$1")/cmdline" 2>/dev/null
++}
++
++uptime_s() {
++	cut -d. -f1 /proc/uptime
++}
++
++# A nettest key from thingino.json; empty when unset (jct exits 1 then).
++config_get() {
++	jct "$CONFIG" get "nettest.$1" 2>/dev/null
++}
++
++is_port() {
++	case "$1" in
++	'' | *[!0-9]*) return 1 ;;
++	esac
++	[ "$1" -ge 1 ] && [ "$1" -le 65535 ]
++}
++
++saved_port() {
++	_p=$(config_get server_port)
++	is_port "$_p" || _p=$DEFAULT_PORT
++	echo "$_p"
++}
++
++# The interface the default route leaves by (eth0 on our wired cameras).
++iface() {
++	_if=$(ip route show default 2>/dev/null |
++		awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
++	echo "${_if:-eth0}"
++}
++
++jbool() {
++	if [ "$1" -ne 0 ]; then printf true; else printf false; fi
++}
++
++# Speed, duplex and autoneg from the PHY, plus what the switch port
++# advertises (its MII register 5). A partner that advertises nothing does not
++# autonegotiate: a port forced to a speed, where the duplex can disagree.
++link_json() {
++	_carrier=$(cat "/sys/class/net/$1/carrier" 2>/dev/null)
++	_speed=$(cat "/sys/class/net/$1/speed" 2>/dev/null)
++	_duplex=$(cat "/sys/class/net/$1/duplex" 2>/dev/null)
++	case "$_speed" in
++	'' | *[!0-9]*) _speed=null ;;
++	esac
++	printf '{"carrier":%s,"speed_mbps":%s,"duplex":"%s"' \
++		"$([ "$_carrier" = 1 ] && echo true || echo false)" "$_speed" "${_duplex:-unknown}"
++	if _mii=$(miiread "$1" 2>/dev/null); then
++		_bmcr=$(printf '%s\n' "$_mii" | sed -n 's/^reg0=//p')
++		_bmsr=$(printf '%s\n' "$_mii" | sed -n 's/^reg1=//p')
++		_lpa=$(printf '%s\n' "$_mii" | sed -n 's/^reg5=//p')
++		_modes=
++		for _m in 0x0100:100full 0x0080:100half 0x0040:10full 0x0020:10half; do
++			[ $((_lpa & ${_m%%:*})) -ne 0 ] && _modes="$_modes${_modes:+,}\"${_m#*:}\""
++		done
++		printf ',"autoneg":%s,"autoneg_done":%s' \
++			"$(jbool $((_bmcr & 0x1000)))" "$(jbool $((_bmsr & 0x0020)))"
++		printf ',"partner":{"lpa":"%s","modes":[%s],"pause":%s,"asym_pause":%s}' \
++			"$_lpa" "$_modes" "$(jbool $((_lpa & 0x0400)))" "$(jbool $((_lpa & 0x0800)))"
++	else
++		printf ',"autoneg":null,"autoneg_done":null,"partner":null'
++	fi
++	printf '}'
++}
++
++counters_json() {
++	_c=
++	for _k in rx_packets rx_errors rx_dropped rx_crc_errors rx_fifo_errors \
++		tx_packets tx_errors tx_dropped tx_fifo_errors collisions; do
++		_v=$(cat "/sys/class/net/$1/statistics/$_k" 2>/dev/null)
++		_c="$_c${_c:+,}\"$_k\":${_v:-0}"
++	done
++	printf '{%s}' "$_c"
++}
++
++# Cumulative since boot; the page turns two samples into a rate.
++snmp_json() {
++	awk '
++	$1 == "Tcp:" || $1 == "Udp:" {
++		if (!seen[$1]++) { for (i = 2; i <= NF; i++) col[$1 $i] = i; next }
++		for (i = 2; i <= NF; i++) val[$1 i] = $i
++	}
++	function get(p, k) { return (p k) in col ? val[p col[p k]] + 0 : 0 }
++	END {
++		printf "\"tcp\":{\"out_segs\":%d,\"retrans_segs\":%d},", get("Tcp:", "OutSegs"), get("Tcp:", "RetransSegs")
++		printf "\"udp\":{\"in_errors\":%d,\"rcvbuf_errors\":%d,\"sndbuf_errors\":%d}", \
++			get("Udp:", "InErrors"), get("Udp:", "RcvbufErrors"), get("Udp:", "SndbufErrors")
++	}' /proc/net/snmp
++}
++
++server_json() {
++	_running=false _port=null _off=null
++	if alive "$SERVER_PID" iperf3; then
++		_running=true
++		_port=$(cat "$SERVER_PORT" 2>/dev/null)
++		is_port "$_port" || _port=null
++		if [ -s "$DEADLINE" ]; then
++			_off=$(($(cat "$DEADLINE") - $(uptime_s)))
++			[ "$_off" -ge 0 ] || _off=0
++		fi
++	fi
++	_boot=$(config_get server_boot)
++	[ "$_boot" = true ] || _boot=false
++	printf '{"running":%s,"port":%s,"off_in_s":%s,"boot":%s,"saved_port":%s}' \
++		"$_running" "$_port" "$_off" "$_boot" "$(saved_port)"
++}
++
++test_state() {
++	if alive "$CLIENT_PID" iperf3; then
++		echo running
++	elif [ -s "$RESULT" ]; then
++		echo done
++	else
++		echo idle
++	fi
++}
++
++status() {
++	_if=$(iface)
++	printf '{"iface":"%s","uptime_s":%s,"link":%s,"counters":%s,%s,"server":%s,"test":"%s"}\n' \
++		"$_if" "$(uptime_s)" "$(link_json "$_if")" "$(counters_json "$_if")" \
++		"$(snmp_json)" "$(server_json)" "$(test_state)"
++}
++
++server_stop() {
++	# The auto-off timer ends by running this; it must not kill itself.
++	if alive "$TIMER_PID" nettest && [ "$(cat "$TIMER_PID")" != "$$" ]; then
++		kill "$(cat "$TIMER_PID")" 2>/dev/null
++	fi
++	alive "$SERVER_PID" iperf3 && kill "$(cat "$SERVER_PID")" 2>/dev/null
++	rm -f "$TIMER_PID" "$DEADLINE" "$SERVER_PID" "$SERVER_PORT"
++}
++
++server_start() {
++	_min=${1:-30}
++	_port=${2:-$(saved_port)}
++	case "$_min" in
++	'' | *[!0-9]*) die "minutes must be a whole number" ;;
++	esac
++	is_port "$_port" || die "port must be 1-65535"
++	server_stop
++	"$IPERF3" -s -D -p "$_port" -I "$SERVER_PID" >/dev/null 2>&1 ||
++		die "the iperf3 server did not start (is port $_port in use?)"
++	sleep 1
++	alive "$SERVER_PID" iperf3 || die "the iperf3 server exited (is port $_port in use?)"
++	echo "$_port" >"$SERVER_PORT"
++	if [ "$_min" -gt 0 ]; then
++		echo $(($(uptime_s) + _min * 60)) >"$DEADLINE"
++		start-stop-daemon -S -b -m -p "$TIMER_PID" -x /bin/sh -- \
++			-c "sleep $((_min * 60)); exec /usr/sbin/nettest server stop"
++	fi
++	server_json
++	echo
++}
++
++run() {
++	_host=$1 _proto=$2 _dir=$3 _secs=$4 _mbps=${5:-0} _port=${6:-$DEFAULT_PORT}
++	# The host goes on a shell command line: names and addresses only.
++	case "$_host" in
++	'' | -* | *[!A-Za-z0-9.:-]*) die "target must be a host name or IP address" ;;
++	esac
++	case "$_proto" in
++	tcp | udp) ;;
++	*) die "protocol must be tcp or udp" ;;
++	esac
++	case "$_dir" in
++	send | receive) ;;
++	*) die "direction must be send or receive" ;;
++	esac
++	case "$_secs" in
++	'' | *[!0-9]*) die "seconds must be a whole number" ;;
++	esac
++	[ "$_secs" -ge 1 ] && [ "$_secs" -le $MAX_SECONDS ] || die "seconds must be 1-$MAX_SECONDS"
++	case "$_mbps" in
++	'' | *[!0-9]*) die "rate must be a whole number of Mbit/s" ;;
++	esac
++	[ "$_mbps" -le 1000 ] || die "rate must be at most 1000 Mbit/s"
++	[ "$_proto" = tcp ] || [ "$_mbps" -ge 1 ] || die "UDP needs a rate of at least 1 Mbit/s"
++	is_port "$_port" || die "port must be 1-65535"
++	alive "$CLIENT_PID" iperf3 && die "a test is already running"
++
++	_args="-c $_host -p $_port -t $_secs -J --connect-timeout 3000"
++	[ "$_dir" = receive ] && _args="$_args -R"
++	if [ "$_proto" = udp ]; then
++		_args="$_args -u -b ${_mbps}M -l 1400"
++	elif [ "$_mbps" -gt 0 ]; then
++		_args="$_args -b ${_mbps}M"
++	fi
++	rm -f "$RESULT" "$RESULT.tmp"
++	printf '{"target":"%s","proto":"%s","dir":"%s","seconds":%s,"mbps":%s,"port":%s,"started":%s}\n' \
++		"$_host" "$_proto" "$_dir" "$_secs" "$_mbps" "$_port" "$(uptime_s)" >"$TEST"
++	start-stop-daemon -S -b -m -p "$CLIENT_PID" -x /bin/sh -- \
++		-c "$IPERF3 $_args >$RESULT.tmp 2>&1; mv $RESULT.tmp $RESULT"
++	printf '{"state":"running","test":%s}\n' "$(cat "$TEST")"
++}
++
++result() {
++	_state=$(test_state)
++	_test=$(cat "$TEST" 2>/dev/null)
++	printf '{"state":"%s","test":%s,"uptime_s":%s' "$_state" "${_test:-null}" "$(uptime_s)"
++	if [ "$_state" = done ]; then
++		# iperf3 -J reports its own errors as JSON; anything else is wrapped.
++		if [ "$(sed -n '/[^[:space:]]/{s/^[[:space:]]*\(.\).*/\1/p;q}' "$RESULT")" = "{" ]; then
++			printf ',"result":'
++			cat "$RESULT"
++		else
++			printf ',"result":{"error":"%s"}' \
++				"$(tr '\n\t' '  ' <"$RESULT" | sed 's/\\/\\\\/g; s/"/\\"/g' | cut -c1-500)"
++		fi
++	fi
++	printf '}\n'
++}
++
++case "$1" in
++status) status ;;
++server)
++	case "$2" in
++	start) server_start "$3" "$4" ;;
++	stop)
++		server_stop
++		server_json
++		echo
++		;;
++	*) die "usage: nettest server start [MIN] [PORT] | stop" ;;
++	esac
++	;;
++run)
++	shift
++	run "$@"
++	;;
++result) result ;;
++*) die "usage: nettest status | server start [MIN] [PORT] | server stop | run HOST tcp|udp send|receive SECONDS [MBPS] [PORT] | result" ;;
++esac
+diff --git a/package/thingino-nettest/files/nettest.webui.json b/package/thingino-nettest/files/nettest.webui.json
+new file mode 100644
+index 000000000..6ea0af02f
+--- /dev/null
++++ b/package/thingino-nettest/files/nettest.webui.json
+@@ -0,0 +1,28 @@
++{
++  "name": "nettest",
++  "label": "Bandwidth test (iperf3) and link health",
++  "apiVersion": 1,
++  "nav": [
++    {
++      "section": "ddTools",
++      "position": "after:Network test",
++      "items": [
++        {
++          "label": "Bandwidth test",
++          "href": "/tool-nettest.html"
++        }
++      ]
++    }
++  ],
++  "scripts": [],
++  "styles": [],
++  "featureFlags": {
++    "nettest": true
++  },
++  "cgi": [
++    "/x/json-nettest.cgi"
++  ],
++  "pages": [
++    "/tool-nettest.html"
++  ]
++}
+diff --git a/package/thingino-nettest/files/www/a/tool-nettest.js b/package/thingino-nettest/files/www/a/tool-nettest.js
+new file mode 100644
+index 000000000..3b7c25108
+--- /dev/null
++++ b/package/thingino-nettest/files/www/a/tool-nettest.js
+@@ -0,0 +1,378 @@
++(function () {
++  const API_URL = "/x/json-nettest.cgi";
++  const STATUS_MS = 3000;
++  const RESULT_MS = 1000;
++  // Retransmit share of the TCP segments sent in one refresh, below which the
++  // link is fine and above which video over UDP visibly breaks up.
++  const RETRANS_OK = 0.5;
++  const RETRANS_BAD = 2;
++  // Too few segments in a refresh make the share meaningless.
++  const MIN_SEGMENTS = 100;
++
++  const linkTable = $("#linkTable");
++  const linkNote = $("#linkNote");
++  const serverState = $("#serverState");
++  const serverPort = $("#serverPort");
++  const serverMinutes = $("#serverMinutes");
++  const serverStart = $("#serverStart");
++  const serverStop = $("#serverStop");
++  const serverBoot = $("#serverBoot");
++  const serverHint = $("#serverHint");
++  const testForm = $("#testForm");
++  const testTarget = $("#testTarget");
++  const testProto = $("#testProto");
++  const testDir = $("#testDir");
++  const testSeconds = $("#testSeconds");
++  const testMbps = $("#testMbps");
++  const testMbpsLabel = $("#testMbpsLabel");
++  const testPort = $("#testPort");
++  const testHelp = $("#testHelp");
++  const testRun = $("#testRun");
++  const testStatus = $("#testStatus");
++  const testSummary = $("#testSummary");
++  const testIntervals = $("#testIntervals");
++
++  const runDefaultHtml = testRun.innerHTML;
++  let previous = null;
++  let portEdited = false;
++  let polling = false;
++
++  async function call(action, params = {}, method = "GET") {
++    const query = new URLSearchParams({ a: action, ...params });
++    const response =
++      method === "GET"
++        ? await fetch(`${API_URL}?${query}`, { cache: "no-store" })
++        : await fetch(API_URL, { method: "POST", body: query, cache: "no-store" });
++    let payload = null;
++    try {
++      payload = await response.json();
++    } catch (e) {
++      payload = null;
++    }
++    if (!response.ok || !payload || payload.error) {
++      const message = payload && payload.error && payload.error.message;
++      throw new Error(message || `HTTP ${response.status}`);
++    }
++    return payload;
++  }
++
++  // Text from the camera or an iperf3 peer goes into the page as text only.
++  function esc(value) {
++    const div = document.createElement("div");
++    div.textContent = String(value);
++    return div.innerHTML;
++  }
++
++  function showError(el, message) {
++    el.innerHTML = `<span class="text-danger">${esc(message)}</span>`;
++  }
++
++  function mbps(bitsPerSecond) {
++    return `${(bitsPerSecond / 1e6).toFixed(1)} Mbit/s`;
++  }
++
++  function percent(part, whole) {
++    return whole > 0 ? (100 * part) / whole : 0;
++  }
++
++  function badge(text, tone) {
++    return `<span class="badge text-bg-${tone}">${text}</span>`;
++  }
++
++  function retransTone(share) {
++    if (share < RETRANS_OK) return "success";
++    return share < RETRANS_BAD ? "warning" : "danger";
++  }
++
++  function row(label, html) {
++    return `<tr><th class="fw-normal text-secondary text-nowrap">${label}</th><td>${html}</td></tr>`;
++  }
++
++  function linkText(link) {
++    if (!link.carrier) return badge("down", "danger");
++    const speed = link.speed_mbps ? `${link.speed_mbps} Mbit/s` : "speed unknown";
++    const how = link.autoneg === false ? ", forced" : link.autoneg ? ", autonegotiated" : "";
++    const tone = link.duplex === "full" ? "" : ` ${badge(`${link.duplex} duplex`, "warning")}`;
++    return `${speed}, ${link.duplex} duplex${how}${tone}`;
++  }
++
++  function partnerText(partner) {
++    if (!partner) return '<span class="text-secondary">not readable on this interface</span>';
++    if (partner.modes.length === 0) {
++      return `${badge("advertises nothing", "warning")} the port does not autonegotiate, so the duplex can disagree <code>${esc(partner.lpa)}</code>`;
++    }
++    const modes = partner.modes.map((m) => m.replace(/(full|half)$/, " $1")).join(", ");
++    const pause = partner.pause || partner.asym_pause ? ", flow control" : "";
++    return `${modes}${pause} <code title="MII link partner register, a fingerprint of the switch model">${esc(partner.lpa)}</code>`;
++  }
++
++  function retransText(status) {
++    const tcp = status.tcp;
++    const sinceBoot = percent(tcp.retrans_segs, tcp.out_segs);
++    let now = '<span class="text-secondary">measuring...</span>';
++    if (previous && status.uptime_s > previous.uptime_s) {
++      const out = tcp.out_segs - previous.tcp.out_segs;
++      const retrans = tcp.retrans_segs - previous.tcp.retrans_segs;
++      if (out >= MIN_SEGMENTS) {
++        const share = percent(retrans, out);
++        now = `${badge(`${share.toFixed(2)}%`, retransTone(share))} of ${out} segments in the last ${status.uptime_s - previous.uptime_s} s`;
++      } else {
++        now = '<span class="text-secondary">too little TCP traffic to judge</span>';
++      }
++    }
++    return `${now}<br><small class="text-secondary">${sinceBoot.toFixed(2)}% since boot (${tcp.retrans_segs} of ${tcp.out_segs})</small>`;
++  }
++
++  function errorsText(c, udp) {
++    const errors = {
++      "rx errors": c.rx_errors,
++      "CRC errors": c.rx_crc_errors,
++      "rx overruns": c.rx_fifo_errors,
++      "tx errors": c.tx_errors,
++      "tx drops": c.tx_dropped,
++      "tx underruns": c.tx_fifo_errors,
++      collisions: c.collisions,
++      "UDP receive buffer drops": udp.rcvbuf_errors,
++      "UDP send buffer drops": udp.sndbuf_errors,
++    };
++    const seen = Object.entries(errors).filter(([, n]) => n > 0);
++    const list = seen.length
++      ? seen.map(([name, n]) => `${name} ${n}`).join(", ")
++      : '<span class="text-success">none</span>';
++    return `${list}<br><small class="text-secondary">${c.rx_dropped} received frames dropped by the stack (mostly protocols the camera does not run)</small>`;
++  }
++
++  function renderLink(status) {
++    linkTable.innerHTML =
++      row("Interface", status.iface) +
++      row("Link", linkText(status.link)) +
++      row("Switch port", partnerText(status.link.partner)) +
++      row("TCP retransmits", retransText(status)) +
++      row("Errors since boot", errorsText(status.counters, status.udp));
++    linkNote.textContent =
++      "Retransmits are the camera's own count of TCP segments it had to send again: lost on the way, whatever the client. " +
++      "Above a few tenths of a percent, video over UDP (VLC, the web preview) breaks up; check the switch and cable.";
++  }
++
++  function clock(seconds) {
++    const m = Math.floor(seconds / 60);
++    const s = String(seconds % 60).padStart(2, "0");
++    return `${m}:${s}`;
++  }
++
++  function renderServer(server) {
++    if (server.running) {
++      const off =
++        server.off_in_s === null ? "until stopped" : `switches off in ${clock(server.off_in_s)}`;
++      serverState.innerHTML = `${badge("running", "success")} on port ${server.port}, ${off}`;
++    } else {
++      serverState.innerHTML = badge("stopped", "secondary");
++    }
++    serverStart.textContent = server.running ? "Restart" : "Start";
++    serverStop.disabled = !server.running;
++    serverBoot.checked = server.boot;
++    if (!portEdited) serverPort.value = server.running ? server.port : server.saved_port;
++    const host = window.location.hostname;
++    const port = server.running ? server.port : serverPort.value;
++    const p = String(port) === "5201" ? "" : ` -p ${port}`;
++    serverHint.textContent =
++      `From a PC with iperf3:\n` +
++      `  iperf3 -c ${host}${p}              # PC sends to the camera\n` +
++      `  iperf3 -c ${host}${p} -R           # camera sends to the PC\n` +
++      `  iperf3 -c ${host}${p} -R -u -b 20M # camera sends UDP, reports loss`;
++  }
++
++  async function refresh() {
++    try {
++      const status = await call("status");
++      renderLink(status);
++      renderServer(status.server);
++      previous = status;
++      if (status.test === "running" && !polling) pollResult();
++    } catch (error) {
++      linkTable.innerHTML = row("Error", `<span class="text-danger">${esc(error.message)}</span>`);
++    }
++    setTimeout(refresh, STATUS_MS);
++  }
++
++  async function serverAction(action, params, button) {
++    button.disabled = true;
++    try {
++      await call(action, params, "POST");
++      portEdited = false;
++      previous = null;
++    } catch (error) {
++      showError(serverState, error.message);
++    } finally {
++      button.disabled = false;
++    }
++    const status = await call("status").catch(() => null);
++    if (status) renderServer(status.server);
++  }
++
++  function updateTestHelp() {
++    const udp = testProto.value === "udp";
++    testMbpsLabel.textContent = udp ? "UDP rate, Mbit/s" : "Rate cap, Mbit/s";
++    testMbps.min = udp ? 1 : 0;
++    if (udp && Number(testMbps.value) < 1) testMbps.value = 20;
++    if (!udp && testMbps.dataset.touched !== "1") testMbps.value = 0;
++    const from = testDir.value === "send" ? "camera to target" : "target to camera";
++    testHelp.textContent = udp
++      ? `UDP at a fixed rate, ${from}: shows loss and jitter, as video over UDP sees them.`
++      : `TCP as fast as the path allows (0 = no cap), ${from}: shows throughput and retransmits.`;
++  }
++
++  function setRunning(running) {
++    testRun.disabled = running;
++    testRun.innerHTML = running
++      ? '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Running...'
++      : runDefaultHtml;
++  }
++
++  function summaryRows(test, result) {
++    const end = result.end || {};
++    const rows = [];
++    const direction = esc(test.dir === "send" ? `camera → ${test.target}` : `${test.target} → camera`);
++    rows.push(row("Test", `${test.proto.toUpperCase()}, ${direction}, ${test.seconds} s`));
++    if (test.proto === "udp") {
++      const sum = end.sum_received || end.sum || {};
++      const sent = end.sum_sent || end.sum || {};
++      const lost = sum.lost_percent || 0;
++      const tone = lost === 0 ? "success" : lost < 0.5 ? "warning" : "danger";
++      rows.push(row("Sent", `${mbps(sent.bits_per_second || 0)} (asked ${test.mbps} Mbit/s)`));
++      rows.push(row("Received", mbps(sum.bits_per_second || 0)));
++      rows.push(row("Lost", `${badge(`${lost.toFixed(3)}%`, tone)} ${sum.lost_packets || 0} of ${sum.packets || 0} packets`));
++      rows.push(row("Jitter", `${(sum.jitter_ms || 0).toFixed(3)} ms`));
++    } else {
++      const sent = end.sum_sent || {};
++      const received = end.sum_received || {};
++      rows.push(row("Throughput", `${mbps(received.bits_per_second || 0)} received, ${mbps(sent.bits_per_second || 0)} sent`));
++      if (typeof sent.retransmits === "number") {
++        rows.push(row("Retransmits", String(sent.retransmits)));
++      }
++    }
++    return rows.join("");
++  }
++
++  function intervalLines(test, result) {
++    return (result.intervals || [])
++      .map((interval) => {
++        const s = interval.sum || {};
++        let line = `${s.start.toFixed(0).padStart(3)}-${s.end.toFixed(0).padEnd(3)} s  ${mbps(s.bits_per_second || 0).padStart(14)}`;
++        if (test.proto === "udp" && typeof s.lost_packets === "number") {
++          line += `  lost ${s.lost_packets}/${s.packets}`;
++        } else if (typeof s.retransmits === "number") {
++          line += `  retransmits ${s.retransmits}`;
++        }
++        return line;
++      })
++      .join("\n");
++  }
++
++  function renderResult(reply) {
++    const result = reply.result || {};
++    if (result.error) {
++      showError(testStatus, result.error);
++      testSummary.classList.add("d-none");
++      testIntervals.classList.add("d-none");
++      return;
++    }
++    testStatus.textContent = "";
++    testSummary.querySelector("tbody").innerHTML = summaryRows(reply.test, result);
++    testSummary.classList.remove("d-none");
++    testIntervals.textContent = intervalLines(reply.test, result);
++    testIntervals.classList.toggle("d-none", !testIntervals.textContent);
++  }
++
++  async function pollResult() {
++    polling = true;
++    setRunning(true);
++    try {
++      for (;;) {
++        const reply = await call("result");
++        if (reply.state === "running") {
++          const elapsed = reply.uptime_s - reply.test.started;
++          testStatus.innerHTML = `<span class="text-secondary">Testing against ${esc(reply.test.target)}: ${elapsed} of ${reply.test.seconds} s</span>`;
++          await sleep(RESULT_MS);
++          continue;
++        }
++        if (reply.state === "done") renderResult(reply);
++        break;
++      }
++    } catch (error) {
++      showError(testStatus, error.message);
++    } finally {
++      polling = false;
++      setRunning(false);
++    }
++  }
++
++  async function runTest(event) {
++    event.preventDefault();
++    if (!testTarget.value.trim()) {
++      testStatus.innerHTML = '<span class="text-danger">Enter a target host.</span>';
++      return;
++    }
++    setRunning(true);
++    testSummary.classList.add("d-none");
++    testIntervals.classList.add("d-none");
++    try {
++      await call(
++        "run",
++        {
++          target: testTarget.value.trim(),
++          proto: testProto.value,
++          dir: testDir.value,
++          seconds: testSeconds.value,
++          mbps: testMbps.value,
++          port: testPort.value,
++        },
++        "POST",
++      );
++      await pollResult();
++    } catch (error) {
++      showError(testStatus, error.message);
++      setRunning(false);
++    }
++  }
++
++  async function showLastResult() {
++    try {
++      const reply = await call("result");
++      if (reply.test) {
++        testTarget.value = reply.test.target;
++        testProto.value = reply.test.proto;
++        testDir.value = reply.test.dir;
++        testSeconds.value = reply.test.seconds;
++        testMbps.value = reply.test.mbps;
++        testPort.value = reply.test.port;
++        updateTestHelp();
++      }
++      if (reply.state === "running") pollResult();
++      else if (reply.state === "done") renderResult(reply);
++    } catch (error) {
++      // No last test to show.
++    }
++  }
++
++  serverPort.addEventListener("input", () => {
++    portEdited = true;
++  });
++  serverStart.addEventListener("click", () =>
++    serverAction("server", { on: 1, minutes: serverMinutes.value, port: serverPort.value }, serverStart),
++  );
++  serverStop.addEventListener("click", () => serverAction("server", { on: 0 }, serverStop));
++  serverBoot.addEventListener("change", () =>
++    serverAction("boot", { on: serverBoot.checked ? 1 : 0, port: serverPort.value }, serverBoot),
++  );
++  testProto.addEventListener("change", updateTestHelp);
++  testDir.addEventListener("change", updateTestHelp);
++  testMbps.addEventListener("input", () => {
++    testMbps.dataset.touched = "1";
++  });
++  testForm.addEventListener("submit", runTest);
++
++  updateTestHelp();
++  showLastResult();
++  refresh();
++})();
+diff --git a/package/thingino-nettest/files/www/tool-nettest.html b/package/thingino-nettest/files/www/tool-nettest.html
+new file mode 100644
+index 000000000..e1a508981
+--- /dev/null
++++ b/package/thingino-nettest/files/www/tool-nettest.html
+@@ -0,0 +1,144 @@
++<!DOCTYPE html>
++<html lang="en" data-bs-theme="dark">
++<head>
++  <meta charset="utf-8">
++  <meta name="viewport" content="width=device-width,initial-scale=1">
++  <title>thingino · Bandwidth Test</title>
++  <script src="/a/theme-init.js"></script>
++  <link rel="icon" type="image/svg+xml" href="/a/favicon.svg">
++  <link rel="preconnect" href="https://fonts.googleapis.com">
++  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
++  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap">
++  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css"
++    integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
++  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.13.1/font/bootstrap-icons.min.css">
++  <link rel="stylesheet" href="/a/main.css">
++</head>
++
++<body id="page-tool-nettest">
++<nav data-app-nav></nav>
++
++<main class="pb-4">
++  <div class="container" style="min-height:80vh">
++    <div data-app-controls></div>
++
++    <div class="row g-3">
++      <div class="col-12 col-xl-5">
++        <section class="card mb-3">
++          <div class="card-header">
++            <h2 class="card-title">Link health</h2>
++            <small>The camera's network link and the switch port it is plugged into, every 3 seconds</small>
++          </div>
++          <div class="card-body">
++            <table class="table table-sm mb-2">
++              <tbody id="linkTable">
++                <tr><td class="text-secondary">Loading...</td></tr>
++              </tbody>
++            </table>
++            <div class="form-text" id="linkNote"></div>
++          </div>
++        </section>
++
++        <section class="card mb-3">
++          <div class="card-header">
++            <h2 class="card-title">iperf3 server</h2>
++            <small>For tests run from a PC or another camera against this one</small>
++          </div>
++          <div class="card-body">
++            <p class="mb-2" id="serverState">Loading...</p>
++            <div class="row g-2 align-items-end mb-2">
++              <div class="col-4">
++                <label for="serverPort" class="form-label">Port</label>
++                <input type="number" class="form-control" id="serverPort" min="1" max="65535" value="5201">
++              </div>
++              <div class="col-4">
++                <label for="serverMinutes" class="form-label">Stay on for</label>
++                <select class="form-select" id="serverMinutes">
++                  <option value="10">10 minutes</option>
++                  <option value="30" selected>30 minutes</option>
++                  <option value="60">1 hour</option>
++                  <option value="120">2 hours</option>
++                  <option value="0">until stopped</option>
++                </select>
++              </div>
++              <div class="col-4 d-flex gap-2">
++                <button type="button" class="btn btn-primary flex-fill" id="serverStart">Start</button>
++                <button type="button" class="btn btn-outline-secondary flex-fill" id="serverStop">Stop</button>
++              </div>
++            </div>
++            <div class="form-check form-switch mb-2">
++              <input class="form-check-input" type="checkbox" role="switch" id="serverBoot">
++              <label class="form-check-label" for="serverBoot">Start at boot and stay on</label>
++            </div>
++            <div class="form-text mb-2">The server answers anyone who can reach the camera. Leave it off when you are not testing.</div>
++            <pre class="terminal small mb-0" id="serverHint"></pre>
++          </div>
++        </section>
++      </div>
++
++      <div class="col-12 col-xl-7">
++        <section class="card mb-3">
++          <form id="testForm" autocomplete="off" novalidate>
++            <div class="card-header">
++              <h2 class="card-title">Test from this camera</h2>
++              <small>Run iperf3 against a host running <code>iperf3 -s</code>, such as a PC, the NVR server or another camera</small>
++            </div>
++            <div class="card-body">
++              <div class="row g-2 mb-3">
++                <div class="col-12 col-md-6">
++                  <label for="testTarget" class="form-label">Target host</label>
++                  <input type="text" class="form-control" id="testTarget" placeholder="IP address or host name" required>
++                </div>
++                <div class="col-6 col-md-3">
++                  <label for="testProto" class="form-label">Protocol</label>
++                  <select class="form-select" id="testProto">
++                    <option value="tcp">TCP</option>
++                    <option value="udp">UDP</option>
++                  </select>
++                </div>
++                <div class="col-6 col-md-3">
++                  <label for="testDir" class="form-label">Direction</label>
++                  <select class="form-select" id="testDir">
++                    <option value="send">Camera sends</option>
++                    <option value="receive">Camera receives</option>
++                  </select>
++                </div>
++                <div class="col-4">
++                  <label for="testSeconds" class="form-label">Seconds</label>
++                  <input type="number" class="form-control" id="testSeconds" min="1" max="60" value="10">
++                </div>
++                <div class="col-4">
++                  <label for="testMbps" class="form-label" id="testMbpsLabel">Rate cap, Mbit/s</label>
++                  <input type="number" class="form-control" id="testMbps" min="0" max="1000" value="0">
++                </div>
++                <div class="col-4">
++                  <label for="testPort" class="form-label">Port</label>
++                  <input type="number" class="form-control" id="testPort" min="1" max="65535" value="5201">
++                </div>
++              </div>
++              <div class="form-text mb-3" id="testHelp"></div>
++              <button type="submit" class="btn btn-primary w-100 mb-3" id="testRun">
++                <i class="bi bi-play-fill me-1"></i>Run test
++              </button>
++              <div id="testStatus" class="mb-2"></div>
++              <table class="table table-sm d-none" id="testSummary"><tbody></tbody></table>
++              <pre class="terminal small d-none" id="testIntervals" style="max-height:20rem"></pre>
++            </div>
++          </form>
++        </section>
++      </div>
++    </div>
++  </div>
++</main>
++
++<footer data-app-footer></footer>
++
++<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js"
++  integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous"></script>
++<script src="/a/main.js"></script>
++<script src="/a/runtime-config.js"></script>
++<script src="/a/navigation.js"></script>
++<script src="/a/footer.js"></script>
++<script src="/a/tool-nettest.js"></script>
++</body>
++</html>
+diff --git a/package/thingino-nettest/files/www/x/json-nettest.cgi b/package/thingino-nettest/files/www/x/json-nettest.cgi
+new file mode 100755
+index 000000000..ea74b5cba
+--- /dev/null
++++ b/package/thingino-nettest/files/www/x/json-nettest.cgi
+@@ -0,0 +1,114 @@
++#!/bin/sh
++# shellcheck disable=SC1091,SC3043
++# json-nettest.cgi -- the Tools > Bandwidth test page's calls, passed to
++# nettest, which answers in JSON:
++#
++#   GET  a=status | a=result
++#   POST a=server&on=1[&minutes=N][&port=P]   iperf3 server on (N=0: until stopped)
++#        a=server&on=0
++#        a=boot&on=1|0[&port=P]   start the server at boot, and now; or not
++#        a=run&target=HOST&proto=tcp|udp&dir=send|receive&seconds=N[&mbps=N][&port=P]
++#
++# Errors answer {"error":{"code":...,"message":...}} like tool-ping-trace.cgi.
++
++. /var/www/x/auth.sh
++require_auth
++
++CONFIG=/etc/thingino.json
++NETTEST=/usr/sbin/nettest
++# nettest's: a server with no auto-off deadline was started to stay up
++DEADLINE=/run/nettest/server.deadline
++
++send() {
++	printf 'Status: %s\r\n' "$1"
++	printf 'Content-Type: application/json\r\n'
++	printf 'Cache-Control: no-store\r\n'
++	printf 'Connection: close\r\n'
++	printf '\r\n'
++	printf '%s\n' "$2"
++	exit 0
++}
++
++json_escape() {
++	printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
++}
++
++fail() {
++	send "${2:-422 Unprocessable Entity}" \
++		"{\"error\":{\"code\":${3:-422},\"message\":\"$(json_escape "$1")\"}}"
++}
++
++# nettest's JSON on success, its message as the error otherwise.
++nettest() {
++	_err=/tmp/json-nettest.$$
++	if _out=$("$NETTEST" "$@" 2>"$_err"); then
++		rm -f "$_err"
++		send "200 OK" "$_out"
++	fi
++	_msg=$(cat "$_err" 2>/dev/null)
++	rm -f "$_err"
++	fail "${_msg:-nettest failed}"
++}
++
++if [ "$REQUEST_METHOD" = "POST" ]; then
++	_len=${CONTENT_LENGTH:-0}
++	case "$_len" in
++	'' | *[!0-9]*) _len=0 ;;
++	esac
++	PARAMS=$(dd bs=1 count="$_len" 2>/dev/null)
++else
++	PARAMS=$QUERY_STRING
++fi
++
++# One parameter, URL-decoded. Nothing from the request is eval'd; nettest
++# validates every value before it reaches a command line.
++param() {
++	_v=$(printf '%s' "$PARAMS" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n 1)
++	printf '%b' "$(printf '%s' "$_v" | sed 's/+/ /g; s/%\([0-9A-Fa-f][0-9A-Fa-f]\)/\\x\1/g')"
++}
++
++action=$(param a)
++case "$REQUEST_METHOD:$action" in
++GET: | GET:status)
++	nettest status
++	;;
++GET:result)
++	nettest result
++	;;
++POST:server)
++	if [ "$(param on)" = 1 ]; then
++		nettest server start "$(param minutes)" "$(param port)"
++	fi
++	nettest server stop
++	;;
++POST:boot)
++	port=$(param port)
++	if [ -n "$port" ]; then
++		case "$port" in
++		*[!0-9]*) fail "port must be 1-65535" ;;
++		esac
++		{ [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; } || fail "port must be 1-65535"
++	fi
++	if [ "$(param on)" = 1 ]; then
++		jct "$CONFIG" set nettest.server_boot true >/dev/null 2>&1 || fail "could not save the setting"
++		[ -z "$port" ] || jct "$CONFIG" set nettest.server_port "$port" >/dev/null 2>&1
++		nettest server start 0 "$port"
++	fi
++	jct "$CONFIG" set nettest.server_boot false >/dev/null 2>&1 || fail "could not save the setting"
++	# A server this setting kept up (no auto-off) goes with it.
++	if [ ! -s "$DEADLINE" ]; then
++		nettest server stop
++	fi
++	nettest status
++	;;
++POST:run)
++	nettest run "$(param target)" "$(param proto)" "$(param dir)" \
++		"$(param seconds)" "$(param mbps)" "$(param port)"
++	;;
++GET:server | GET:boot | GET:run)
++	fail "$action needs POST" "405 Method Not Allowed" 405
++	;;
++*)
++	fail "unknown action" "400 Bad Request" 400
++	;;
++esac
+diff --git a/package/thingino-nettest/thingino-nettest.mk b/package/thingino-nettest/thingino-nettest.mk
+new file mode 100644
+index 000000000..11958c05f
+--- /dev/null
++++ b/package/thingino-nettest/thingino-nettest.mk
+@@ -0,0 +1,42 @@
++################################################################################
++#
++# thingino-nettest
++#
++################################################################################
++
++THINGINO_NETTEST_VERSION = 1.0
++THINGINO_NETTEST_SITE_METHOD = local
++THINGINO_NETTEST_SITE = $(THINGINO_NETTEST_PKGDIR)/files
++
++THINGINO_NETTEST_DEPENDENCIES = iperf3
++
++ifeq ($(BR2_PACKAGE_THINGINO_WEBUI),y)
++# The Tools > Bandwidth test page: installed after thingino-webui so that its
++# plugin assembly (a target-finalize hook) finds nettest.webui.json.
++THINGINO_NETTEST_DEPENDENCIES += thingino-webui
++
++define THINGINO_NETTEST_INSTALL_WWW_CMDS
++	$(INSTALL) -D -m 0644 $(@D)/www/tool-nettest.html \
++		$(TARGET_DIR)/var/www/tool-nettest.html
++	$(INSTALL) -D -m 0644 $(@D)/www/a/tool-nettest.js \
++		$(TARGET_DIR)/var/www/a/tool-nettest.js
++	$(INSTALL) -D -m 0755 $(@D)/www/x/json-nettest.cgi \
++		$(TARGET_DIR)/var/www/x/json-nettest.cgi
++	$(INSTALL) -D -m 0644 $(@D)/nettest.webui.json \
++		$(TARGET_DIR)/var/www/a/plugins/nettest.webui.json
++endef
++endif
++
++define THINGINO_NETTEST_BUILD_CMDS
++	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -Os -s -Wall -Wextra \
++		-o $(@D)/miiread $(@D)/miiread.c
++endef
++
++define THINGINO_NETTEST_INSTALL_TARGET_CMDS
++	$(INSTALL) -D -m 0755 $(@D)/miiread $(TARGET_DIR)/usr/sbin/miiread
++	$(INSTALL) -D -m 0755 $(@D)/nettest $(TARGET_DIR)/usr/sbin/nettest
++	$(INSTALL) -D -m 0755 $(@D)/S92nettest $(TARGET_DIR)/etc/init.d/S92nettest
++	$(THINGINO_NETTEST_INSTALL_WWW_CMDS)
++endef
++
++$(eval $(generic-package))

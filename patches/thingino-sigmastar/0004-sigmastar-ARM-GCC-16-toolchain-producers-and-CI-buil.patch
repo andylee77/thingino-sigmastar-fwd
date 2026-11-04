@@ -1,0 +1,610 @@
+From 44dd4d6ac7a56a59f6bae364d0cab374bd661877 Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 08:19:15 -0500
+Subject: [PATCH 04/21] sigmastar: ARM GCC 16 toolchain producers and CI build
+
+---
+ .github/workflows/sigmastar-build.yaml        | 142 ++++++++++++++
+ .github/workflows/toolchain-aarch64.yaml      |  17 +-
+ .github/workflows/toolchain-x86_64.yaml       |  17 +-
+ ...toolchain_infinity6e_glibc_gcc16_defconfig |  53 +++++
+ ...oolchain_infinity6e_uclibc_gcc16_defconfig |  53 +++++
+ scripts/check-target-libs.sh                  | 182 ++++++++++++++++++
+ 6 files changed, 450 insertions(+), 14 deletions(-)
+ create mode 100644 .github/workflows/sigmastar-build.yaml
+ create mode 100644 configs/github/toolchain_infinity6e_glibc_gcc16_defconfig
+ create mode 100644 configs/github/toolchain_infinity6e_uclibc_gcc16_defconfig
+ create mode 100755 scripts/check-target-libs.sh
+
+diff --git a/.github/workflows/sigmastar-build.yaml b/.github/workflows/sigmastar-build.yaml
+new file mode 100644
+index 000000000..4076cb057
+--- /dev/null
++++ b/.github/workflows/sigmastar-build.yaml
+@@ -0,0 +1,142 @@
++name: sigmastar-build
++
++# Build-only CI for the SigmaStar port.
++#
++# This exists because the fork's primary risk is not merge conflicts, it is
++# silent semantic drift: upstream adds an application-layer feature that quietly
++# assumes Ingenic, nothing conflicts, and the board breaks. A merge that still
++# builds is the cheapest signal that catches part of that, and it is the scaffold
++# the boot test hangs on later.
++#
++# Separate file rather than a matrix entry in firmware-builder.yml on purpose --
++# a new file has no merge surface against upstream, which is the same discipline
++# the rest of the fork follows.
++
++on:
++  push:
++    branches:
++      - sigmastar-fwd
++    # A build takes ~45 minutes cold. Documentation cannot change the image, and
++    # this fork carries a lot of it. GitHub skips the run only when every changed
++    # path matches, so a commit touching both docs and code still builds.
++    paths-ignore:
++      - '**.md'
++  pull_request:
++    branches:
++      - sigmastar-fwd
++    paths-ignore:
++      - '**.md'
++  workflow_dispatch:
++    inputs:
++      camera:
++        type: string
++        description: 'Camera config to build'
++        required: false
++        default: 'noname_ssc377qe_imx335'
++
++# Only the newest push to a branch is worth building; a superseded run is
++# answering a question nobody is asking any more.
++concurrency:
++  group: sigmastar-build-${{ github.ref }}
++  cancel-in-progress: true
++
++env:
++  BR2_DL_DIR: ~/dl
++  FORCE_UNSAFE_CONFIGURE: 1
++  TERM: linux
++  TZ: UTC
++
++jobs:
++  build:
++    name: ${{ github.event.inputs.camera || 'noname_ssc377qe_imx335' }}
++    runs-on: ubuntu-26.04
++    # A cold cache builds the whole external-toolchain userspace; upstream's
++    # 30 minutes assumes a warm dl cache it populates from its own registry.
++    timeout-minutes: 150
++    defaults:
++      run:
++        shell: bash
++    container:
++      image: ghcr.io/themactep/thingino-builder-image:latest
++      options: --user root
++
++    steps:
++      - name: Setup gh workspace to container
++        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
++
++      - name: Use GNU coreutils install (workaround for uutils bug)
++        run: update-alternatives --install /usr/bin/install install /usr/bin/gnuinstall 100 || true
++
++      - name: Checkout repository source
++        uses: actions/checkout@v5
++        with:
++          submodules: 'true'
++          fetch-depth: '1'
++
++      - name: Configure environment variables
++        run: |
++          echo "CAMERA=${{ github.event.inputs.camera || 'noname_ssc377qe_imx335' }}" >> $GITHUB_ENV
++          echo "WEEK_NUMBER=$(date +%U)" >> $GITHUB_ENV
++          echo "CURRENT_YEAR=$(date +%Y)" >> $GITHUB_ENV
++
++      - name: Setup cache directories
++        run: mkdir -p ~/.buildroot-ccache ~/dl
++
++      - name: Restore ccache
++        uses: actions/cache@v5
++        if: always()
++        with:
++          path: ~/.buildroot-ccache
++          key: ${{ runner.os }}-sigmastar-ccache-${{ env.CAMERA }}-${{ env.CURRENT_YEAR }}-week-${{ env.WEEK_NUMBER }}
++          restore-keys: |
++            ${{ runner.os }}-sigmastar-ccache-${{ env.CAMERA }}-${{ env.CURRENT_YEAR }}-
++            ${{ runner.os }}-sigmastar-ccache-${{ env.CAMERA }}-
++
++      # Downloads only, so a stale entry is never wrong, only incomplete. Keyed
++      # loosely on purpose: the point is to avoid refetching the ARM toolchain
++      # and the vendor SDK tarball on every run.
++      - name: Restore download cache
++        uses: actions/cache@v5
++        with:
++          path: ~/dl
++          key: ${{ runner.os }}-sigmastar-dl-${{ env.CURRENT_YEAR }}-week-${{ env.WEEK_NUMBER }}
++          restore-keys: |
++            ${{ runner.os }}-sigmastar-dl-${{ env.CURRENT_YEAR }}-
++            ${{ runner.os }}-sigmastar-dl-
++
++      # br-all rather than upstream's `fast` target: br-all runs the post-image
++      # script, which is what enforces the kernel and rootfs partition limits.
++      # The kernel sits at 98% of its partition, so a size regression is a real
++      # and likely failure mode, and it is only caught here.
++      - name: Build firmware
++        run: make CAMERA="$CAMERA" br-all WORKFLOW=1
++
++      # A build can link a library that is not in the image, or ship a stale
++      # per-package copy over a rebuilt one; neither fails the build itself.
++      - name: Check target libraries
++        run: |
++          TARGET=$(echo output/*/"$CAMERA"-*/target)
++          ./scripts/check-target-libs.sh "$TARGET"
++
++      - name: Report image sizes
++        if: always()
++        run: |
++          shopt -s nullglob
++          for f in output/*/"$CAMERA"-*/images/uImage output/*/"$CAMERA"-*/images/rootfs.squashfs; do
++            echo "$(stat -c '%10s  %n' "$f")"
++          done
++
++      - name: Upload images
++        if: success()
++        uses: actions/upload-artifact@v4
++        with:
++          name: ${{ env.CAMERA }}-images
++          path: |
++            output/*/${{ env.CAMERA }}-*/images/uImage
++            output/*/${{ env.CAMERA }}-*/images/rootfs.squashfs
++            output/*/${{ env.CAMERA }}-*/images/u-boot-*-nor.bin
++            output/*/${{ env.CAMERA }}-*/images/u-boot-env.bin
++            output/*/${{ env.CAMERA }}-*/images/uenv.txt
++            output/*/${{ env.CAMERA }}-*/images/thingino-*.bin
++          if-no-files-found: error
++          retention-days: 14
+diff --git a/.github/workflows/toolchain-aarch64.yaml b/.github/workflows/toolchain-aarch64.yaml
+index ecf71d4e4..fadba52e0 100644
+--- a/.github/workflows/toolchain-aarch64.yaml
++++ b/.github/workflows/toolchain-aarch64.yaml
+@@ -66,7 +66,7 @@ jobs:
+       - name: Checkout repository
+         uses: actions/checkout@v5
+         with:
+-          ref: "master"
++          ref: ${{ github.ref_name }}
+           fetch-depth: "1"
+ 
+       - name: Send build start notifcation via Telegram
+@@ -93,7 +93,7 @@ jobs:
+       - name: Checkout repository
+         uses: actions/checkout@v5
+         with:
+-          ref: "master"
++          ref: ${{ github.ref_name }}
+           fetch-depth: "1"
+ 
+       - name: Generate toolchain matrix
+@@ -186,7 +186,7 @@ jobs:
+         uses: actions/checkout@v5
+         with:
+           submodules: 'true'
+-          ref: "master"
++          ref: ${{ github.ref_name }}
+           fetch-depth: "1"
+ 
+       - name: Configure environment variables
+@@ -360,14 +360,17 @@ jobs:
+ 
+       - name: Rename toolchain package for release
+         run: |
+-          INGTC=$(find ${GITHUB_WORKSPACE}/output/${GIT_BRANCH}/${{ matrix.toolchain-version }}*/images/ -name "mipsel-thingino-linux-*_sdk-buildroot.tar.gz" | head -n 1)
++          INGTC=$(find ${GITHUB_WORKSPACE}/output/${GIT_BRANCH}/${{ matrix.toolchain-version }}*/images/ -name "*-thingino-linux-*_sdk-buildroot.tar.gz" | head -n 1)
+           if [[ -n "$INGTC" ]]; then
+             DIR_PATH=$(dirname "$INGTC")
++            # First field of the tuple is the target architecture: mipsel, arm, ...
++            TC_ARCH=$(basename "$INGTC" | cut -d- -f1)
+             TOOLCHAIN_VERSION="${{ matrix.toolchain-version }}"
+             CLEAN_VERSION=${TOOLCHAIN_VERSION#toolchain_}
+-            INGTC_FINAL="${DIR_PATH}/thingino-toolchain-aarch64_${CLEAN_VERSION}-linux-mipsel.tar.gz"
++            INGTC_FINAL="${DIR_PATH}/thingino-toolchain-aarch64_${CLEAN_VERSION}-linux-${TC_ARCH}.tar.gz"
+             mv "$INGTC" "$INGTC_FINAL"
+             echo "INGTC=$INGTC_FINAL" >> $GITHUB_ENV
++            echo "TC_ARCH=$TC_ARCH" >> $GITHUB_ENV
+           else
+             echo "Matching file not found."
+             exit 1
+@@ -376,7 +379,7 @@ jobs:
+       - name: Upload toolchain artifact
+         uses: actions/upload-artifact@v7.0.0
+         with:
+-          name: thingino-toolchain_aarch64_${{ matrix.toolchain-version }}-linux-mipsel.tar.gz
++          name: thingino-toolchain_aarch64_${{ matrix.toolchain-version }}-linux-${{ env.TC_ARCH }}.tar.gz
+           path: ${{ env.INGTC }}
+ 
+       - name: Upload toolchain to release
+@@ -423,7 +426,7 @@ jobs:
+         uses: actions/checkout@v5
+         with:
+           submodules: 'false'
+-          ref: "master"
++          ref: ${{ github.ref_name }}
+ 
+       - name: Send notify completion summary
+         if: ${{ env.TG_DISABLED == 'false' }}
+diff --git a/.github/workflows/toolchain-x86_64.yaml b/.github/workflows/toolchain-x86_64.yaml
+index 4acd2ac6a..b0ed74f15 100644
+--- a/.github/workflows/toolchain-x86_64.yaml
++++ b/.github/workflows/toolchain-x86_64.yaml
+@@ -66,7 +66,7 @@ jobs:
+       - name: Checkout repository
+         uses: actions/checkout@v5
+         with:
+-          ref: "master"
++          ref: ${{ github.ref_name }}
+           fetch-depth: "1"
+ 
+       - name: Send build start notifcation via Telegram
+@@ -93,7 +93,7 @@ jobs:
+       - name: Checkout repository
+         uses: actions/checkout@v5
+         with:
+-          ref: "master"
++          ref: ${{ github.ref_name }}
+           fetch-depth: "1"
+ 
+       - name: Generate toolchain matrix
+@@ -186,7 +186,7 @@ jobs:
+         uses: actions/checkout@v5
+         with:
+           submodules: 'true'
+-          ref: "master"
++          ref: ${{ github.ref_name }}
+           fetch-depth: "1"
+ 
+       - name: Configure environment variables
+@@ -360,14 +360,17 @@ jobs:
+ 
+       - name: Rename toolchain package for release
+         run: |
+-          INGTC=$(find ${GITHUB_WORKSPACE}/output/${GIT_BRANCH}/${{ matrix.toolchain-version }}*/images/ -name "mipsel-thingino-linux-*_sdk-buildroot.tar.gz" | head -n 1)
++          INGTC=$(find ${GITHUB_WORKSPACE}/output/${GIT_BRANCH}/${{ matrix.toolchain-version }}*/images/ -name "*-thingino-linux-*_sdk-buildroot.tar.gz" | head -n 1)
+           if [[ -n "$INGTC" ]]; then
+             DIR_PATH=$(dirname "$INGTC")
++            # First field of the tuple is the target architecture: mipsel, arm, ...
++            TC_ARCH=$(basename "$INGTC" | cut -d- -f1)
+             TOOLCHAIN_VERSION="${{ matrix.toolchain-version }}"
+             CLEAN_VERSION=${TOOLCHAIN_VERSION#toolchain_}
+-            INGTC_FINAL="${DIR_PATH}/thingino-toolchain-x86_64_${CLEAN_VERSION}-linux-mipsel.tar.gz"
++            INGTC_FINAL="${DIR_PATH}/thingino-toolchain-x86_64_${CLEAN_VERSION}-linux-${TC_ARCH}.tar.gz"
+             mv "$INGTC" "$INGTC_FINAL"
+             echo "INGTC=$INGTC_FINAL" >> $GITHUB_ENV
++            echo "TC_ARCH=$TC_ARCH" >> $GITHUB_ENV
+           else
+             echo "Matching file not found."
+             exit 1
+@@ -376,7 +379,7 @@ jobs:
+       - name: Upload toolchain artifact
+         uses: actions/upload-artifact@v7.0.0
+         with:
+-          name: thingino-${{ matrix.toolchain-version }}-linux-mipsel.tar.gz
++          name: thingino-${{ matrix.toolchain-version }}-linux-${{ env.TC_ARCH }}.tar.gz
+           path: ${{ env.INGTC }}
+ 
+       - name: Upload toolchain to release
+@@ -423,7 +426,7 @@ jobs:
+         uses: actions/checkout@v5
+         with:
+           submodules: 'false'
+-          ref: "master"
++          ref: ${{ github.ref_name }}
+ 
+       - name: Send notify completion summary
+         if: ${{ env.TG_DISABLED == 'false' }}
+diff --git a/configs/github/toolchain_infinity6e_glibc_gcc16_defconfig b/configs/github/toolchain_infinity6e_glibc_gcc16_defconfig
+new file mode 100644
+index 000000000..f422d6799
+--- /dev/null
++++ b/configs/github/toolchain_infinity6e_glibc_gcc16_defconfig
+@@ -0,0 +1,53 @@
++# Toolchain producer for SigmaStar Infinity6E (ARMv7 cortex-a7, hard float).
++#
++# This is a BUILDROOT defconfig, not a thingino camera defconfig. It builds
++# against the pinned submodule: that is where gcc 16.1.0 and binutils 2.45.1
++# come from, and they are the exact versions
++# configs/github/toolchain_*_gcc16_defconfig selects for every Ingenic
++# toolchain. Matching them is what lets this producer run in upstream's own
++# toolchain workflow.
++BR2_arm=y
++BR2_cortex_a7=y
++BR2_ARM_EABIHF=y
++BR2_ARM_FPU_NEON_VFPV4=y
++BR2_ARM_INSTRUCTIONS_THUMB2=y
++
++BR2_OPTIMIZE_S=y
++
++# Set for parity with the Ingenic producers. Since 93533808f this tree does
++# carry gcc/16.1.0 and binutils/2.45.1 patches, so they apply here too, but they
++# are Ingenic MXU2: every file is under gcc/config/mips/ and the one config.gcc
++# hunk is inside the mips*-*-* case, so none of it reaches an ARM compiler.
++BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_THINGINO_PATH)/package/all-patches"
++
++BR2_TOOLCHAIN_BUILDROOT_VENDOR="thingino"
++BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
++
++# Marks this a toolchain build, clearing the default-y on System Packages and
++# Streamer Packages. Without it the producer pulls in the whole firmware -- 273
++# packages, raptor included, with the HAL resolving to Ingenic on an ARM build.
++# TOOLCHAIN_BUILD lives inside "if BR2_THINGINO_DEV_PACKAGES", so it is silently
++# dropped unless that is set too; both lines are required, as on the Ingenic
++# producers.
++BR2_THINGINO_DEV_PACKAGES=y
++BR2_THINGINO_TOOLCHAIN_BUILD=y
++
++# 4.9.84, matching the kernel the board runs.
++#
++# All three lines are required. The "Kernel Headers" choice offers nothing
++# older than 4.19, so 4.9 is only reachable through the manually-specified
++# path: BR2_KERNEL_HEADERS_VERSION opens it, BR2_DEFAULT_KERNEL_VERSION gives
++# the version, and CUSTOM_4_9 tells Buildroot which series that is. Setting
++# CUSTOM_4_9 alone is silently ignored and the default headers win, which the
++# toolchain build does not complain about -- it surfaces much later as
++# "Incorrect selection of kernel headers" when a camera tries to consume it.
++BR2_KERNEL_HEADERS_VERSION=y
++BR2_DEFAULT_KERNEL_VERSION="4.9.84"
++BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_4_9=y
++
++BR2_BINUTILS_VERSION_2_45_X=y
++BR2_GCC_VERSION_16_X=y
++BR2_TOOLCHAIN_BUILDROOT_CXX=y
++
++BR2_CCACHE=y
++BR2_CCACHE_USE_BASEDIR=y
+diff --git a/configs/github/toolchain_infinity6e_uclibc_gcc16_defconfig b/configs/github/toolchain_infinity6e_uclibc_gcc16_defconfig
+new file mode 100644
+index 000000000..bf23e89b7
+--- /dev/null
++++ b/configs/github/toolchain_infinity6e_uclibc_gcc16_defconfig
+@@ -0,0 +1,53 @@
++# uClibc-ng sibling of toolchain_infinity6e_glibc_gcc16_defconfig. See that file
++# for why the ARM producer is shaped the way it is; only the C library differs.
++#
++# Needed because the SigmaStar vendor blobs are uClibc-ng builds: every libmi_*.so
++# carries NEEDED libc.so.0, which no glibc rootfs can satisfy.
++BR2_arm=y
++BR2_cortex_a7=y
++BR2_ARM_EABIHF=y
++BR2_ARM_FPU_NEON_VFPV4=y
++BR2_ARM_INSTRUCTIONS_THUMB2=y
++
++BR2_OPTIMIZE_S=y
++
++BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_THINGINO_PATH)/package/all-patches"
++
++BR2_TOOLCHAIN_BUILDROOT_VENDOR="thingino"
++BR2_TOOLCHAIN_BUILDROOT_UCLIBC=y
++BR2_UCLIBC_INSTALL_UTILS=y
++BR2_TOOLCHAIN_BUILDROOT_WCHAR=y
++BR2_TOOLCHAIN_BUILDROOT_LOCALE=y
++BR2_PTHREAD_DEBUG=y
++
++# Three things the stock uClibc-ng config lacks and the vendor blobs require.
++# The Ingenic producers omit all of them because nothing on those targets needs
++# them.
++#
++# SSP and backtrace supply __stack_chk_fail/__stack_chk_guard and
++# backtrace/backtrace_symbols, which the MI libraries reference directly.
++#
++# GNU hash is the one that actually decides whether the stack runs at all.
++# libcam_os_wrapper.so is linked with --hash-style=gnu only -- it has a
++# .gnu.hash section and no SysV .hash -- so an ldso without
++# LDSO_GNU_HASH_SUPPORT cannot look up anything in it and every symbol it
++# defines reports "can't resolve symbol". It is the first library the HAL
++# dlopens, so the whole pipeline fails at init.
++BR2_TOOLCHAIN_BUILDROOT_USE_SSP=y
++BR2_UCLIBC_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_THINGINO_PATH)/configs/fragments/uclibc/backtrace.config $(BR2_EXTERNAL_THINGINO_PATH)/configs/fragments/uclibc/gnu-hash.config"
++
++# Both lines required: TOOLCHAIN_BUILD lives inside "if BR2_THINGINO_DEV_PACKAGES".
++BR2_THINGINO_DEV_PACKAGES=y
++BR2_THINGINO_TOOLCHAIN_BUILD=y
++
++# All three lines required to reach 4.9 headers; see the glibc producer.
++BR2_KERNEL_HEADERS_VERSION=y
++BR2_DEFAULT_KERNEL_VERSION="4.9.84"
++BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_4_9=y
++
++BR2_BINUTILS_VERSION_2_45_X=y
++BR2_GCC_VERSION_16_X=y
++BR2_TOOLCHAIN_BUILDROOT_CXX=y
++
++BR2_CCACHE=y
++BR2_CCACHE_USE_BASEDIR=y
+diff --git a/scripts/check-target-libs.sh b/scripts/check-target-libs.sh
+new file mode 100755
+index 000000000..4488f5456
+--- /dev/null
++++ b/scripts/check-target-libs.sh
+@@ -0,0 +1,182 @@
++#!/bin/bash
++#
++# check-target-libs.sh <target-dir>
++#
++# Confirm every DT_NEEDED of every ELF in the target resolves to a library that
++# is actually in the target. Exits non-zero and names the offenders if not.
++#
++# This catches a failure mode that the build cannot: a package links against a
++# library that exists in the toolchain sysroot but is never shipped. Buildroot's
++# toolchain-external copies only a fixed set of runtime libraries into the target
++# (libc, libm, libgcc_s, libstdc++ ...), never the extra libraries a vendor
++# sysroot happens to bundle. The OpenIPC ARM toolchain bundles libcurl, libevent,
++# libjson-c, libmbed*, libogg, libopus, libyaml and libz, so on this fork the
++# hazard is live rather than theoretical.
++#
++# The build stays green in that case. The binary fails at exec time, with the
++# loader error going wherever the init script's stdout went -- which is usually
++# nowhere. Two real instances on this port:
++#
++#   uhttpd  needed libjson-c.so.5, because the toolchain's json-c shadowed
++#           thingino-jct's libjson-c.so -> libjct.so.1.0.0 symlink in staging.
++#           S60uhttpd reported only "FAIL": it checks pgrep and netstat, so a
++#           binary that cannot resolve its DT_NEEDED looks exactly like one that
++#           started and refused to listen.
++#   curl    needed libz.so.1, with no target zlib selected at all. telegrambot
++#           inherited it through libcurl.
++#
++# Intended for CI (plan phase 6) as well as by hand. Takes seconds.
++#
++# Usage:
++#   scripts/check-target-libs.sh output/<board>/<config>/target
++
++set -u
++
++TARGET="${1:-}"
++if [ -z "$TARGET" ] || [ ! -d "$TARGET" ]; then
++	echo "usage: $0 <target-dir>" >&2
++	exit 2
++fi
++
++READELF="${READELF:-readelf}"
++command -v "$READELF" >/dev/null 2>&1 || {
++	echo "$0: no readelf in PATH (set READELF=)" >&2
++	exit 2
++}
++
++LIBDIRS="$TARGET/lib $TARGET/usr/lib"
++SEARCH="$TARGET/bin $TARGET/sbin $TARGET/usr/bin $TARGET/usr/sbin
++        $TARGET/usr/lib $TARGET/lib $TARGET/usr/libexec"
++
++rc=0
++declare -A users
++# Counted separately: under `set -u`, ${#users[@]} on an as-yet-unassigned
++# associative array is an unbound-variable error in bash < 4.4, which made the
++# success path exit 0 after printing an error -- the worst outcome for a CI gate.
++missing=0
++# Also counted separately, for the same reason: a gate that inspects nothing
++# must not report success. Pointing this script at the *output* directory
++# instead of its target/ subdirectory finds no ELFs, resolves no DT_NEEDED and
++# prints OK -- and the second pass derives per-package from $TARGET's parent, so
++# it silently finds no tree either and prints its own OK. Two green lines, zero
++# bytes examined.
++scanned=0
++
++while IFS= read -r f; do
++	# Cheap ELF test: avoids running readelf on every script and data file.
++	[ "$(head -c4 "$f" 2>/dev/null | tr -d '\0')" = $'\x7fELF' ] || continue
++	scanned=$((scanned + 1))
++	while IFS= read -r need; do
++		[ -n "$need" ] || continue
++		found=
++		for d in $LIBDIRS; do
++			[ -e "$d/$need" ] && { found=1; break; }
++		done
++		if [ -z "$found" ]; then
++			[ -n "${users[$need]:-}" ] || missing=$((missing + 1))
++			users["$need"]="${users[$need]:-} ${f#"$TARGET"}"
++		fi
++	done < <("$READELF" -d "$f" 2>/dev/null | sed -rn 's/.*\(NEEDED\).*\[(.*)\]/\1/p')
++done < <(find $SEARCH -type f 2>/dev/null)
++
++if [ "$scanned" -eq 0 ]; then
++	echo "$0: no ELF files under $TARGET -- is that a target directory?" >&2
++	echo "    expected something like output/<board>/<config>/target" >&2
++	exit 2
++fi
++
++if [ "$missing" -eq 0 ]; then
++	echo "check-target-libs: OK -- $scanned ELF files, every DT_NEEDED resolves inside the target"
++else
++	for lib in "${!users[@]}"; do
++		echo "check-target-libs: MISSING $lib"
++		for u in ${users[$lib]}; do
++			echo "    needed by $u"
++		done
++		rc=1
++	done
++	echo
++	echo "Fix by either building the library for the target (and adding it to"
++	echo "sigmastar-toolchain-prune so the toolchain's copy stops shadowing it),"
++	echo "or naming it in BR2_TOOLCHAIN_EXTRA_LIBS so it is copied to the target."
++fi
++
++# ── Second pass: per-package copies that disagree ────────────────────────────
++#
++# A library can be present and still be the WRONG BUILD. Under per-package
++# directories each package gets a private target/ seeded from its dependencies
++# at its own build time, and target-finalize rsyncs them all into the real
++# target. So after a library is rebuilt, any package whose private dir was
++# populated earlier still holds the old copy -- and if it sorts later in the
++# rsync, it silently overwrites the new one.
++#
++# The build is green, the build directory holds a correct library, and the image
++# holds a stale one. It surfaces as a runtime "undefined symbol" for something
++# the library visibly provides. Twice here: libjson-c, and libmbedtls rebuilt
++# with MBEDTLS_SSL_DTLS_SRTP, where rwd died on
++# mbedtls_ssl_conf_dtls_srtp_protection_profiles.
++#
++# Compare the per-package copies against EACH OTHER, not against the installed
++# file: target libraries are stripped at finalize, so they never match byte for
++# byte and comparing to them reports every library in the tree. Disagreement
++# between two private copies is the real signal -- it means the rsync had a
++# choice to make.
++PPD="$(dirname "$TARGET")/per-package"
++if [ -d "$PPD" ]; then
++	# One traversal of the whole per-package tree, then group by relative path.
++	# Doing a find per library instead is O(libs x tree) and takes minutes.
++	report="$(
++		find "$PPD" -type f \( -path '*/target/lib/*.so*' \
++			-o -path '*/target/usr/lib/*.so*' \) -print0 2>/dev/null |
++		xargs -0 -r md5sum 2>/dev/null |
++		awk -v ppd="$PPD/" '
++			{
++				sum = $1
++				path = $0
++				sub(/^[^ ]+  /, "", path)
++				rest = substr(path, length(ppd) + 1)
++				slash = index(rest, "/")
++				pkg = substr(rest, 1, slash - 1)
++				rel = rest
++				sub(/^[^\/]+\/target\//, "", rel)
++				key = rel
++				if (!(key in seen)) { order[++n] = key }
++				seen[key] = 1
++				sums[key, sum] = 1
++				if (!((key SUBSEP sum) in listed)) {
++					listed[key SUBSEP sum] = 1
++					distinct[key]++
++				}
++				pkgs[key, sum] = pkgs[key, sum] " " pkg
++			}
++			END {
++				for (i = 1; i <= n; i++) {
++					k = order[i]
++					if (distinct[k] < 2) continue
++					printf "check-target-libs: DISAGREEMENT %s\n", k
++					for (c in sums) {
++						split(c, a, SUBSEP)
++						if (a[1] != k) continue
++						printf "    %s %s\n", substr(a[2], 1, 8), pkgs[k, a[2]]
++					}
++				}
++			}'
++	)"
++	if [ -n "$report" ]; then
++		printf '%s\n' "$report"
++		echo
++		echo "Those packages hold different builds of the same library. Whichever"
++		echo "sorts last in the finalize rsync wins, which may not be the newest."
++		echo "Dirclean the ones carrying the old build: make CAMERA=<cam> br-<pkg>-dirclean"
++		rc=1
++	else
++		echo "check-target-libs: OK -- per-package library copies all agree"
++	fi
++else
++	# Not fatal -- a build without BR2_PER_PACKAGE_DIRECTORIES has no such tree
++	# and nothing to disagree. Say so rather than printing nothing, so a silent
++	# skip is never mistaken for a pass.
++	echo "check-target-libs: SKIP -- no $PPD, second pass not run"
++fi
++
++exit $rc

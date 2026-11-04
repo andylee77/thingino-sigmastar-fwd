@@ -1,0 +1,96 @@
+From ef024ba7b6f0991ce977a447d96bc2ee839f237b Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 08:19:15 -0500
+Subject: [PATCH 09/21] thingino: platform-enabling fixes (ISP default,
+ Ethernet, day/night link)
+
+---
+ package/thingino-ethernet/Config.in           |  4 +++-
+ package/thingino-isp/Config.in                |  2 ++
+ .../thingino-webui/files/www/a/control-bar.js | 19 ++++++++++++++-----
+ 3 files changed, 19 insertions(+), 6 deletions(-)
+
+diff --git a/package/thingino-ethernet/Config.in b/package/thingino-ethernet/Config.in
+index 6044f84b4..b740eab5c 100644
+--- a/package/thingino-ethernet/Config.in
++++ b/package/thingino-ethernet/Config.in
+@@ -1,7 +1,9 @@
+ config BR2_PACKAGE_THINGINO_ETHERNET
+ 	bool "thingino-ethernet"
+ 	select BR2_PACKAGE_THINGINO_KOPT
+-	select BR2_PACKAGE_THINGINO_KOPT_JZ_MAC
++	# The Ingenic JZ MAC kernel options. Other vendors' kernel configs carry
++	# their own MAC driver.
++	select BR2_PACKAGE_THINGINO_KOPT_JZ_MAC if BR2_SOC_VENDOR_INGENIC
+ #	select BR2_PACKAGE_THINGINO_KOPT_JZ_MAC_INTERNAL_PHY
+ #	select BR2_PACKAGE_THINGINO_KOPT_JZ_MAC_V12
+ #	select BR2_PACKAGE_THINGINO_KOPT_JZ_MAC_V13
+diff --git a/package/thingino-isp/Config.in b/package/thingino-isp/Config.in
+index 5652e39f1..a5c28d213 100644
+--- a/package/thingino-isp/Config.in
++++ b/package/thingino-isp/Config.in
+@@ -6,6 +6,7 @@ choice
+ 	default BR2_PACKAGE_THINGINO_ISP_NONE if BR2_THINGINO_TOOLCHAIN
+ 	default BR2_PACKAGE_THINGINO_ISP_NONE if BR2_SOC_FAMILY = "a1"
+ 	default BR2_PACKAGE_THINGINO_ISP_NONE if !BR2_THINGINO_DEV_CAMERA
++	default BR2_PACKAGE_THINGINO_ISP_NONE if !BR2_SOC_VENDOR_INGENIC
+ 	default BR2_PACKAGE_THINGINO_ISP_PROPRIETARY
+ 	help
+ 	  Select the ISP kernel and userspace implementation used by the
+@@ -18,6 +19,7 @@ config BR2_PACKAGE_THINGINO_ISP_NONE
+ 
+ config BR2_PACKAGE_THINGINO_ISP_PROPRIETARY
+ 	bool "Proprietary Ingenic ISP stack"
++	depends on BR2_SOC_VENDOR_INGENIC
+ 	depends on !BR2_SOC_FAMILY = "a1"
+ 	depends on BR2_THINGINO_DEV_CAMERA
+ 	select BR2_PACKAGE_THINGINO_ISP
+diff --git a/package/thingino-webui/files/www/a/control-bar.js b/package/thingino-webui/files/www/a/control-bar.js
+index e07a68b19..76529b3be 100644
+--- a/package/thingino-webui/files/www/a/control-bar.js
++++ b/package/thingino-webui/files/www/a/control-bar.js
+@@ -576,6 +576,9 @@
+         icon: "bi bi-gear",
+         label: "Photosensing Config",
+         title: "Photosensing Config",
++        // daynightd's page: absent when another daemon (raptor's ric)
++        // runs day/night, and the link would only 404.
++        feature: "daynight",
+       },
+       {
+         type: "link",
+@@ -586,7 +589,8 @@
+       },
+     ];
+ 
+-    items.forEach((item) => {
++    const device = (window.thinginoUIConfig || {}).device || {};
++    items.filter((item) => !item.feature || device[item.feature]).forEach((item) => {
+       const li = document.createElement("li");
+       if (item.type === "divider") {
+         const divider = document.createElement("hr");
+@@ -725,15 +729,20 @@
+     bar.id = "button-bar";
+     bar.className = "d-flex align-items-stretch gap-1 mb-2 flex-wrap";
+ 
+-    const motionBtn = createMotionGuardButton();
+-    motionBtn.classList.add("flex-fill");
+-    bar.appendChild(motionBtn);
++    var uiConfig = window.thinginoUIConfig || {};
++
++    // A streamer plugin sets the motion feature flag false when the camera
++    // cannot detect motion itself (no IVS in its HAL); absent means it can.
++    if (!(uiConfig.device && uiConfig.device.motion === false)) {
++      const motionBtn = createMotionGuardButton();
++      motionBtn.classList.add("flex-fill");
++      bar.appendChild(motionBtn);
++    }
+ 
+     const privacyBtn = createPrivacyModeButton();
+     privacyBtn.classList.add("flex-fill");
+     bar.appendChild(privacyBtn);
+ 
+-    var uiConfig = window.thinginoUIConfig || {};
+     if (uiConfig.device && uiConfig.device.wireguard) {
+       var wireguardBtn = createWireGuardButton();
+       wireguardBtn.classList.add("flex-fill");

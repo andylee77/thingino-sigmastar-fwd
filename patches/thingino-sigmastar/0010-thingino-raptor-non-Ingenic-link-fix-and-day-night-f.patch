@@ -1,0 +1,1010 @@
+From 65b54e828813f91bc9bcf8b5b2f95a57f67992ca Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 08:19:15 -0500
+Subject: [PATCH 10/21] thingino-raptor: non-Ingenic link fix and day/night for
+ PWM IR banks (ric)
+
+---
+ ...bimp-and-libalog-for-Ingenic-platfor.patch |  32 ++
+ ...ok-for-an-850-nm-bank-that-is-not-on.patch | 108 ++++++
+ ...-for-irled_cmd-banks-and-days-that-s.patch | 191 +++++++++++
+ ...-IR-level-ladder-for-irled_cmd-banks.patch | 317 ++++++++++++++++++
+ ...ric-poll-exposure-on-a-fixed-cadence.patch |  58 ++++
+ package/thingino-raptor/Config.in             |  82 +++++
+ package/thingino-raptor/Config.in.conf        |  16 +
+ .../thingino-raptor/thingino-raptor-conf.mk   |   3 +
+ package/thingino-raptor/thingino-raptor.mk    |  64 +++-
+ 9 files changed, 870 insertions(+), 1 deletion(-)
+ create mode 100644 package/thingino-raptor/0001-Makefile-link-libimp-and-libalog-for-Ingenic-platfor.patch
+ create mode 100644 package/thingino-raptor/0002-ric-irled_cmd-hook-for-an-850-nm-bank-that-is-not-on.patch
+ create mode 100644 package/thingino-raptor/0003-ric-luma-trigger-for-irled_cmd-banks-and-days-that-s.patch
+ create mode 100644 package/thingino-raptor/0004-ric-IR-level-ladder-for-irled_cmd-banks.patch
+ create mode 100644 package/thingino-raptor/0005-ric-poll-exposure-on-a-fixed-cadence.patch
+
+diff --git a/package/thingino-raptor/0001-Makefile-link-libimp-and-libalog-for-Ingenic-platfor.patch b/package/thingino-raptor/0001-Makefile-link-libimp-and-libalog-for-Ingenic-platfor.patch
+new file mode 100644
+index 000000000..f09c7a8d0
+--- /dev/null
++++ b/package/thingino-raptor/0001-Makefile-link-libimp-and-libalog-for-Ingenic-platfor.patch
+@@ -0,0 +1,32 @@
++From 615a05a4603b894748d173e9b3c66a8ad0ba7d55 Mon Sep 17 00:00:00 2001
++From: Andy <andylee77@users.noreply.github.com>
++Date: Sat, 24 Oct 2026 13:25:48 -0400
++Subject: [PATCH 1/2] Makefile: link libimp and libalog for Ingenic platforms
++ only
++
++LDFLAGS_HAL hardcodes -limp -lalog, the Ingenic SDK libraries the
++Ingenic HAL backend needs. A backend for another vendor links neither --
++the SigmaStar one reaches its MI libraries through dlopen -- so rvd and
++rad failed to link with "cannot find -limp".
++
++Add them only for the Ingenic platforms, as VENDOR_LIBS so a build can
++override the set.
++---
++ Makefile | 4 +++-
++ 1 file changed, 3 insertions(+), 1 deletion(-)
++
++diff --git a/Makefile b/Makefile
++index 013cc1f..9c11fee 100644
++--- a/Makefile
+++++ b/Makefile
++@@ -176,7 +176,9 @@ endif
++ 
++ # System libs for HAL-linked daemons
++ # Shim must come BEFORE Ingenic SDK libs — symbols must be resolved first.
++-LDFLAGS_HAL := $(LDFLAGS_SYSROOT) $(SHIM_LIB) -limp -lalog -lpthread -lrt -lm -ldl -latomic
+++INGENIC_PLATFORMS := T10 T20 T21 T23 T30 T31 T32 T33 T40 T41 A1
+++VENDOR_LIBS ?= $(if $(filter $(PLATFORM),$(INGENIC_PLATFORMS)),-limp -lalog)
+++LDFLAGS_HAL := $(LDFLAGS_SYSROOT) $(SHIM_LIB) $(VENDOR_LIBS) -lpthread -lrt -lm -ldl -latomic
++ 
++ # IVS detection libs
++ ifeq ($(IVS_DETECT),1)
+diff --git a/package/thingino-raptor/0002-ric-irled_cmd-hook-for-an-850-nm-bank-that-is-not-on.patch b/package/thingino-raptor/0002-ric-irled_cmd-hook-for-an-850-nm-bank-that-is-not-on.patch
+new file mode 100644
+index 000000000..572432bce
+--- /dev/null
++++ b/package/thingino-raptor/0002-ric-irled_cmd-hook-for-an-850-nm-bank-that-is-not-on.patch
+@@ -0,0 +1,108 @@
++From 7b4fd0fb1139ddc6b2d0953879c543d3d7381137 Mon Sep 17 00:00:00 2001
++From: Andy <andylee77@users.noreply.github.com>
++Date: Sat, 17 Oct 2026 20:41:39 -0400
++Subject: [PATCH 2/2] ric: irled_cmd hook for an 850 nm bank that is not on a
++ GPIO
++
++Boards with PWM-dimmed IR LEDs (e.g. the UVision MC-A85 / SSC378DE, IR
++bank on PAD_PWM1) have no gpio_irled to give ric, so night mode never
++lit them. Add [ircut] irled_cmd: when gpio_irled is unset, ric runs
++"<irled_cmd> on|off" wherever it would drive that pin -- the automatic
++day/night switch and raptorctl ric ir850. It runs synchronously, so the
++light is up before the post-switch cooldown samples the night gain
++baseline the night->day trigger compares against.
++---
++ config/raptor.conf |  2 ++
++ ric/ric.h          |  7 +++++++
++ ric/ric_daynight.c | 25 ++++++++++++++++++++++++-
++ ric/ric_main.c     |  2 ++
++ 4 files changed, 35 insertions(+), 1 deletion(-)
++
++diff --git a/config/raptor.conf b/config/raptor.conf
++index 27a6bf2..a34964b 100644
++--- a/config/raptor.conf
+++++ b/config/raptor.conf
++@@ -386,6 +386,8 @@ position = bottom_right
++ # gpio_ircut2 = -1
++ # gpio_irled = -1             # ir850 pin, -1 = auto from /etc/thingino.json
++ # gpio_irled2 = -1            # ir940 pin, -1 = auto from /etc/thingino.json
+++# irled_cmd =                 # 850nm bank not on a GPIO (PWM, expander):
+++                              # run as "<cmd> on|off", e.g. /usr/sbin/light ir
++ # ir850 = true                # enable 850nm IR LED (visible glow, stronger)
++ # ir940 = false               # enable 940nm IR LED (invisible, weaker);
++                               # auto-enabled when 940 is the board's ONLY
++diff --git a/ric/ric.h b/ric/ric.h
++index 4e0bbfb..8ca07f9 100644
++--- a/ric/ric.h
+++++ b/ric/ric.h
++@@ -134,6 +134,13 @@ typedef struct {
++ 	bool ircut_active_low;	/* single-pin ircut driven inverted */
++ 	bool irled_active_low;	/* ir850 bank lights on 0 */
++ 	bool irled2_active_low; /* ir940 bank lights on 0 */
+++	/*
+++	 * Run as "<irled_cmd> on|off" for the 850 nm bank when it is not on a
+++	 * plain GPIO (gpio_irled < 0): a PWM-dimmed bank, an expander. Empty =
+++	 * unused. Synchronous, so the light is up before the post-switch
+++	 * cooldown samples the night gain baseline.
+++	 */
+++	char irled_cmd[128];
++ 	bool ir850_enabled;
++ 	bool ir940_enabled;
++ 	bool ir940_explicit; /* config carries an ir940 key (vs the default) */
++diff --git a/ric/ric_daynight.c b/ric/ric_daynight.c
++index bee7aa9..f1e76f2 100644
++--- a/ric/ric_daynight.c
+++++ b/ric/ric_daynight.c
++@@ -317,6 +317,26 @@ int ric_ircut_drive(ric_state_t *st, ric_mode_t pos)
++ 	return 0;
++ }
++ 
+++/*
+++ * The 850 nm bank through a command instead of a pin ([ircut] irled_cmd):
+++ * "<cmd> on|off", run to completion so the light has settled before the
+++ * post-switch cooldown samples the night gain baseline.
+++ */
+++static int ric_irled_run_cmd(const ric_config_t *c, bool on)
+++{
+++	char cmd[sizeof(c->irled_cmd) + 8];
+++	int ret;
+++
+++	snprintf(cmd, sizeof(cmd), "%s %s", c->irled_cmd, on ? "on" : "off");
+++	ret = system(cmd);
+++	if (ret != 0) {
+++		RSS_WARN("ir850: \"%s\" failed (status %d)", cmd, ret);
+++		return -1;
+++	}
+++	RSS_INFO("ir850: %s via \"%s\"", on ? "on" : "off", c->irled_cmd);
+++	return 0;
+++}
+++
++ /*
++  * Drive one IR LED bank alone (bank940 selects 940nm). Exported for
++  * raptorctl's manual control, which deliberately ignores the
++@@ -330,8 +350,11 @@ int ric_irled_drive(ric_state_t *st, bool bank940, bool on)
++ 	ric_config_t *c = &st->settings;
++ 	int pin = bank940 ? c->gpio_irled2 : c->gpio_irled;
++ 
++-	if (pin < 0)
+++	if (pin < 0) {
+++		if (!bank940 && c->irled_cmd[0])
+++			return ric_irled_run_cmd(c, on);
++ 		return -1;
+++	}
++ 	bool alow = bank940 ? c->irled2_active_low : c->irled_active_low;
++ 	int raw = (on != alow) ? 1 : 0;
++ 	gpio_set(pin, raw);
++diff --git a/ric/ric_main.c b/ric/ric_main.c
++index d11d265..064f297 100644
++--- a/ric/ric_main.c
+++++ b/ric/ric_main.c
++@@ -63,6 +63,8 @@ static void load_config(ric_state_t *st)
++ 	c->ircut_active_low = rss_config_get_bool(cfg, "ircut", "gpio_ircut_active_low", false);
++ 	c->irled_active_low = rss_config_get_bool(cfg, "ircut", "gpio_irled_active_low", false);
++ 	c->irled2_active_low = rss_config_get_bool(cfg, "ircut", "gpio_irled2_active_low", false);
+++	const char *irled_cmd = rss_config_get_str(cfg, "ircut", "irled_cmd", "");
+++	snprintf(c->irled_cmd, sizeof(c->irled_cmd), "%s", irled_cmd ? irled_cmd : "");
++ 	c->ir850_enabled = rss_config_get_bool(cfg, "ircut", "ir850", true);
++ 	/* Probed before the get, because the getters store their default into
++ 	 * the config on a miss (for config-get-section) and the key would
+diff --git a/package/thingino-raptor/0003-ric-luma-trigger-for-irled_cmd-banks-and-days-that-s.patch b/package/thingino-raptor/0003-ric-luma-trigger-for-irled_cmd-banks-and-days-that-s.patch
+new file mode 100644
+index 000000000..2d2f8cbdf
+--- /dev/null
++++ b/package/thingino-raptor/0003-ric-luma-trigger-for-irled_cmd-banks-and-days-that-s.patch
+@@ -0,0 +1,191 @@
++From 7259f925fb82c8cade9b68ad840b7716da476851 Mon Sep 17 00:00:00 2001
++From: andylee77 <andylee77@users.noreply.github.com>
++Date: Sat, 24 Oct 2026 16:31:05 -0400
++Subject: [PATCH 3/4] ric: luma trigger for irled_cmd banks, and days that
++ stick
++
++Three gaps in the luma trigger, found on the UVision MC-A85 (SSC378DE +
++GC8613), whose IR bank is PWM-dimmed and driven through irled_cmd:
++
++1. An irled_cmd bank did not count as an IR bank. ir_lit stayed false
++   under lit IR, so the luma day test ran against IR-inflated luma (the
++   oscillator the comment above it warns about), and the IR-off probe
++   never armed.
++
++2. Luma alone could declare day in a scene the day side rejects at once.
++   At ceiling gain AE still lifts a dim room's luma over night_luma; an
++   IR-off probe there switched to day, day mode saw gain > night_gain
++   and went straight back. The luma day test now also needs gain at or
++   under half of night_gain (the probe reads with the IR-cut out; in day
++   the filter takes the scene's own IR away), and the post-switch
++   verification reverts on either half of the night test, not luma
++   only.
++
++3. The verification samples three polls after the switch, while AE can
++   still be walking up. A day the night test takes back within
++   RIC_DAY_LOCKOUT_FIRST polls now arms the same doubling lockout, and
++   the backoff only starts over once a day has outlived that trial.
++---
++ ric/ric.h          |  5 ++++
++ ric/ric_daynight.c | 71 ++++++++++++++++++++++++++++++++++++----------
++ 2 files changed, 61 insertions(+), 15 deletions(-)
++
++diff --git a/ric/ric.h b/ric/ric.h
++index 8ca07f9..1f69fa3 100644
++--- a/ric/ric.h
+++++ b/ric/ric.h
++@@ -215,6 +215,11 @@ typedef struct {
++ 	bool day_verify_pending;
++ 	int day_lockout_polls; /* suppress day attempts while > 0 */
++ 	int day_lockout_next;  /* doubling backoff, 0 = start over */
+++	/* A day the night test takes back within RIC_DAY_LOCKOUT_FIRST
+++	 * polls failed as surely as one the verification caught: AE can
+++	 * still be walking up when the verification samples. */
+++	bool day_on_trial;
+++	int day_age_polls;
++ 
++ 	/* IR-off ambient probe (night, luma trigger): compressed-gain
++ 	 * sensors floor total_gain in a lit scene long before the day
++diff --git a/ric/ric_daynight.c b/ric/ric_daynight.c
++index f1e76f2..3427ec1 100644
++--- a/ric/ric_daynight.c
+++++ b/ric/ric_daynight.c
++@@ -476,6 +476,7 @@ void ric_trigger_rearm(ric_state_t *st)
++ 	st->day_verify_pending = false;
++ 	st->day_lockout_polls = 0;
++ 	st->day_lockout_next = 0;
+++	st->day_on_trial = false;
++ 	st->probe_active = false;
++ 	st->probe_polls_left = 0;
++ 	st->probe_holdoff_polls = 0;
++@@ -515,6 +516,20 @@ void ric_set_mode(ric_state_t *st, ric_mode_t mode)
++ 		st->night_gain_baseline = 0;
++ }
++ 
+++/*
+++ * A day attempt failed: hold off the next one, doubling up to
+++ * RIC_DAY_LOCKOUT_MAX. Returns the hold, in polls.
+++ */
+++static int ric_day_lockout_arm(ric_state_t *st)
+++{
+++	int hold = st->day_lockout_next ? st->day_lockout_next : RIC_DAY_LOCKOUT_FIRST;
+++
+++	st->day_lockout_polls = hold;
+++	st->day_lockout_next = hold * 2 > RIC_DAY_LOCKOUT_MAX ? RIC_DAY_LOCKOUT_MAX : hold * 2;
+++	st->day_on_trial = false;
+++	return hold;
+++}
+++
++ /*
++  * Debounce, shared by every trigger: hysteresis_sec consecutive polls
++  * agreeing before the filter moves. `why` is the trigger's own account of
++@@ -530,6 +545,12 @@ static void ric_debounce(ric_state_t *st, bool want_night, bool want_day, uint32
++ 			if (st->night_count >= st->settings.hysteresis_sec) {
++ 				RSS_DEBUG("night detected (%s for %ds)", why,
++ 					  st->settings.hysteresis_sec);
+++				if (st->settings.trigger == RIC_TRIGGER_LUMA && st->day_on_trial) {
+++					int hold = ric_day_lockout_arm(st);
+++					RSS_WARN("day lasted only %d polls -- the scene was dark "
+++						 "without IR; next day attempt in %d polls",
+++						 st->day_age_polls, hold);
+++				}
++ 				st->night_detect_gain = total_gain;
++ 				ric_set_mode(st, RIC_MODE_NIGHT);
++ 			}
++@@ -543,8 +564,13 @@ static void ric_debounce(ric_state_t *st, bool want_night, bool want_day, uint32
++ 			if (st->day_count >= st->settings.hysteresis_sec) {
++ 				RSS_DEBUG("day detected (%s for %ds)", why,
++ 					  st->settings.hysteresis_sec);
++-				if (st->settings.trigger == RIC_TRIGGER_LUMA)
+++				if (st->settings.trigger == RIC_TRIGGER_LUMA) {
++ 					st->day_verify_pending = true;
+++					/* An automatic day only: the startup day and a
+++					 * forced one are not attempts that can fail. */
+++					st->day_on_trial = true;
+++					st->day_age_polls = 0;
+++				}
++ 				ric_set_mode(st, RIC_MODE_DAY);
++ 			}
++ 		} else {
++@@ -644,6 +670,13 @@ void ric_poll_exposure(ric_state_t *st)
++ 		st->settings.trigger = RIC_TRIGGER_LUMA;
++ 	}
++ 
+++	/* A day that outlives its trial has stuck: the backoff starts over. */
+++	if (st->current_mode == RIC_MODE_DAY && st->day_on_trial &&
+++	    ++st->day_age_polls >= RIC_DAY_LOCKOUT_FIRST) {
+++		st->day_on_trial = false;
+++		st->day_lockout_next = 0;
+++	}
+++
++ 	/* Cooldown after mode switch: wait for IR LEDs / ISP to stabilize.
++ 	 * After cooldown in night mode, sample total_gain as baseline for
++ 	 * the auto-calibrating night→day transition. */
++@@ -652,26 +685,26 @@ void ric_poll_exposure(ric_state_t *st)
++ 		if (st->cooldown_remaining == 0 && st->current_mode == RIC_MODE_DAY &&
++ 		    st->day_verify_pending) {
++ 			st->day_verify_pending = false;
++-			if (have_luma && ae_luma < (uint32_t)st->settings.night_luma) {
+++			/* Either half of the day-side night test: AE lifts a
+++			 * dim room's luma over night_luma at ceiling gain, so
+++			 * luma alone passes a room the gain half sends straight
+++			 * back to night. */
+++			bool dark_luma = have_luma && ae_luma < (uint32_t)st->settings.night_luma;
+++			bool dark_gain = have_gain && total_gain > (uint32_t)st->settings.night_gain;
+++			if (dark_luma || dark_gain) {
++ 				/* The scene reads night-dark with the IR off: the
++ 				 * "day" was the LED's own light bouncing back (a
++ 				 * covered lens, a point-blank surface). Revert and
++ 				 * back off so this cannot oscillate; a covered
++ 				 * lens re-checks rarely instead of blinking. */
++-				int hold = st->day_lockout_next ? st->day_lockout_next
++-								: RIC_DAY_LOCKOUT_FIRST;
+++				int hold = ric_day_lockout_arm(st);
++ 				RSS_WARN("day verification failed: scene reads night-dark "
++-					 "without IR (luma %u < %d) -- the day was IR "
++-					 "reflection; reverting, next attempt in %d polls",
++-					 ae_luma, st->settings.night_luma, hold);
++-				st->day_lockout_polls = hold;
++-				st->day_lockout_next = hold * 2 > RIC_DAY_LOCKOUT_MAX
++-							       ? RIC_DAY_LOCKOUT_MAX
++-							       : hold * 2;
+++					 "without IR (luma %u/%d, gain %u/%d) -- the day was "
+++					 "IR reflection; reverting, next attempt in %d polls",
+++					 ae_luma, st->settings.night_luma, total_gain,
+++					 st->settings.night_gain, hold);
++ 				st->night_detect_gain = total_gain;
++ 				ric_set_mode(st, RIC_MODE_NIGHT);
++-			} else {
++-				st->day_lockout_next = 0;
++ 			}
++ 		}
++ 		if (st->cooldown_remaining == 0 && st->current_mode == RIC_MODE_NIGHT) {
++@@ -760,7 +793,8 @@ void ric_poll_exposure(ric_state_t *st)
++ 		 * lifts luma over the threshold, day mode cuts the LEDs,
++ 		 * the scene goes dark again, and the filter clicks all
++ 		 * night. */
++-		bool ir_banks = (st->settings.gpio_irled >= 0 && st->settings.ir850_enabled) ||
+++		bool ir_banks = ((st->settings.gpio_irled >= 0 || st->settings.irled_cmd[0]) &&
+++				 st->settings.ir850_enabled) ||
++ 				(st->settings.gpio_irled2 >= 0 && st->settings.ir940_enabled);
++ 		bool ir_lit = ir_banks && st->current_mode == RIC_MODE_NIGHT && !st->probe_active;
++ 
++@@ -781,7 +815,14 @@ void ric_poll_exposure(ric_state_t *st)
++ 				st->night_gain_baseline * (uint32_t)st->settings.day_gain_pct / 100;
++ 			want_day = (total_gain < day_thr);
++ 		}
++-		if (!ir_lit && have_luma && ae_luma >= (uint32_t)st->settings.night_luma)
+++		/* ...and never into a day the day-side gain test undoes at
+++		 * once: at ceiling gain AE still lifts a dim room's luma over
+++		 * night_luma, so on luma alone an IR-off probe there switched
+++		 * to day, and day mode went straight back to night. The probe
+++		 * reads with the IR-cut still out, and the filter costs the
+++		 * scene its own IR in day mode, hence half of night_gain. */
+++		if (!ir_lit && have_luma && ae_luma >= (uint32_t)st->settings.night_luma &&
+++		    (!have_gain || total_gain <= (uint32_t)st->settings.night_gain / 2))
++ 			want_day = true;
++ 
++ 		/* IR-off ambient probe: compressed-gain sensors (T20 class)
++-- 
++2.43.0
++
+diff --git a/package/thingino-raptor/0004-ric-IR-level-ladder-for-irled_cmd-banks.patch b/package/thingino-raptor/0004-ric-IR-level-ladder-for-irled_cmd-banks.patch
+new file mode 100644
+index 000000000..b97a3bf42
+--- /dev/null
++++ b/package/thingino-raptor/0004-ric-IR-level-ladder-for-irled_cmd-banks.patch
+@@ -0,0 +1,317 @@
++From 20e2dd5fc5db0404e61a8f8211456248d940ee7b Mon Sep 17 00:00:00 2001
++From: andylee77 <andylee77@users.noreply.github.com>
++Date: Sat, 24 Oct 2026 16:35:47 -0400
++Subject: [PATCH 4/4] ric: IR level ladder for irled_cmd banks
++
++A dimmable IR bank driven through irled_cmd was lit at one fixed level,
++which is wrong for both ends of a scene: enough to light the far field
++floods a near wall, and the IR-lit gain then lands wherever the scene
++puts it. On the MC-A85 bench the settled night gain went from 29460 at
++5% IR to 3003 at 100%.
++
++[ircut] ir_levels takes ascending percents ("10,20,40,70,100"). Every
++night starts on the first; while the IR-lit gain stays above
++ir_step_gain (default 16000) the bank steps up one level, as
++"<irled_cmd> on <percent>". A settled reading still above it climbs
++at baseline time instead of becoming the baseline, and a scene that
++darkens later climbs after hysteresis_sec polls. Each climb re-arms the
++cooldown, so the luma trigger's day ratio is always taken against the
++level the night settles on. Never steps down within a night: a brighter
++scene is the day trigger's job, and a two-way ladder would hunt.
++
++Forced night runs the ladder too, so "ric mode night" does not leave
++the scene on the lowest level. raptorctl ric get-thresholds lists the
++levels, ric status reports the level in use, and ir_step_gain is
++settable live.
++---
++ config/raptor.conf |  6 +++
++ ric/ric.h          | 15 ++++++++
++ ric/ric_daynight.c | 96 ++++++++++++++++++++++++++++++++++++++++++----
++ ric/ric_main.c     | 34 ++++++++++++++++
++ 4 files changed, 144 insertions(+), 7 deletions(-)
++
++diff --git a/config/raptor.conf b/config/raptor.conf
++index a34964b..b0b236c 100644
++--- a/config/raptor.conf
+++++ b/config/raptor.conf
++@@ -388,6 +388,12 @@ position = bottom_right
++ # gpio_irled2 = -1            # ir940 pin, -1 = auto from /etc/thingino.json
++ # irled_cmd =                 # 850nm bank not on a GPIO (PWM, expander):
++                               # run as "<cmd> on|off", e.g. /usr/sbin/light ir
+++# ir_levels =                 # irled_cmd bank only: IR brightness steps in %,
+++                              # ascending (e.g. 10,20,40,70,100). Night starts
+++                              # on the first and steps up while the IR-lit
+++                              # gain stays above ir_step_gain; the command then
+++                              # runs as "<cmd> on <percent>". Empty = on|off
+++# ir_step_gain = 16000        # IR-lit gain above this -> next IR level
++ # ir850 = true                # enable 850nm IR LED (visible glow, stronger)
++ # ir940 = false               # enable 940nm IR LED (invisible, weaker);
++                               # auto-enabled when 940 is the board's ONLY
++diff --git a/ric/ric.h b/ric/ric.h
++index 1f69fa3..56ee08b 100644
++--- a/ric/ric.h
+++++ b/ric/ric.h
++@@ -141,6 +141,16 @@ typedef struct {
++ 	 * cooldown samples the night gain baseline.
++ 	 */
++ 	char irled_cmd[128];
+++	/*
+++	 * IR level ladder for an irled_cmd bank: brightness steps in
+++	 * percent, ascending. Night starts on the first and climbs while
+++	 * the IR-lit gain stays above ir_step_gain; the command then runs
+++	 * as "<irled_cmd> on <percent>". No levels = plain on|off.
+++	 */
+++#define RIC_IR_LEVELS_MAX 8
+++	int ir_levels[RIC_IR_LEVELS_MAX];
+++	int ir_level_count;
+++	int ir_step_gain;
++ 	bool ir850_enabled;
++ 	bool ir940_enabled;
++ 	bool ir940_explicit; /* config carries an ir940 key (vs the default) */
++@@ -231,6 +241,11 @@ typedef struct {
++ 	int probe_dip_run;	 /* consecutive dip polls before a probe fires */
++ 	int probe_recheck_polls; /* countdown to the next interval recheck */
++ 
+++	/* IR level ladder: the rung in use (index into ir_levels), and the
+++	 * run of polls that found the scene still dark on it. */
+++	int ir_level_idx;
+++	int ir_step_run;
+++
++ 	/* Baseline settling: gc2053-class AE walks for many seconds after
++ 	 * the IR lights the scene; the cooldown extends until three
++ 	 * consecutive gain and EV polls agree within 2%, within a hard cap,
++diff --git a/ric/ric_daynight.c b/ric/ric_daynight.c
++index 3427ec1..a979ef9 100644
++--- a/ric/ric_daynight.c
+++++ b/ric/ric_daynight.c
++@@ -319,21 +319,30 @@ int ric_ircut_drive(ric_state_t *st, ric_mode_t pos)
++ 
++ /*
++  * The 850 nm bank through a command instead of a pin ([ircut] irled_cmd):
++- * "<cmd> on|off", run to completion so the light has settled before the
+++ * "<cmd> on|off", or "<cmd> on <percent>" on the current rung of an IR
+++ * level ladder. Run to completion so the light has settled before the
++  * post-switch cooldown samples the night gain baseline.
++  */
++-static int ric_irled_run_cmd(const ric_config_t *c, bool on)
+++static int ric_irled_run_cmd(const ric_state_t *st, bool on)
++ {
++-	char cmd[sizeof(c->irled_cmd) + 8];
+++	const ric_config_t *c = &st->settings;
+++	char cmd[sizeof(c->irled_cmd) + 16];
+++	int level = (on && c->ir_level_count > 0) ? c->ir_levels[st->ir_level_idx] : 0;
++ 	int ret;
++ 
++-	snprintf(cmd, sizeof(cmd), "%s %s", c->irled_cmd, on ? "on" : "off");
+++	if (level)
+++		snprintf(cmd, sizeof(cmd), "%s on %d", c->irled_cmd, level);
+++	else
+++		snprintf(cmd, sizeof(cmd), "%s %s", c->irled_cmd, on ? "on" : "off");
++ 	ret = system(cmd);
++ 	if (ret != 0) {
++ 		RSS_WARN("ir850: \"%s\" failed (status %d)", cmd, ret);
++ 		return -1;
++ 	}
++-	RSS_INFO("ir850: %s via \"%s\"", on ? "on" : "off", c->irled_cmd);
+++	if (level)
+++		RSS_INFO("ir850: on at %d%% via \"%s\"", level, c->irled_cmd);
+++	else
+++		RSS_INFO("ir850: %s via \"%s\"", on ? "on" : "off", c->irled_cmd);
++ 	return 0;
++ }
++ 
++@@ -352,7 +361,7 @@ int ric_irled_drive(ric_state_t *st, bool bank940, bool on)
++ 
++ 	if (pin < 0) {
++ 		if (!bank940 && c->irled_cmd[0])
++-			return ric_irled_run_cmd(c, on);
+++			return ric_irled_run_cmd(st, on);
++ 		return -1;
++ 	}
++ 	bool alow = bank940 ? c->irled2_active_low : c->irled_active_low;
++@@ -450,6 +459,57 @@ static bool ric_baseline_value_within(uint32_t previous, uint32_t current)
++ 	return difference <= tolerance;
++ }
++ 
+++/*
+++ * IR level ladder ([ircut] ir_levels, irled_cmd banks): night starts on
+++ * the lowest rung and climbs one rung at a time while the IR-lit gain
+++ * says the scene is still dark on this one -- the least IR that does
+++ * the job, so a near wall is not floodlit to light the far scene. Only
+++ * up within a night: a brighter scene is the day trigger's business,
+++ * and a ladder that also stepped down would hunt. Every climb re-arms
+++ * the cooldown, so the night baseline the day ratio compares against
+++ * is sampled on the rung the night settles on.
+++ */
+++static bool ric_ir_ladder_can_climb(const ric_state_t *st)
+++{
+++	const ric_config_t *c = &st->settings;
+++
+++	return st->current_mode == RIC_MODE_NIGHT && !st->probe_active && c->ir850_enabled &&
+++	       c->gpio_irled < 0 && c->irled_cmd[0] && st->ir_level_idx + 1 < c->ir_level_count;
+++}
+++
+++static void ric_ir_ladder_climb(ric_state_t *st, uint32_t total_gain)
+++{
+++	const ric_config_t *c = &st->settings;
+++
+++	st->ir_level_idx++;
+++	st->ir_step_run = 0;
+++	RSS_INFO("ir850: gain %u over ir_step_gain %d, stepping up to %d%%", total_gain,
+++		 c->ir_step_gain, c->ir_levels[st->ir_level_idx]);
+++	ric_irled_drive(st, false, true);
+++	st->cooldown_remaining = 3;
+++	ric_baseline_settle_begin(st);
+++	st->night_gain_baseline = 0;
+++	st->night_ev_baseline = 0;
+++	st->day_count = 0;
+++	st->probe_dip_run = 0;
+++}
+++
+++/* The scene darkening on through the night: climb once the gain has
+++ * stayed over ir_step_gain for hysteresis_sec polls. True when it
+++ * climbed, which ends the poll. */
+++static bool ric_ir_ladder_poll(ric_state_t *st, bool have_gain, uint32_t total_gain)
+++{
+++	if (!have_gain || !ric_ir_ladder_can_climb(st) ||
+++	    total_gain <= (uint32_t)st->settings.ir_step_gain) {
+++		st->ir_step_run = 0;
+++		return false;
+++	}
+++	if (++st->ir_step_run < st->settings.hysteresis_sec)
+++		return false;
+++	ric_ir_ladder_climb(st, total_gain);
+++	return true;
+++}
+++
++ /*
++  * Re-arm the trigger machinery for a live trigger switch: every counter,
++  * baseline and probe in flight describes the OLD trigger's view of the
++@@ -495,6 +555,11 @@ void ric_set_mode(ric_state_t *st, ric_mode_t mode)
++ 	if (mode == st->current_mode)
++ 		return;
++ 
+++	/* Every night starts on the ladder's lowest rung. */
+++	if (mode == RIC_MODE_NIGHT) {
+++		st->ir_level_idx = 0;
+++		st->ir_step_run = 0;
+++	}
++ 	ric_set_gpio(st, mode);
++ 	ric_set_isp_mode(mode);
++ 	ric_apply_night_fps(st, mode);
++@@ -603,7 +668,8 @@ void ric_poll_exposure(ric_state_t *st)
++ 	}
++ 	rvd_note_good_query(st);
++ 
++-	if (st->settings.opmode != RIC_AUTO)
+++	/* Forced night still reads the exposure, for the IR ladder below. */
+++	if (st->settings.opmode == RIC_FORCE_DAY)
++ 		return;
++ 
++ 	uint32_t total_gain = 0, ae_luma = 0;
++@@ -644,6 +710,12 @@ void ric_poll_exposure(ric_state_t *st)
++ 		has_valid_mask ? (valid_mask & RSS_EXPOSURE_VALID_AE_LUMA) != 0 : ae_luma > 0;
++ 	bool have_ev = has_valid_mask ? (valid_mask & RSS_EXPOSURE_VALID_EV) != 0 : ev > 0;
++ 
+++	/* Forced night: the operator chose the mode, not the brightness. */
+++	if (st->settings.opmode != RIC_AUTO) {
+++		ric_ir_ladder_poll(st, have_gain, total_gain);
+++		return;
+++	}
+++
++ 	if (st->settings.trigger != RIC_TRIGGER_ADC && !have_gain && !have_luma && !have_ev) {
++ 		if (!st->no_exposure_warned) {
++ 			RSS_WARN("no valid gain, luma or ev data from rvd -- "
++@@ -734,6 +806,13 @@ void ric_poll_exposure(ric_state_t *st)
++ 				st->cooldown_remaining = 1;
++ 				return;
++ 			}
+++			/* A settled reading still dark on this rung climbs
+++			 * the IR ladder instead of becoming the baseline. */
+++			if (have_gain && total_gain > (uint32_t)st->settings.ir_step_gain &&
+++			    ric_ir_ladder_can_climb(st)) {
+++				ric_ir_ladder_climb(st, total_gain);
+++				return;
+++			}
++ 			/* Adopt the settled reading as-is. The old 10%-of-trigger
++ 			 * floor clamp assumed a far-below-trigger baseline meant
++ 			 * IR bouncing off a covered lens; a Wyze V3 disproved it
++@@ -761,6 +840,9 @@ void ric_poll_exposure(ric_state_t *st)
++ 		return;
++ 	}
++ 
+++	if (ric_ir_ladder_poll(st, have_gain, total_gain))
+++		return;
+++
++ 	bool want_night = false, want_day = false;
++ 	char why[128];
++ 
++diff --git a/ric/ric_main.c b/ric/ric_main.c
++index 064f297..585d1a3 100644
++--- a/ric/ric_main.c
+++++ b/ric/ric_main.c
++@@ -65,6 +65,26 @@ static void load_config(ric_state_t *st)
++ 	c->irled2_active_low = rss_config_get_bool(cfg, "ircut", "gpio_irled2_active_low", false);
++ 	const char *irled_cmd = rss_config_get_str(cfg, "ircut", "irled_cmd", "");
++ 	snprintf(c->irled_cmd, sizeof(c->irled_cmd), "%s", irled_cmd ? irled_cmd : "");
+++	/* IR level ladder: "10,20,40,70,100", ascending percents. */
+++	const char *levels = rss_config_get_str(cfg, "ircut", "ir_levels", "");
+++	c->ir_level_count = 0;
+++	for (const char *p = levels ? levels : ""; *p && c->ir_level_count < RIC_IR_LEVELS_MAX;) {
+++		char *end;
+++		long v = strtol(p, &end, 10);
+++		if (end == p)
+++			break;
+++		if (v >= 1 && v <= 100 &&
+++		    (c->ir_level_count == 0 || v > c->ir_levels[c->ir_level_count - 1]))
+++			c->ir_levels[c->ir_level_count++] = (int)v;
+++		else
+++			RSS_WARN("ir_levels: %ld dropped (need 1-100, ascending)", v);
+++		for (p = end; *p == ',' || *p == ' '; p++)
+++			;
+++	}
+++	if (c->ir_level_count > 0 && !c->irled_cmd[0])
+++		RSS_WARN("ir_levels set but no irled_cmd: a GPIO bank is on/off only, ladder off");
+++	c->ir_step_gain = cfg_clamp(
+++		"ir_step_gain", rss_config_get_int(cfg, "ircut", "ir_step_gain", 16000), 0, INT_MAX);
++ 	c->ir850_enabled = rss_config_get_bool(cfg, "ircut", "ir850", true);
++ 	/* Probed before the get, because the getters store their default into
++ 	 * the config on a miss (for config-get-section) and the key would
++@@ -445,6 +465,11 @@ static int ric_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
++ 				return rss_ctrl_resp_error(resp_buf, resp_buf_size, "range 1-1000");
++ 			c->pulse_ms = val;
++ 			cfg_key = "pulse_ms";
+++		} else if (strcmp(key, "ir_step_gain") == 0) {
+++			if (val < 0)
+++				return rss_ctrl_resp_error(resp_buf, resp_buf_size, "must be >= 0");
+++			c->ir_step_gain = val;
+++			cfg_key = "ir_step_gain";
++ 		} else {
++ 			return rss_ctrl_resp_error(resp_buf, resp_buf_size, "unknown key");
++ 		}
++@@ -536,6 +561,12 @@ static int ric_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
++ 		cJSON_AddNumberToObject(r, "adc_night", c->adc_night);
++ 		cJSON_AddNumberToObject(r, "adc_day", c->adc_day);
++ 		cJSON_AddNumberToObject(r, "pulse_ms", c->pulse_ms);
+++		if (c->ir_level_count > 0) {
+++			cJSON *lv = cJSON_AddArrayToObject(r, "ir_levels");
+++			for (int i = 0; lv && i < c->ir_level_count; i++)
+++				cJSON_AddItemToArray(lv, cJSON_CreateNumber(c->ir_levels[i]));
+++			cJSON_AddNumberToObject(r, "ir_step_gain", c->ir_step_gain);
+++		}
++ 		return rss_ctrl_resp_json(resp_buf, resp_buf_size, r);
++ 	}
++ 
++@@ -578,6 +609,9 @@ static int ric_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
++ 									       : "night");
++ 		cJSON_AddStringToObject(r, "state",
++ 					st->current_mode == RIC_MODE_DAY ? "day" : "night");
+++		if (st->settings.ir_level_count > 0 && st->current_mode == RIC_MODE_NIGHT)
+++			cJSON_AddNumberToObject(r, "ir_level",
+++						st->settings.ir_levels[st->ir_level_idx]);
++ 		cJSON *sub = exp_resp[0] ? cJSON_Parse(exp_resp) : NULL;
++ 		if (sub)
++ 			cJSON_AddItemToObject(r, "exposure", sub);
++-- 
++2.43.0
++
+diff --git a/package/thingino-raptor/0005-ric-poll-exposure-on-a-fixed-cadence.patch b/package/thingino-raptor/0005-ric-poll-exposure-on-a-fixed-cadence.patch
+new file mode 100644
+index 000000000..55c0fa8d8
+--- /dev/null
++++ b/package/thingino-raptor/0005-ric-poll-exposure-on-a-fixed-cadence.patch
+@@ -0,0 +1,58 @@
++From abd68e9109c20a995bec971e50afd3e0aa15a7d2 Mon Sep 17 00:00:00 2001
++From: andylee77 <andylee77@users.noreply.github.com>
++Date: Sat, 24 Oct 2026 17:07:46 -0400
++Subject: [PATCH] ric: poll exposure on a fixed cadence
++
++The main loop polled exposure once per wake, and a control request wakes
++the epoll wait early. Every poll-counted delay (hysteresis_sec, the
++post-switch cooldown, the baseline settle, day lockouts, probe windows)
++therefore shrank while a client was asking. The web UI's live gain
++readout asks every second or two. Measured on the MC-A85 with
++status requests back to back: the 5-poll day->night debounce took 0.3 s.
++
++Keep a monotonic deadline: poll only when it has passed, and otherwise
++wait out the remainder, answering control requests as they come.
++---
++ ric/ric_main.c | 19 +++++++++++++++----
++ 1 file changed, 15 insertions(+), 4 deletions(-)
++
++diff --git a/ric/ric_main.c b/ric/ric_main.c
++index 585d1a3..f773772 100644
++--- a/ric/ric_main.c
+++++ b/ric/ric_main.c
++@@ -744,17 +744,28 @@ int main(int argc, char **argv)
++ 	RSS_DEBUG("  hysteresis=%ds poll=%dms", st.settings.hysteresis_sec,
++ 		  st.settings.poll_interval_ms);
++ 
++-	/* Main loop: poll exposure + handle control socket */
+++	/* Main loop: poll exposure on a fixed cadence + handle control socket.
+++	 * A control request wakes the wait early. Polling on every wake made
+++	 * each poll-counted delay (hysteresis, cooldown, lockouts) shrink
+++	 * while a client was asking -- the web UI's live gain readout asks
+++	 * every second or two. */
+++	int64_t next_poll_us = 0;
++ 	while (*st.running) {
++-		ric_poll_exposure(&st);
+++		int64_t now_us = rss_timestamp_us();
+++		if (now_us >= next_poll_us) {
+++			ric_poll_exposure(&st);
+++			next_poll_us = now_us + (int64_t)st.settings.poll_interval_ms * 1000;
+++			now_us = rss_timestamp_us();
+++		}
+++		int wait_ms = next_poll_us > now_us ? (int)((next_poll_us - now_us + 999) / 1000) : 0;
++ 
++ 		if (epoll_fd >= 0) {
++ 			struct epoll_event ev;
++-			int n = epoll_wait(epoll_fd, &ev, 1, st.settings.poll_interval_ms);
+++			int n = epoll_wait(epoll_fd, &ev, 1, wait_ms);
++ 			if (n > 0 && st.ctrl)
++ 				rss_ctrl_accept_and_handle(st.ctrl, ric_ctrl_handler, &st);
++ 		} else {
++-			usleep(st.settings.poll_interval_ms * 1000);
+++			usleep((useconds_t)wait_ms * 1000);
++ 		}
++ 	}
++ 
++-- 
++2.43.0
++
+diff --git a/package/thingino-raptor/Config.in b/package/thingino-raptor/Config.in
+index f4b598702..062a213e4 100644
+--- a/package/thingino-raptor/Config.in
++++ b/package/thingino-raptor/Config.in
+@@ -231,6 +231,88 @@ config BR2_PACKAGE_THINGINO_RAPTOR_DEBUG
+ 
+ endmenu
+ 
++menu "WebUI stream choices"
++
++comment "Space-separated lists; an empty list offers no choice"
++comment "Written to /usr/share/raptor/streams.conf; override on the camera in /etc/raptor-streams.conf"
++
++config BR2_PACKAGE_THINGINO_RAPTOR_UI_STREAM0_RESOLUTIONS
++	string "Main stream resolutions (WIDTHxHEIGHT)"
++	help
++	  Sizes the Main stream page offers, e.g. "2560x1440 1920x1080".
++	  Keep them at the sensor's aspect ratio where the backend scales
++	  without cropping (Infinity6C).
++
++config BR2_PACKAGE_THINGINO_RAPTOR_UI_STREAM1_RESOLUTIONS
++	string "Substream resolutions (WIDTHxHEIGHT)"
++	help
++	  Sizes the Substream page offers. On Infinity6C the sub is a VENC
++	  cascade off the main and can only be smaller than it.
++
++config BR2_PACKAGE_THINGINO_RAPTOR_UI_FPS
++	string "Frame rates"
++	help
++	  Frame rates the pages offer, up to the sensor's maximum. The main
++	  stream's rate sets the sensor's ([sensor] fps); the substream may
++	  only take rates that divide the main's, since the pipeline drops
++	  sensor frames and any other ratio drops them unevenly.
++
++config BR2_PACKAGE_THINGINO_RAPTOR_UI_STREAM0_BITRATES
++	string "Main stream bitrates (kbit/s)"
++
++config BR2_PACKAGE_THINGINO_RAPTOR_UI_STREAM1_BITRATES
++	string "Substream bitrates (kbit/s)"
++
++config BR2_PACKAGE_THINGINO_RAPTOR_UI_CODECS
++	string "Codecs (h264 h265)"
++
++config BR2_PACKAGE_THINGINO_RAPTOR_UI_PROFILES
++	string "H.264 profiles (baseline main high)"
++
++config BR2_PACKAGE_THINGINO_RAPTOR_UI_RC_MODES
++	string "Rate control modes"
++	help
++	  Any of cbr vbr capped_vbr capped_quality smart fixqp.
++
++config BR2_PACKAGE_THINGINO_RAPTOR_UI_GOP_SECONDS
++	string "Keyframe intervals (seconds)"
++
++config BR2_PACKAGE_THINGINO_RAPTOR_UI_JPEG_QUALITIES
++	string "Snapshot JPEG qualities"
++
++config BR2_PACKAGE_THINGINO_RAPTOR_UI_MMA_RESERVE_KIB
++	string "Video memory kept free (KiB)"
++	default "4096"
++	help
++	  A stream change that would leave less of the MI heap (MMA) free
++	  than this is refused before anything is written.
++
++endmenu
++
++config BR2_PACKAGE_THINGINO_RAPTOR_SCL_RING_DIV
++	string "SCL->VENC ring depth, 1/N frame (Infinity6C)"
++	depends on BR2_SOC_VENDOR_SIGMASTAR
++	help
++	  How much of a frame the ring between the scaler and the main
++	  encoder holds: 4 = a quarter (the HAL default), 2 = a half,
++	  1 = a whole frame. Too shallow and the scaler laps an encoder that
++	  is busy with the substream or an IDR: frames are lost and the main
++	  turns to IDRs. Each step costs width x height x 1.5 / N of MMA.
++	  Written to /etc/default/raptor as RSS_SCL_RING_DIV; empty leaves
++	  the HAL default.
++
++config BR2_PACKAGE_THINGINO_RAPTOR_AE_MAX_SHUTTER_US
++	string "AE max shutter, microseconds (Infinity6C)"
++	depends on BR2_SOC_VENDOR_SIGMASTAR
++	help
++	  A ceiling on the auto-exposure's shutter, for night scenes where
++	  motion blur costs more than gain noise. Empty (the default) keeps
++	  the tuning's own ceiling (125 ms on the GC4653): a dark scene then
++	  runs on long exposures and the sensor slows (25 -> 20 fps on a
++	  YMF46D, 2026-11-03). 33333 (1/30 s, a 60 Hz flicker multiple) held
++	  25 fps there at ~50 % more gain. Written to /etc/default/raptor as
++	  RSS_AE_MAX_SHUTTER_US.
++
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-raptor/Config.in.conf"
+ 
+ endif # BR2_PACKAGE_THINGINO_RAPTOR
+diff --git a/package/thingino-raptor/Config.in.conf b/package/thingino-raptor/Config.in.conf
+index e8bc3a912..bb781e626 100644
+--- a/package/thingino-raptor/Config.in.conf
++++ b/package/thingino-raptor/Config.in.conf
+@@ -1511,6 +1511,22 @@ config BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_GPIO_IRLED2
+ 	string "gpio_irled2 - 940nm LED pin (-1=auto, default -1)"
+ 	default ""
+ 
++config BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IRLED_CMD
++	string "irled_cmd - command for an 850nm bank not on a GPIO (run as '<cmd> on|off')"
++	default ""
++
++config BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IR_LEVELS
++	string "ir_levels - IR brightness steps in %, ascending (irled_cmd bank only)"
++	default ""
++	help
++	  e.g. "10,20,40,70,100". Night starts on the first level and
++	  steps up while the IR-lit gain stays above ir_step_gain; ric
++	  then runs "<irled_cmd> on <percent>". Empty = plain on|off.
++
++config BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IR_STEP_GAIN
++	string "ir_step_gain - IR-lit gain above this steps the IR up (default 16000)"
++	default ""
++
+ config BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_PULSE_MS
+ 	string "pulse_ms - dual-GPIO coil pulse width in ms (1-1000, default 10)"
+ 	default ""
+diff --git a/package/thingino-raptor/thingino-raptor-conf.mk b/package/thingino-raptor/thingino-raptor-conf.mk
+index effe5c839..58f305e0a 100644
+--- a/package/thingino-raptor/thingino-raptor-conf.mk
++++ b/package/thingino-raptor/thingino-raptor-conf.mk
+@@ -292,6 +292,9 @@ define THINGINO_RAPTOR_PATCH_CONF
+ 	rset ircut gpio_ircut2 "$(call qstrip,$(BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_GPIO_IRCUT2))"; \
+ 	rset ircut gpio_irled "$(call qstrip,$(BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_GPIO_IRLED))"; \
+ 	rset ircut gpio_irled2 "$(call qstrip,$(BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_GPIO_IRLED2))"; \
++	rset ircut irled_cmd "$(call qstrip,$(BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IRLED_CMD))"; \
++	rset ircut ir_levels "$(call qstrip,$(BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IR_LEVELS))"; \
++	rset ircut ir_step_gain "$(call qstrip,$(BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IR_STEP_GAIN))"; \
+ 	rset ircut pulse_ms "$(call qstrip,$(BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_PULSE_MS))"; \
+ 	rset ircut ir850 "$(call raptor_bval,IRCUT_IR850)"; \
+ 	rset ircut ir940 "$(call raptor_bval,IRCUT_IR940)"; \
+diff --git a/package/thingino-raptor/thingino-raptor.mk b/package/thingino-raptor/thingino-raptor.mk
+index ef2e741e3..2c7c81d5b 100644
+--- a/package/thingino-raptor/thingino-raptor.mk
++++ b/package/thingino-raptor/thingino-raptor.mk
+@@ -5,7 +5,7 @@ THINGINO_RAPTOR_SITE_METHOD = git
+ THINGINO_RAPTOR_LICENSE = GPL-3.0
+ THINGINO_RAPTOR_LICENSE_FILES = COPYING
+ 
+-THINGINO_RAPTOR_DEPENDENCIES += ingenic-lib compy libschrift
++THINGINO_RAPTOR_DEPENDENCIES += compy libschrift
+ THINGINO_RAPTOR_DEPENDENCIES += thingino-raptor-hal thingino-raptor-ipc thingino-raptor-common
+ THINGINO_RAPTOR_DEPENDENCIES += thingino-webui thingino-agent
+ ifeq ($(BR2_PACKAGE_OPENIMP),y)
+@@ -21,6 +21,16 @@ ifeq ($(BR2_PACKAGE_LIBAUDIOPROCESS_NEO),y)
+ THINGINO_RAPTOR_DEPENDENCIES += libaudioprocess-neo
+ endif
+ 
++# The vendor libraries. Ingenic links libimp/libalog and, by libc, a shim.
++# SigmaStar links nothing -- the HAL dlopens the MI libraries -- but declares
++# them anyway: the linker never sees a dlopen, so build order is the only place
++# this can be stated, and without it a parallel build can install the daemons
++# before the libraries exist.
++ifeq ($(BR2_SOC_VENDOR_SIGMASTAR),y)
++THINGINO_RAPTOR_DEPENDENCIES += sigmastar-lib
++else
++THINGINO_RAPTOR_DEPENDENCIES += ingenic-lib
++
+ ifeq ($(BR2_TOOLCHAIN_USES_MUSL),y)
+ THINGINO_RAPTOR_DEPENDENCIES += ingenic-musl
+ endif
+@@ -31,6 +41,7 @@ ifeq ($(filter t40 t41,$(SOC_FAMILY)),)
+ THINGINO_RAPTOR_DEPENDENCIES += ingenic-uclibc
+ endif
+ endif
++endif
+ 
+ # Platform: uppercase SOC_FAMILY (t31 -> T31)
+ THINGINO_RAPTOR_PLATFORM = $(shell echo $(SOC_FAMILY) | tr a-z A-Z)
+@@ -157,6 +168,42 @@ define THINGINO_RAPTOR_BUILD_CMDS
+ 		-C $(@D) $(THINGINO_RAPTOR_TARGETS)
+ endef
+ 
++raptor_ui = $(call qstrip,$(BR2_PACKAGE_THINGINO_RAPTOR_UI_$(1)))
++
++# The stream choices the WebUI offers, from the camera profile. The agent
++# adapter reads this file and lets /etc/raptor-streams.conf override any key.
++# The SCL ring depth and the AE max shutter are environment for rvd, which
++# S31raptor exports from /etc/default/raptor.
++define THINGINO_RAPTOR_INSTALL_STREAM_CHOICES
++	mkdir -p $(TARGET_DIR)/usr/share/raptor
++	{ \
++		echo '# Stream settings the WebUI offers on this camera, from its profile.'; \
++		echo '# Override any key on the camera in /etc/raptor-streams.conf.'; \
++		echo 'UI_STREAM0_RESOLUTIONS="$(call raptor_ui,STREAM0_RESOLUTIONS)"'; \
++		echo 'UI_STREAM1_RESOLUTIONS="$(call raptor_ui,STREAM1_RESOLUTIONS)"'; \
++		echo 'UI_FPS="$(call raptor_ui,FPS)"'; \
++		echo 'UI_STREAM0_BITRATES="$(call raptor_ui,STREAM0_BITRATES)"'; \
++		echo 'UI_STREAM1_BITRATES="$(call raptor_ui,STREAM1_BITRATES)"'; \
++		echo 'UI_CODECS="$(call raptor_ui,CODECS)"'; \
++		echo 'UI_PROFILES="$(call raptor_ui,PROFILES)"'; \
++		echo 'UI_RC_MODES="$(call raptor_ui,RC_MODES)"'; \
++		echo 'UI_GOP_SECONDS="$(call raptor_ui,GOP_SECONDS)"'; \
++		echo 'UI_JPEG_QUALITIES="$(call raptor_ui,JPEG_QUALITIES)"'; \
++		echo 'UI_MMA_RESERVE_KIB="$(call raptor_ui,MMA_RESERVE_KIB)"'; \
++	} > $(TARGET_DIR)/usr/share/raptor/streams.conf
++	rm -f $(TARGET_DIR)/etc/default/raptor
++	if [ -n "$(call qstrip,$(BR2_PACKAGE_THINGINO_RAPTOR_SCL_RING_DIV))" ]; then \
++		mkdir -p $(TARGET_DIR)/etc/default; \
++		echo 'RSS_SCL_RING_DIV=$(call qstrip,$(BR2_PACKAGE_THINGINO_RAPTOR_SCL_RING_DIV))' \
++			>> $(TARGET_DIR)/etc/default/raptor; \
++	fi
++	if [ -n "$(call qstrip,$(BR2_PACKAGE_THINGINO_RAPTOR_AE_MAX_SHUTTER_US))" ]; then \
++		mkdir -p $(TARGET_DIR)/etc/default; \
++		echo 'RSS_AE_MAX_SHUTTER_US=$(call qstrip,$(BR2_PACKAGE_THINGINO_RAPTOR_AE_MAX_SHUTTER_US))' \
++			>> $(TARGET_DIR)/etc/default/raptor; \
++	fi
++endef
++
+ define THINGINO_RAPTOR_INSTALL_TARGET_CMDS
+ 	# Install the thingino-agent backend adapter at the fixed path, overwriting
+ 	# the null fallback installed by thingino-agent.
+@@ -186,6 +233,10 @@ define THINGINO_RAPTOR_INSTALL_TARGET_CMDS
+ 	# WebUI plugin (streamer pages, audio, save/restart CGIs)
+ 	$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/raptor.webui.json \
+ 		$(TARGET_DIR)/var/www/a/plugins/raptor.webui.json
++	if [ "$(BR2_SOC_VENDOR_SIGMASTAR)" = "y" ]; then \
++		$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/raptor-sigmastar.webui.json \
++			$(TARGET_DIR)/var/www/a/plugins/raptor-sigmastar.webui.json; \
++	fi
+ 	$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/www/config-audio.html \
+ 		$(TARGET_DIR)/var/www/config-audio.html
+ 	$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/www/streamer-image.html \
+@@ -202,6 +253,9 @@ define THINGINO_RAPTOR_INSTALL_TARGET_CMDS
+ 		$(TARGET_DIR)/var/www/tool-timelapse.html
+ 	$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/www/a/streamer.js \
+ 		$(TARGET_DIR)/var/www/a/streamer.js
++	$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/www/a/streamer-stream.js \
++		$(TARGET_DIR)/var/www/a/streamer-stream.js
++	$(call THINGINO_RAPTOR_INSTALL_STREAM_CHOICES)
+ 	$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/www/a/preview-endpoints.js \
+ 		$(TARGET_DIR)/var/www/a/preview-endpoints.js
+ 	$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/www/a/streamer-config.js \
+@@ -242,6 +296,14 @@ define THINGINO_RAPTOR_INSTALL_TARGET_CMDS
+ 		$(INSTALL) -D -m 0755 $(@D)/config/S31raptor \
+ 			$(TARGET_DIR)/etc/init.d/S31raptor; \
+ 	fi
++	# Video pipeline watchdog (SigmaStar: it reads mi_venc's frame counters):
++	# fault reports, a raptor restart on an encoder stall, a reboot if that fails.
++	if [ "$(BR2_SOC_VENDOR_SIGMASTAR)" = "y" ]; then \
++		$(INSTALL) -D -m 0755 $(THINGINO_RAPTOR_PKGDIR)/files/raptor-watchdog \
++			$(TARGET_DIR)/usr/sbin/raptor-watchdog; \
++		$(INSTALL) -D -m 0755 $(THINGINO_RAPTOR_PKGDIR)/files/S34raptor-watchdog \
++			$(TARGET_DIR)/etc/init.d/S34raptor-watchdog; \
++	fi
+ 	$(INSTALL) -D -m 0755 $(THINGINO_RAPTOR_PKGDIR)/files/privacy \
+ 		$(TARGET_DIR)/usr/sbin/privacy
+ 	$(INSTALL) -D -m 0755 $(THINGINO_RAPTOR_PKGDIR)/files/microphone \

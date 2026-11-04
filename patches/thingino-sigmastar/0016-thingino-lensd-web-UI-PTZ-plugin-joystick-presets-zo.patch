@@ -1,0 +1,686 @@
+From e91f599047b7e92fc4ea264ad917b66c2f76843a Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 08:19:16 -0500
+Subject: [PATCH 16/21] thingino-lensd: web UI PTZ plugin (joystick, presets,
+ zoom/focus)
+
+---
+ package/thingino-lensd/files/lensd.webui.json |  18 +
+ package/thingino-lensd/files/motors           |  13 +
+ .../files/www/a/preview-lensd.js              | 404 ++++++++++++++++++
+ .../thingino-lensd/files/www/x/json-lensd.cgi | 210 +++++++++
+ 4 files changed, 645 insertions(+)
+ create mode 100644 package/thingino-lensd/files/lensd.webui.json
+ create mode 100755 package/thingino-lensd/files/motors
+ create mode 100644 package/thingino-lensd/files/www/a/preview-lensd.js
+ create mode 100755 package/thingino-lensd/files/www/x/json-lensd.cgi
+
+diff --git a/package/thingino-lensd/files/lensd.webui.json b/package/thingino-lensd/files/lensd.webui.json
+new file mode 100644
+index 000000000..0e4a5cf9d
+--- /dev/null
++++ b/package/thingino-lensd/files/lensd.webui.json
+@@ -0,0 +1,18 @@
++{
++  "name": "lensd",
++  "label": "PTZ (lens board)",
++  "apiVersion": 1,
++  "styles": [],
++  "preview": {
++    "scripts": [
++      "/a/preview-lensd.js"
++    ],
++    "html": "<div class=\"position-absolute top-50 start-50 translate-middle\" id=\"motor-overlay\" style=\"display:none\">\n  <div id=\"motor\">\n    <div class=\"jst\">\n      <a class=\"s\" data-dir=\"uc\"></a>\n      <a class=\"s\" data-dir=\"ur\"></a>\n      <a class=\"s\" data-dir=\"cr\"></a>\n      <a class=\"s\" data-dir=\"dr\"></a>\n      <a class=\"s\" data-dir=\"dc\"></a>\n      <a class=\"s\" data-dir=\"dl\"></a>\n      <a class=\"s\" data-dir=\"cl\"></a>\n      <a class=\"s\" data-dir=\"ul\"></a>\n      <a class=\"b\" data-dir=\"h\"></a>\n    </div>\n  </div>\n</div>\n<div class=\"position-absolute top-50 end-0 translate-middle-y me-3 btn-group-vertical\" id=\"lens-overlay\" style=\"display:none;opacity:.75\">\n  <button type=\"button\" class=\"btn btn-dark\" data-lens=\"zoom_in\" title=\"Zoom in\"><i class=\"bi bi-zoom-in\"></i></button>\n  <button type=\"button\" class=\"btn btn-dark\" data-lens=\"zoom_out\" title=\"Zoom out\"><i class=\"bi bi-zoom-out\"></i></button>\n  <button type=\"button\" class=\"btn btn-dark\" data-lens=\"focus_near\" title=\"Focus near\"><i class=\"bi bi-dash-circle\"></i></button>\n  <button type=\"button\" class=\"btn btn-dark\" data-lens=\"focus_far\" title=\"Focus far\"><i class=\"bi bi-plus-circle\"></i></button>\n</div>"
++  },
++  "featureFlags": {
++    "ptz": true
++  },
++  "cgi": [
++    "/x/json-lensd.cgi"
++  ]
++}
+diff --git a/package/thingino-lensd/files/motors b/package/thingino-lensd/files/motors
+new file mode 100755
+index 000000000..3618b7f45
+--- /dev/null
++++ b/package/thingino-lensd/files/motors
+@@ -0,0 +1,13 @@
++#!/bin/sh
++# motors -- this camera has no stepper motors: pan, tilt and zoom are a
++# Pelco-D board run by lensd. Thingino's ONVIF server turns PTZ on only when
++# /bin/motors exists, and the commands it runs come from /etc/onvif.json, which
++# S33lensd points at lensctl. This answers the few motors calls made directly.
++case " $* " in
++*" -d s "*) exec lensctl stop ;;
++*" -p "*) exec lensctl position ;;
++*" -b "*) exec lensctl moving ;;
++*" -R "*) exit 0 ;;
++esac
++echo "motors: no stepper motors here and no pan/tilt position; use lensctl" >&2
++exit 1
+diff --git a/package/thingino-lensd/files/www/a/preview-lensd.js b/package/thingino-lensd/files/www/a/preview-lensd.js
+new file mode 100644
+index 000000000..c4dae0d4a
+--- /dev/null
++++ b/package/thingino-lensd/files/www/a/preview-lensd.js
+@@ -0,0 +1,404 @@
++/**
++ * Preview-page PTZ for cameras whose pan, tilt, zoom and focus run on a
++ * Pelco-D lens board (thingino-lensd, JL12D2).
++ *
++ * Same layout as thingino-motors: the joystick overlay on the live view and
++ * a PTZ button in the Live View header that opens a settings/presets modal.
++ * The overlay adds zoom and focus buttons, which stepper cameras lack. The
++ * centre button sends the camera home.
++ *
++ * Moves go through /x/json-lensd.cgi to lensctl. A held button repeats its
++ * move with ms= every REPEAT_MS, which only pushes lensd's deadline out, so a
++ * lost release (closed tab) stops the camera after HOLD_MS.
++ *
++ * Plugin-owned file: registered via lensd.webui.json `preview.scripts`,
++ * injected into the preview page at build time.
++ */
++(function () {
++  "use strict";
++
++  const ENDPOINT = "/x/json-lensd.cgi";
++  const HOLD_MS = 700;
++  const REPEAT_MS = 300;
++  const STEP_MS = 250;
++  const BIG_STEP_MS = 1000;
++
++  const DIRECTIONS = {
++    uc: "up",
++    ur: "up_right",
++    cr: "right",
++    dr: "down_right",
++    dc: "down",
++    dl: "down_left",
++    cl: "left",
++    ul: "up_left",
++  };
++
++  let settings = { speed: 10, preview_control_mode: "continuous" };
++
++  async function call(params) {
++    const res = await fetch(`${ENDPOINT}?${new URLSearchParams(params)}`, {
++      cache: "no-store",
++    });
++    const payload = await res.json().catch(() => null);
++    if (!res.ok || !payload || payload.result !== "success") {
++      const message = payload && payload.error && payload.error.message;
++      throw new Error(message || `HTTP ${res.status}`);
++    }
++    return payload.message;
++  }
++
++  // The CGI's error codes, worded for the user.
++  const MESSAGES = {
++    "home-not-set":
++      "No home position yet. Move the camera there, then PTZ > Presets > Home > the pin button.",
++    "lensd-not-running": "The lens board daemon (lensd) is not running.",
++  };
++
++  function report(err) {
++    console.error("PTZ:", err);
++    if (typeof showAlert === "function")
++      showAlert(
++        MESSAGES[err.message] ? "warning" : "danger",
++        `PTZ: ${MESSAGES[err.message] || err.message}`,
++        6000,
++      );
++  }
++
++  function send(params) {
++    return call(params).catch(report);
++  }
++
++  // One action per control: a move, a zoom or a focus, as CGI params.
++  function action(el) {
++    if (el.dataset.dir) return { a: "move", d: DIRECTIONS[el.dataset.dir] };
++    if (el.dataset.lens) {
++      const [a, d] = el.dataset.lens.split("_");
++      return { a, d };
++    }
++    return null;
++  }
++
++  // -- joystick: angle picks the direction, distance the speed --------------
++  // Clockwise from the right, 45 degrees each, as the .jst sectors are drawn.
++  const SECTORS = ["right", "down_right", "down", "down_left", "left", "up_left", "up", "up_right"];
++  // The home button's radius over the joystick's (main.css: a 60% box
++  // clipped to circle(30%)); the sectors start there.
++  const INNER = 0.36;
++
++  function joystickParams(ev) {
++    const r = $("#motor").getBoundingClientRect();
++    const dx = ev.clientX - (r.left + r.width / 2);
++    const dy = ev.clientY - (r.top + r.height / 2);
++    const angle = (Math.atan2(dy, dx) * 180) / Math.PI + 360;
++    const d = SECTORS[Math.round(angle / 45) % 8];
++    const reach = Math.min(1, Math.hypot(dx, dy) / (r.width / 2));
++    const t = Math.max(0, (reach - INNER) / (1 - INNER));
++    const s = Math.max(1, Math.round(1 + t * (settings.speed - 1)));
++    return { a: "move", d, s };
++  }
++
++  // -- hold to move --------------------------------------------------------
++  let holdTimer = null;
++  let holdParams = null;
++
++  function holdMove() {
++    send({ ...holdParams, ms: HOLD_MS });
++  }
++
++  function startHold(params) {
++    stopHold(false);
++    holdParams = params;
++    holdMove();
++    holdTimer = setInterval(holdMove, REPEAT_MS);
++  }
++
++  // A new direction or speed goes out at once, not on the next repeat.
++  function steerHold(params) {
++    if (!holdTimer || (params.d === holdParams.d && params.s === holdParams.s)) return;
++    holdParams = params;
++    holdMove();
++  }
++
++  function stopHold(sendStop = true) {
++    if (!holdTimer) return;
++    clearInterval(holdTimer);
++    holdTimer = null;
++    if (sendStop) send({ a: "stop" });
++  }
++
++  // The joystick keeps the pointer captured, so dragging around it steers
++  // the running move; only a release ends it.
++  function bindHold(el) {
++    const joystick = !!el.dataset.dir;
++    const params = joystick ? null : action(el);
++    if (!joystick && !params) return;
++    el.addEventListener("pointerdown", (ev) => {
++      ev.preventDefault();
++      if (el.setPointerCapture && ev.pointerId !== undefined)
++        el.setPointerCapture(ev.pointerId);
++      startHold(joystick ? joystickParams(ev) : params);
++    });
++    if (joystick)
++      el.addEventListener("pointermove", (ev) => steerHold(joystickParams(ev)));
++    const ends = ["pointerup", "pointercancel", "lostpointercapture"];
++    if (!joystick) ends.push("pointerleave");
++    ends.forEach((type) => el.addEventListener(type, () => stopHold()));
++    el.addEventListener("contextmenu", (ev) => ev.preventDefault());
++  }
++
++  // -- step moves: click = short, double-click = long (as thingino-motors) --
++  function bindStep(el) {
++    const params = action(el);
++    if (!params) return;
++    let timer;
++    el.addEventListener("click", (ev) => {
++      if (ev.detail === 1)
++        timer = setTimeout(() => send({ ...params, ms: STEP_MS }), 200);
++    });
++    el.addEventListener("dblclick", () => {
++      clearTimeout(timer);
++      send({ ...params, ms: BIG_STEP_MS });
++    });
++  }
++
++  // -- modal markup (thingino-motors' PTZ Settings layout) -----------------
++  const MODAL_HTML =
++    '<div class="modal fade" id="ptzModal" tabindex="-1" aria-labelledby="ptzModalLabel" aria-hidden="true">' +
++    '  <div class="modal-dialog modal-lg">' +
++    '    <div class="modal-content">' +
++    '      <div class="modal-header">' +
++    '        <h5 class="modal-title" id="ptzModalLabel">PTZ Settings</h5>' +
++    '        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>' +
++    "      </div>" +
++    '      <div class="modal-body">' +
++    '        <ul class="nav nav-tabs" role="tablist">' +
++    '          <li class="nav-item" role="presentation">' +
++    '            <button class="nav-link active" id="ptz-settings-tab" data-bs-toggle="tab" data-bs-target="#ptz-settings-pane" type="button" role="tab" aria-controls="ptz-settings-pane" aria-selected="true">Movement</button>' +
++    "          </li>" +
++    '          <li class="nav-item" role="presentation">' +
++    '            <button class="nav-link" id="ptz-presets-tab" data-bs-toggle="tab" data-bs-target="#ptz-presets-pane" type="button" role="tab" aria-controls="ptz-presets-pane" aria-selected="false">Presets</button>' +
++    "          </li>" +
++    "        </ul>" +
++    '        <div class="tab-content pt-3">' +
++    '          <div class="tab-pane fade show active" id="ptz-settings-pane" role="tabpanel" aria-labelledby="ptz-settings-tab">' +
++    '            <p class="row">' +
++    '              <label class="form-label col-4" for="ptz-preview-control-mode">Preview controls</label>' +
++    '              <select class="form-select col" id="ptz-preview-control-mode">' +
++    '                <option value="continuous">Continuous move (press and hold)</option>' +
++    '                <option value="step">Step move (click / double-click)</option>' +
++    "              </select>" +
++    "            </p>" +
++    '            <p class="row">' +
++    '              <label class="form-label col-4" for="ptz-speed">Pan/tilt speed</label>' +
++    '              <input class="form-control col" type="number" id="ptz-speed" min="1" max="10" placeholder="10">' +
++    "            </p>" +
++    '            <p class="row"><span class="col-4"></span>' +
++    '              <small class="col text-secondary">1-10. Holding the joystick, speed grows from 1 next to the centre to this at the rim; steps use it as is.</small>' +
++    "            </p>" +
++    '            <p class="row mb-0">' +
++    '              <span class="col-4">Zoom</span>' +
++    '              <span class="col text-secondary" id="ptz-zoom-status">-</span>' +
++    "            </p>" +
++    "          </div>" +
++    '          <div class="tab-pane fade" id="ptz-presets-pane" role="tabpanel" aria-labelledby="ptz-presets-tab">' +
++    '            <div class="d-flex gap-2 mb-3">' +
++    '              <input type="text" class="form-control" id="ptz-preset-name" placeholder="Preset description, e.g. Front door" maxlength="64">' +
++    '              <button type="button" class="btn btn-outline-primary text-nowrap" id="ptz-preset-save" title="Save current position as a preset">' +
++    '                <i class="bi bi-plus-circle me-1"></i>Save' +
++    "              </button>" +
++    "            </div>" +
++    '            <ul class="list-group mb-2">' +
++    '              <li class="list-group-item d-flex align-items-center gap-2">' +
++    '                <i class="bi bi-house text-secondary"></i>' +
++    '                <span class="flex-grow-1">Home</span>' +
++    '                <button type="button" class="btn btn-sm btn-outline-secondary" id="ptz-home-set" title="Make the current position home">' +
++    '                  <i class="bi bi-geo-alt"></i></button>' +
++    '                <button type="button" class="btn btn-sm btn-outline-primary" id="ptz-home-go" title="Move home">' +
++    '                  <i class="bi bi-play-fill"></i></button>' +
++    "              </li>" +
++    "            </ul>" +
++    '            <ul id="ptz-presets-list" class="list-group"></ul>' +
++    '            <small id="ptz-presets-empty" class="text-secondary d-block mt-2">No presets yet. Move the camera (preview overlay) and save a position above.</small>' +
++    "          </div>" +
++    "        </div>" +
++    "      </div>" +
++    '      <div class="modal-footer">' +
++    '        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
++    '        <button type="button" class="btn btn-primary" id="ptz-save">Save settings</button>' +
++    "      </div>" +
++    "    </div>" +
++    "  </div>" +
++    "</div>";
++
++  // -- presets -------------------------------------------------------------
++  function iconButton(cls, icon, title, onClick) {
++    const btn = document.createElement("button");
++    btn.type = "button";
++    btn.className = `btn btn-sm ${cls}`;
++    btn.title = title;
++    btn.innerHTML = `<i class="bi ${icon}"></i>`;
++    btn.addEventListener("click", onClick);
++    return btn;
++  }
++
++  function createPresetRow(p) {
++    const li = document.createElement("li");
++    li.className = "list-group-item d-flex align-items-center gap-2";
++
++    const nameInput = document.createElement("input");
++    nameInput.type = "text";
++    nameInput.className = "form-control form-control-sm flex-grow-1";
++    nameInput.value = p.description || "";
++    nameInput.maxLength = 64;
++    nameInput.placeholder = `Preset ${p.id}`;
++
++    li.append(
++      nameInput,
++      iconButton("btn-outline-success", "bi-check-lg", "Save the description", () => {
++        const name = nameInput.value.trim();
++        if (!name) {
++          if (typeof showAlert === "function")
++            showAlert("warning", "Enter a description for the preset.", 3000);
++          return;
++        }
++        presetAction({ a: "rename", n: p.id, name }, "Preset renamed.");
++      }),
++      iconButton("btn-outline-secondary", "bi-geo-alt", "Store the current position in this preset", () =>
++        presetAction(
++          { a: "save", n: p.id, name: nameInput.value.trim() || p.description },
++          "Position stored.",
++        ),
++      ),
++      iconButton("btn-outline-primary", "bi-play-fill", "Move to this preset", () =>
++        send({ a: "goto", n: p.id }),
++      ),
++      iconButton("btn-outline-danger", "bi-trash", "Delete preset", () =>
++        presetAction({ a: "clear", n: p.id }, "Preset deleted."),
++      ),
++    );
++    return li;
++  }
++
++  function renderPresets(presets) {
++    const list = $("#ptz-presets-list");
++    list.innerHTML = "";
++    $("#ptz-presets-empty").classList.toggle("d-none", presets.length > 0);
++    presets.forEach((p) => list.appendChild(createPresetRow(p)));
++  }
++
++  async function refreshPresets() {
++    try {
++      renderPresets((await call({ a: "presets" })).presets || []);
++    } catch (err) {
++      report(err);
++    }
++  }
++
++  async function presetAction(params, done) {
++    try {
++      renderPresets((await call(params)).presets || []);
++      if (typeof showAlert === "function") showAlert("success", done, 3000);
++    } catch (err) {
++      report(err);
++    }
++  }
++
++  // -- settings ------------------------------------------------------------
++  function showStatus(status) {
++    settings = status;
++    $("#ptz-preview-control-mode").value = status.preview_control_mode;
++    $("#ptz-speed").value = status.speed;
++    $("#ptz-zoom-status").textContent =
++      status.zoom >= 0
++        ? `${Math.round((status.zoom / 65535) * 100)}% toward tele`
++        : "not reported yet";
++  }
++
++  async function saveSettings() {
++    const mode = $("#ptz-preview-control-mode").value;
++    const speed = $("#ptz-speed").value.trim();
++    if (!/^([1-9]|10)$/.test(speed)) {
++      if (typeof showAlert === "function")
++        showAlert("warning", "Speed is a whole number from 1 to 10.", 4000);
++      return;
++    }
++    const btn = $("#ptz-save");
++    btn.disabled = true;
++    try {
++      const status = await call({ a: "settings", mode, speed });
++      const reload = status.preview_control_mode !== settings.preview_control_mode;
++      settings = status;
++      if (typeof showAlert === "function")
++        showAlert("success", "PTZ settings saved.", 4000);
++      bootstrap.Modal.getInstance($("#ptzModal")).hide();
++      // The overlay binds hold or step handlers once, at load.
++      if (reload) window.location.reload();
++    } catch (err) {
++      report(err);
++    } finally {
++      btn.disabled = false;
++    }
++  }
++
++  // -- bootstrap -----------------------------------------------------------
++  async function init() {
++    const uiConfig = window.thinginoUIConfig || {};
++    if (!uiConfig.device || uiConfig.device.ptz !== true) return;
++
++    try {
++      settings = await call({ a: "status" });
++    } catch (err) {
++      console.error("PTZ: lensd status unavailable", err);
++    }
++
++    $("#motor-overlay").style.display = "";
++    $("#lens-overlay").style.display = "";
++    const bind = settings.preview_control_mode === "step" ? bindStep : bindHold;
++    $$(".jst a.s, #lens-overlay [data-lens]").forEach(bind);
++    $(".jst a.b").title = "Home";
++    $(".jst a.b").addEventListener("click", () => send({ a: "home" }));
++
++    document.body.insertAdjacentHTML("beforeend", MODAL_HTML);
++    const host = document.querySelector(".preview-header-actions") || $("#frame");
++    const btn = document.createElement("button");
++    btn.type = "button";
++    btn.className = "btn btn-outline-secondary";
++    btn.id = "preview-ptz";
++    btn.title = "PTZ settings";
++    btn.innerHTML = '<i class="bi bi-arrows-move"></i> PTZ';
++    host.appendChild(btn);
++
++    btn.addEventListener("click", async () => {
++      try {
++        showStatus(await call({ a: "status" }));
++      } catch (err) {
++        report(err);
++      }
++      await refreshPresets();
++      new bootstrap.Modal($("#ptzModal")).show();
++    });
++    $("#ptz-save").addEventListener("click", saveSettings);
++    $("#ptz-home-go").addEventListener("click", () => send({ a: "home" }));
++    $("#ptz-home-set").addEventListener("click", async () => {
++      if ((await send({ a: "home_set" })) && typeof showAlert === "function")
++        showAlert("success", "Home set to the current position.", 3000);
++    });
++    $("#ptz-preset-save").addEventListener("click", async () => {
++      const name = $("#ptz-preset-name").value.trim();
++      if (!name) {
++        if (typeof showAlert === "function")
++          showAlert("warning", "Enter a description for the preset first.", 3000);
++        return;
++      }
++      await presetAction({ a: "save", name }, "Preset saved.");
++      $("#ptz-preset-name").value = "";
++    });
++  }
++
++  if (document.readyState === "loading") {
++    document.addEventListener("DOMContentLoaded", init);
++  } else {
++    init();
++  }
++})();
+diff --git a/package/thingino-lensd/files/www/x/json-lensd.cgi b/package/thingino-lensd/files/www/x/json-lensd.cgi
+new file mode 100755
+index 000000000..91d44dca7
+--- /dev/null
++++ b/package/thingino-lensd/files/www/x/json-lensd.cgi
+@@ -0,0 +1,210 @@
++#!/bin/sh
++# shellcheck disable=SC1091,SC3043
++# json-lensd.cgi -- the web UI's PTZ calls, passed to lensctl (the JL12D2's
++# Pelco-D lens/PTZ board, which lensd drives).
++#
++#   a=move&d=<dir>[&s=1-10][&ms=N]  dir: up down left right up_left up_right
++#                                         down_left down_right
++#   a=zoom&d=in|out[&ms=N]   a=focus&d=near|far[&ms=N]   a=stop
++#   a=status
++#   a=presets   a=goto&n=N   a=save[&n=N]&name=..   a=rename&n=N&name=..
++#   a=clear&n=N   a=home   a=home_set
++#   a=settings[&mode=step|continuous][&speed=1-10]
++#
++# A move without ms= runs until a=stop or lensd's 30 s cap; the preview
++# repeats a held move with ms=, which only pushes lensd's deadline out.
++# Answers {"code":200,"result":"success","message":...} like json-motor.cgi.
++
++. /var/www/x/auth.sh
++require_auth
++
++CONFIG=/etc/thingino.json
++LENSCTL=/usr/sbin/lensctl
++# lensctl's preset slots (board presets 1-31; board preset 32 is home)
++SLOTS=31
++
++json_header() {
++	printf 'Content-Type: application/json\r\n'
++	printf 'Cache-Control: no-store\r\n'
++	printf 'Connection: close\r\n'
++	printf '\r\n'
++}
++
++json_error() {
++	printf 'Status: 412 Precondition Failed\r\n'
++	json_header
++	printf '{"error":{"code":412,"message":"%s"}}\n' "$1"
++	exit 0
++}
++
++json_ok() {
++	printf 'Status: 200 OK\r\n'
++	json_header
++	case "$1" in
++	"{"* | "["*) printf '{"code":200,"result":"success","message":%s}\n' "$1" ;;
++	*) printf '{"code":200,"result":"success","message":"%s"}\n' "$1" ;;
++	esac
++	exit 0
++}
++
++json_escape() {
++	printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
++}
++
++# One query parameter, URL-decoded. Nothing from the query is eval'd.
++param() {
++	local v
++	v=$(printf '%s' "$QUERY_STRING" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n 1)
++	printf '%b' "$(printf '%s' "$v" | sed 's/+/ /g; s/%\([0-9A-Fa-f][0-9A-Fa-f]\)/\\x\1/g')"
++}
++
++number() {
++	case "$1" in
++	'' | *[!0-9]*) return 1 ;;
++	esac
++}
++
++# Preset names go to lensctl's names file as "<slot>,<name>": keep them on
++# one line and free of the separator.
++clean_name() {
++	printf '%s' "$1" | tr -d '\r\n,' | cut -c1-64
++}
++
++setting() {
++	local v
++	v=$(jct "$CONFIG" get "lensd.$1" 2>/dev/null)
++	echo "${v:-$2}"
++}
++
++# The top pan/tilt speed: the joystick's rim, and every step move.
++speed=$(setting speed 10)
++mode=$(setting preview_control_mode continuous)
++
++emit_status() {
++	local st moving motion zoom zoom_step
++	st=$($LENSCTL status 2>/dev/null)
++	moving=$(echo "$st" | sed -n 's/^moving=//p')
++	motion=$(echo "$st" | sed -n 's/^motion=//p')
++	zoom=$(echo "$st" | sed -n 's/^zoom=//p')
++	zoom_step=$(echo "$st" | sed -n 's/^zoom_step=//p')
++	json_ok "{\"moving\":${moving:-0},\"motion\":\"${motion:-none}\",\"zoom\":${zoom:--1},\"zoom_step\":${zoom_step:--1},\"speed\":$speed,\"preview_control_mode\":\"$mode\"}"
++}
++
++emit_presets() {
++	local out="" sep="" n name
++	while IFS=, read -r n _x _y name; do
++		number "$n" || continue
++		out="$out$sep{\"id\":$n,\"description\":\"$(json_escape "$name")\"}"
++		sep=","
++	done <<EOF
++$($LENSCTL presets 2>/dev/null)
++EOF
++	json_ok "{\"presets\":[$out]}"
++}
++
++# The lowest slot without a name: lensctl keeps one name per stored preset.
++free_slot() {
++	local i=0 used
++	used=$($LENSCTL presets 2>/dev/null | cut -d, -f1)
++	while [ $i -lt $SLOTS ]; do
++		echo "$used" | grep -qx "$i" || { echo $i; return 0; }
++		i=$((i + 1))
++	done
++	return 1
++}
++
++a=$(param a)
++d=$(param d)
++ms=$(param ms)
++[ -n "$ms" ] && { number "$ms" || json_error "bad-ms"; }
++
++case "$a" in
++move)
++	case "$d" in
++	up | down | left | right | up_left | up_right | down_left | down_right) ;;
++	*) json_error "bad-direction" ;;
++	esac
++	s=$(param s)
++	[ -n "$s" ] || s=$speed
++	number "$s" && [ "$s" -ge 1 ] && [ "$s" -le 10 ] || json_error "bad-speed"
++	$LENSCTL "$d" "$s" ${ms:+ms=$ms} >/dev/null || json_error "lensd-not-running"
++	emit_status
++	;;
++zoom | focus)
++	case "$a$d" in
++	zoomin | zoomout | focusnear | focusfar) ;;
++	*) json_error "bad-direction" ;;
++	esac
++	$LENSCTL "${a}_$d" ${ms:+ms=$ms} >/dev/null || json_error "lensd-not-running"
++	emit_status
++	;;
++stop)
++	$LENSCTL stop >/dev/null || json_error "lensd-not-running"
++	emit_status
++	;;
++status)
++	emit_status
++	;;
++presets)
++	emit_presets
++	;;
++goto | clear)
++	n=$(param n)
++	number "$n" && [ "$n" -lt $SLOTS ] || json_error "bad-preset"
++	if [ "$a" = goto ]; then
++		$LENSCTL preset_goto "$n" >/dev/null || json_error "lensd-not-running"
++	else
++		$LENSCTL preset_clear "$n" >/dev/null || json_error "lensd-not-running"
++	fi
++	emit_presets
++	;;
++save | rename)
++	n=$(param n)
++	name=$(clean_name "$(param name)")
++	[ -n "$name" ] || json_error "preset-name-required"
++	if [ -z "$n" ] && [ "$a" = save ]; then
++		n=$(free_slot) || json_error "no-free-preset-slot"
++	fi
++	number "$n" && [ "$n" -lt $SLOTS ] || json_error "bad-preset"
++	if [ "$a" = save ]; then
++		$LENSCTL preset_set "$n" "$name" >/dev/null || json_error "lensd-not-running"
++	else
++		$LENSCTL preset_rename "$n" "$name" >/dev/null || json_error "preset-not-found"
++	fi
++	emit_presets
++	;;
++home)
++	$LENSCTL home >/dev/null 2>&1
++	case $? in
++	0) ;;
++	2) json_error "home-not-set" ;;
++	*) json_error "lensd-not-running" ;;
++	esac
++	emit_status
++	;;
++home_set)
++	$LENSCTL home_set >/dev/null || json_error "lensd-not-running"
++	emit_status
++	;;
++settings)
++	new_mode=$(param mode)
++	new_speed=$(param speed)
++	case "$new_mode" in
++	'') ;;
++	step | continuous)
++		jct "$CONFIG" set lensd.preview_control_mode "$new_mode" >/dev/null 2>&1
++		mode=$new_mode
++		;;
++	*) json_error "bad-mode" ;;
++	esac
++	if [ -n "$new_speed" ]; then
++		number "$new_speed" && [ "$new_speed" -ge 1 ] && [ "$new_speed" -le 10 ] || json_error "bad-speed"
++		jct "$CONFIG" set lensd.speed "$new_speed" >/dev/null 2>&1
++		speed=$new_speed
++	fi
++	emit_status
++	;;
++*)
++	json_error "unknown-action"
++	;;
++esac

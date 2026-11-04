@@ -1,0 +1,525 @@
+From 90c17d364de7fbf9f62a6cdce6710955faf364d1 Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 12:55:57 -0400
+Subject: [PATCH 4/6] infinity6c: map upstream raptor's 0..255 image knobs onto
+ native units
+
+Upstream rvd, raptorctl and Thingino's web UI speak raptor's Ingenic scale for
+the image knobs: 0..255, with 128 meaning "default". rvd pushes 128 to every
+knob at start. John Chia's backend speaks each module's own units, and reports
+them through hal_isp_get_knob_caps:
+- brightness/contrast/saturation: 0..100
+- DRC, defog: 0..255 from 0
+- temper: 0..127 around the tuning's value
+- ae_comp: signed EV steps
+
+Unmapped, the start-up 128 was rejected by the colour, temper and ae_comp
+knobs, and pinned DRC and defog to manual half strength, overriding the
+tuning's per-gain curves on every boot.
+
+i6c_upstream_compat.c wraps the 15 knob ops. Each asks for the knob's caps,
+maps the value, and calls the native op unchanged:
+- 128 leaves the tuning alone: auto, or the neutral for ae_comp, which has
+  no auto.
+- The upper half maps onto (neutral, max].
+- Where 128 is auto, the lower half maps onto [min, neutral], so "manual at
+  neutral" stays distinct from auto. That is DRC/defog "off"; reading it
+  back as 128 would hand WDR back to the tuning when saved.
+- Getters invert the map.
+
+This replaces the probe's clamping getters. tests/t_knob_map_i6c.c is a host
+test for five caps profiles: ends, 128, monotonic halves, read-back, and
+idempotent round trips.
+
+Also ignore the .build-config stamp.
+---
+ .gitignore                           |   1 +
+ mk/sigmastar.mk                      |   4 +-
+ src/infinity6c/hal_common.c          |  40 ++++------
+ src/infinity6c/hal_isp.c             |   8 --
+ src/infinity6c/i6c_upstream_compat.c |  98 +++++++++++++++++++++++
+ src/infinity6c/i6c_upstream_compat.h | 115 +++++++++++++++++++++++----
+ tests/t_knob_map_i6c.c               | 107 +++++++++++++++++++++++++
+ 7 files changed, 326 insertions(+), 47 deletions(-)
+ create mode 100644 src/infinity6c/i6c_upstream_compat.c
+ create mode 100644 tests/t_knob_map_i6c.c
+
+diff --git a/.gitignore b/.gitignore
+index bebcdca..e9fc49b 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,3 +1,4 @@
+ *.o
+ *.a
+ *.d
++.build-config
+diff --git a/mk/sigmastar.mk b/mk/sigmastar.mk
+index f371903..133c58c 100644
+--- a/mk/sigmastar.mk
++++ b/mk/sigmastar.mk
+@@ -55,11 +55,13 @@ HAL_COMMON_SRC := $(BACKEND_DIR)/hal_common.c
+ 
+ ifeq ($(PLATFORM),INFINITY6C)
+ # The capture and encode path, in datapath order, then OSD and the ISP tuning
+-# ops. hal_gpio is vendor-neutral.
++# ops, then the upstream-interface knob map (empty against John Chia's
++# interface). hal_gpio is vendor-neutral.
+ VIDEO_SRCS := $(BACKEND_DIR)/hal_framesource.c \
+               $(BACKEND_DIR)/hal_encoder.c \
+               $(BACKEND_DIR)/hal_isp.c \
+               $(BACKEND_DIR)/hal_osd.c \
++              $(BACKEND_DIR)/i6c_upstream_compat.c \
+               src/hal_gpio.c
+ 
+ # MI 3.0 audio input. Capture only, and no src/hal_dmic.c counterpart: the
+diff --git a/src/infinity6c/hal_common.c b/src/infinity6c/hal_common.c
+index f458ddd..66cac5e 100644
+--- a/src/infinity6c/hal_common.c
++++ b/src/infinity6c/hal_common.c
+@@ -618,14 +618,6 @@ static int hal_sys_rebase_timestamp(void *ctx, int64_t base)
+  * resolves to RSS_ERR_NOTSUP through RSS_HAL_CALL.
+  * ================================================================ */
+ 
+-#ifdef I6C_UPSTREAM_HAL_IFACE
+-I6C_U8_GETTER_DECL(hal_isp_get_brightness)
+-I6C_U8_GETTER_DECL(hal_isp_get_contrast)
+-I6C_U8_GETTER_DECL(hal_isp_get_saturation)
+-I6C_U8_GETTER_DECL(hal_isp_get_drc_strength)
+-I6C_U8_GETTER_DECL(hal_isp_get_temper_strength)
+-I6C_U8_GETTER_DECL(hal_isp_get_defog_strength)
+-#endif
+ static const rss_hal_ops_t g_ops = {
+     .init = hal_init,
+     .deinit = hal_deinit,
+@@ -740,15 +732,17 @@ static const rss_hal_ops_t g_ops = {
+      * not because the objection was overruled. See THE COLOUR TRANSFORM in
+      * hal_isp.c.
+      */
+-    .isp_set_brightness = hal_isp_set_brightness,
+-    .isp_get_brightness = I6C_GETTER(hal_isp_get_brightness),
++    /* I6C_UP: through the knob scale map on the upstream interface; see
++     * i6c_upstream_compat.h. The bare op on John Chia's. */
++    .isp_set_brightness = I6C_UP(hal_isp_set_brightness),
++    .isp_get_brightness = I6C_UP(hal_isp_get_brightness),
+ #ifndef I6C_UPSTREAM_HAL_IFACE
+     .isp_get_knob_caps = hal_isp_get_knob_caps,
+ #endif
+-    .isp_set_contrast = hal_isp_set_contrast,
+-    .isp_get_contrast = I6C_GETTER(hal_isp_get_contrast),
+-    .isp_set_saturation = hal_isp_set_saturation,
+-    .isp_get_saturation = I6C_GETTER(hal_isp_get_saturation),
++    .isp_set_contrast = I6C_UP(hal_isp_set_contrast),
++    .isp_get_contrast = I6C_UP(hal_isp_get_contrast),
++    .isp_set_saturation = I6C_UP(hal_isp_set_saturation),
++    .isp_get_saturation = I6C_UP(hal_isp_get_saturation),
+     /*
+      * Sharpness is absent, and what costs too much is not the per-gain curve
+      * that DRC below pays -- it is the rest of the module. Measured on an
+@@ -767,8 +761,8 @@ static const rss_hal_ops_t g_ops = {
+      * has offered it this way for years. Asking for auto by name hands the curve
+      * back.
+      */
+-    .isp_set_drc_strength = hal_isp_set_drc_strength,
+-    .isp_get_drc_strength = I6C_GETTER(hal_isp_get_drc_strength),
++    .isp_set_drc_strength = I6C_UP(hal_isp_set_drc_strength),
++    .isp_get_drc_strength = I6C_UP(hal_isp_get_drc_strength),
+     /*
+      * Temper is NR3D's u8TfStrY, and it pays none of DRC's cost: the value goes
+      * into all sixteen gain entries rather than into stManual, so the module
+@@ -776,8 +770,8 @@ static const rss_hal_ops_t g_ops = {
+      * by-luma tables, which is where this tuning's work actually is -- stays in
+      * use. See the IQ_GAINRUN row in hal_isp.c.
+      */
+-    .isp_set_temper_strength = hal_isp_set_temper_strength,
+-    .isp_get_temper_strength = I6C_GETTER(hal_isp_get_temper_strength),
++    .isp_set_temper_strength = I6C_UP(hal_isp_set_temper_strength),
++    .isp_get_temper_strength = I6C_UP(hal_isp_get_temper_strength),
+     /*
+      * No isp_{set,get}_sinter_strength: NrLumaAdv's blend weight is already at
+      * the tuning's maximum on every sensor here, so the knob had no range to
+@@ -785,12 +779,12 @@ static const rss_hal_ops_t g_ops = {
+      * RSS_HAL_CALL answers RSS_ERR_NOTSUP and get-isp-caps stops listing it.
+      */
+     .isp_set_defog = hal_isp_set_defog,
+-    .isp_set_defog_strength = hal_isp_set_defog_strength,
++    .isp_set_defog_strength = I6C_UP(hal_isp_set_defog_strength),
+     /* The one rvd's [image] block calls; the plain setter serves the ctrl API. */
+-    .isp_set_defog_strength_adv = hal_isp_set_defog_strength_adv,
+-    .isp_get_defog_strength = I6C_GETTER(hal_isp_get_defog_strength),
+-    .isp_set_ae_comp = hal_isp_set_ae_comp,
+-    .isp_get_ae_comp = hal_isp_get_ae_comp,
++    .isp_set_defog_strength_adv = I6C_UP(hal_isp_set_defog_strength_adv),
++    .isp_get_defog_strength = I6C_UP(hal_isp_get_defog_strength),
++    .isp_set_ae_comp = I6C_UP(hal_isp_set_ae_comp),
++    .isp_get_ae_comp = I6C_UP(hal_isp_get_ae_comp),
+     .isp_set_antiflicker = hal_isp_set_antiflicker,
+     .isp_get_antiflicker = hal_isp_get_antiflicker,
+ 
+diff --git a/src/infinity6c/hal_isp.c b/src/infinity6c/hal_isp.c
+index 1399573..0a86af2 100644
+--- a/src/infinity6c/hal_isp.c
++++ b/src/infinity6c/hal_isp.c
+@@ -2805,11 +2805,3 @@ int hal_isp_get_sensor_fps(void *ctx, uint32_t *fps_num, uint32_t *fps_den)
+     return RSS_OK;
+ }
+ 
+-#ifdef I6C_UPSTREAM_HAL_IFACE
+-I6C_U8_GETTER_DEF(hal_isp_get_brightness)
+-I6C_U8_GETTER_DEF(hal_isp_get_contrast)
+-I6C_U8_GETTER_DEF(hal_isp_get_saturation)
+-I6C_U8_GETTER_DEF(hal_isp_get_drc_strength)
+-I6C_U8_GETTER_DEF(hal_isp_get_temper_strength)
+-I6C_U8_GETTER_DEF(hal_isp_get_defog_strength)
+-#endif
+diff --git a/src/infinity6c/i6c_upstream_compat.c b/src/infinity6c/i6c_upstream_compat.c
+new file mode 100644
+index 0000000..478d2f6
+--- /dev/null
++++ b/src/infinity6c/i6c_upstream_compat.c
+@@ -0,0 +1,98 @@
++/*
++ * infinity6c/i6c_upstream_compat.c -- the knob scale map's ops.
++ *
++ * Each op asks hal_isp_get_knob_caps for the knob's range, maps through
++ * i6c_knob_to_native / i6c_knob_from_native (i6c_upstream_compat.h says why
++ * and how), and calls John Chia's native op unchanged. Asking for the caps on
++ * every call, rather than caching them, is what lets temper's and ae_comp's
++ * neutral follow the tuning once the first frame has read it.
++ *
++ * Compiles to nothing against John's interface, where rvd already speaks the
++ * native units.
++ */
++#include "infinity6c_state.h"
++
++#ifdef I6C_UPSTREAM_HAL_IFACE
++
++int hal_isp_get_knob_caps(void *ctx, const char *name, rss_isp_knob_t *caps);
++int hal_isp_set_brightness(void *ctx, int val);
++int hal_isp_get_brightness(void *ctx, int *val);
++int hal_isp_set_contrast(void *ctx, int val);
++int hal_isp_get_contrast(void *ctx, int *val);
++int hal_isp_set_saturation(void *ctx, int val);
++int hal_isp_get_saturation(void *ctx, int *val);
++int hal_isp_set_drc_strength(void *ctx, int val);
++int hal_isp_get_drc_strength(void *ctx, int *val);
++int hal_isp_set_temper_strength(void *ctx, int val);
++int hal_isp_get_temper_strength(void *ctx, int *val);
++int hal_isp_set_defog_strength(void *ctx, int val);
++int hal_isp_get_defog_strength(void *ctx, int *val);
++int hal_isp_set_ae_comp(void *ctx, int val);
++int hal_isp_get_ae_comp(void *ctx, int *val);
++
++static int set_mapped(void *ctx, const char *key, int val, int (*set)(void *, int))
++{
++    rss_isp_knob_t caps;
++    int ret = hal_isp_get_knob_caps(ctx, key, &caps);
++
++    if (ret != RSS_OK)
++        return ret;
++    return set(ctx, i6c_knob_to_native(val, &caps));
++}
++
++static int get_mapped(void *ctx, const char *key, int *val, int (*get)(void *, int *))
++{
++    rss_isp_knob_t caps;
++    int native, ret;
++
++    if (!val)
++        return RSS_ERR_INVAL;
++    ret = hal_isp_get_knob_caps(ctx, key, &caps);
++    if (ret == RSS_OK)
++        ret = get(ctx, &native);
++    if (ret == RSS_OK)
++        *val = i6c_knob_from_native(native, &caps);
++    return ret;
++}
++
++/* One knob: its caps key, and the native setter/getter pair it wraps. */
++#define I6C_MAPPED_KNOB(op, key)                                                 \
++    int hal_isp_set_##op##_up(void *ctx, int val)                                \
++    {                                                                            \
++        return set_mapped(ctx, key, val, hal_isp_set_##op);                      \
++    }                                                                            \
++    int hal_isp_get_##op##_up(void *ctx, uint8_t *val)                           \
++    {                                                                            \
++        int v = 0, ret = val ? get_mapped(ctx, key, &v, hal_isp_get_##op) : RSS_ERR_INVAL; \
++        if (ret == RSS_OK)                                                       \
++            *val = (uint8_t)v;                                                   \
++        return ret;                                                              \
++    }
++
++I6C_MAPPED_KNOB(brightness, "brightness")
++I6C_MAPPED_KNOB(contrast, "contrast")
++I6C_MAPPED_KNOB(saturation, "saturation")
++I6C_MAPPED_KNOB(drc_strength, "drc_strength")
++I6C_MAPPED_KNOB(temper_strength, "temper")
++I6C_MAPPED_KNOB(defog_strength, "defog_strength")
++
++/* rvd's [image] block reaches defog through the _adv op, passing a uint8_t *. */
++int hal_isp_set_defog_strength_adv_up(void *ctx, const void *defog_attr)
++{
++    if (!defog_attr)
++        return RSS_ERR_INVAL;
++    return hal_isp_set_defog_strength_up(ctx, *(const uint8_t *)defog_attr);
++}
++
++/* ae_comp has no auto; 128 lands on its neutral (the tuning's EV, once read). */
++int hal_isp_set_ae_comp_up(void *ctx, int val)
++{
++    return set_mapped(ctx, "ae_comp", val, hal_isp_set_ae_comp);
++}
++
++int hal_isp_get_ae_comp_up(void *ctx, int *val)
++{
++    return get_mapped(ctx, "ae_comp", val, hal_isp_get_ae_comp);
++}
++
++#endif /* I6C_UPSTREAM_HAL_IFACE */
+diff --git a/src/infinity6c/i6c_upstream_compat.h b/src/infinity6c/i6c_upstream_compat.h
+index b170dbb..1cbdc9e 100644
+--- a/src/infinity6c/i6c_upstream_compat.h
++++ b/src/infinity6c/i6c_upstream_compat.h
+@@ -1,11 +1,19 @@
+-/* Build the infinity6c backend against gtxaspec raptor-hal's interface.
+- * The fork's raptor_hal.h defines RSS_ISP_AUTO; upstream's does not, so its
+- * absence selects this compat layer. */
++/*
++ * infinity6c/i6c_upstream_compat.h -- build the infinity6c backend against
++ * gtxaspec raptor-hal's interface (this fork), not John Chia's.
++ *
++ * His raptor_hal.h defines RSS_ISP_AUTO; upstream's does not, so its absence
++ * selects I6C_UPSTREAM_HAL_IFACE and the adaptations below. Everything here is
++ * pure -- no HAL or MI dependencies -- so tests/t_knob_map_i6c.c can include it
++ * on the build host.
++ */
+ #ifndef I6C_UPSTREAM_COMPAT_H
+ #define I6C_UPSTREAM_COMPAT_H
++
+ #include <limits.h>
+ #include <stdbool.h>
+ #include <stdint.h>
++
+ #ifndef RSS_ISP_AUTO
+ #define I6C_UPSTREAM_HAL_IFACE 1
+ #define RSS_ISP_AUTO INT_MIN
+@@ -13,18 +21,95 @@ typedef struct {
+     int min, max, neutral;
+     bool has_auto, enabled;
+ } rss_isp_knob_t;
+-/* upstream getters take uint8_t*; wrap the native-int ones */
+-#define I6C_U8_GETTER_DECL(fn) int fn##_u8(void *ctx, uint8_t *val);
+-#define I6C_U8_GETTER_DEF(fn)                                                  \
+-    int fn##_u8(void *ctx, uint8_t *val)                                       \
+-    {                                                                          \
+-        int v = 0, r = fn(ctx, &v);                                            \
+-        if (r == 0)                                                            \
+-            *val = (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);                   \
+-        return r;                                                              \
++
++/*
++ * THE KNOB SCALE MAP
++ *
++ * Upstream rvd, raptorctl and Thingino's web UI speak raptor's Ingenic scale for
++ * the image knobs: 0..255, with 128 meaning "default". rvd pushes 128 to every
++ * knob at start whether or not the config names it. This backend speaks each
++ * module's own units and reports them through hal_isp_get_knob_caps:
++ * brightness/contrast/saturation 0..100 around 50, DRC and defog 0..255 from 0,
++ * temper 0..127 around the tuning's own value, ae_comp in signed EV steps.
++ *
++ * Unmapped, that start-up 128 is rejected by the knobs whose range stops below
++ * it and pins DRC and defog to manual half strength, overriding the tuning's
++ * per-gain curves on every boot.
++ *
++ * So 128 means "leave the tuning alone": auto where the module has one, its
++ * neutral where it does not (ae_comp). The upper half maps linearly onto
++ * (neutral, max], rounding away from neutral so 129 already moves the knob.
++ *
++ * The lower half depends on whether 128 is auto. Where it is, the lower half
++ * covers [min, neutral] with 127 landing on neutral: "manual at neutral" is a
++ * real setting distinct from auto, and on DRC and defog, whose neutral is 0,
++ * it is "off". If it read back as 128, saving that unchanged would quietly
++ * hand WDR back to the tuning. Where 128 is the neutral itself, the lower half
++ * covers [min, neutral).
++ *
++ * The getters invert the map, so a slider reads back to a value that sets the
++ * same native value (tests/t_knob_map_i6c.c pins this for every profile).
++ */
++static inline int i6c_knob_to_native(int v, const rss_isp_knob_t *c)
++{
++    if (v == 128)
++        return c->has_auto ? RSS_ISP_AUTO : c->neutral;
++    if (v < 0)
++        v = 0;
++    if (v > 255)
++        v = 255;
++    if (v < 128) /* floor; 127 reaches neutral only where 128 is auto */
++        return c->min + (c->neutral - c->min) * v / (c->has_auto ? 127 : 128);
++    /* ceil: leaves neutral at 129, reaches max at 255 */
++    return c->neutral + ((c->max - c->neutral) * (v - 128) + 126) / 127;
++}
++
++static inline int i6c_knob_from_native(int n, const rss_isp_knob_t *c)
++{
++    int span, den, v;
++
++    if (n == RSS_ISP_AUTO)
++        return 128;
++    if (n == c->neutral && !c->has_auto)
++        return 128;
++    if (n <= c->neutral) {
++        span = c->neutral - c->min;
++        if (span <= 0 || n <= c->min)
++            return 0;
++        den = c->has_auto ? 127 : 128;
++        v = ((n - c->min) * den + span - 1) / span; /* inverse of the floor */
++        return v > 127 ? 127 : v;
+     }
+-#define I6C_GETTER(fn) fn##_u8
++    span = c->max - c->neutral;
++    if (span <= 0 || n >= c->max)
++        return 255;
++    v = 128 + (n - c->neutral) * 127 / span; /* inverse of the ceil */
++    return v < 129 ? 129 : v;
++}
++
++/*
++ * The ops hal_common.c publishes for the mapped knobs. Defined in
++ * i6c_upstream_compat.c; the getters take upstream's uint8_t* except ae_comp,
++ * which is int* on both interfaces.
++ */
++int hal_isp_set_brightness_up(void *ctx, int val);
++int hal_isp_get_brightness_up(void *ctx, uint8_t *val);
++int hal_isp_set_contrast_up(void *ctx, int val);
++int hal_isp_get_contrast_up(void *ctx, uint8_t *val);
++int hal_isp_set_saturation_up(void *ctx, int val);
++int hal_isp_get_saturation_up(void *ctx, uint8_t *val);
++int hal_isp_set_drc_strength_up(void *ctx, int val);
++int hal_isp_get_drc_strength_up(void *ctx, uint8_t *val);
++int hal_isp_set_temper_strength_up(void *ctx, int val);
++int hal_isp_get_temper_strength_up(void *ctx, uint8_t *val);
++int hal_isp_set_defog_strength_up(void *ctx, int val);
++int hal_isp_set_defog_strength_adv_up(void *ctx, const void *defog_attr);
++int hal_isp_get_defog_strength_up(void *ctx, uint8_t *val);
++int hal_isp_set_ae_comp_up(void *ctx, int val);
++int hal_isp_get_ae_comp_up(void *ctx, int *val);
++#define I6C_UP(fn) fn##_up
+ #else
+-#define I6C_GETTER(fn) fn
+-#endif
++#define I6C_UP(fn) fn
+ #endif
++
++#endif /* I6C_UPSTREAM_COMPAT_H */
+diff --git a/tests/t_knob_map_i6c.c b/tests/t_knob_map_i6c.c
+new file mode 100644
+index 0000000..183e00f
+--- /dev/null
++++ b/tests/t_knob_map_i6c.c
+@@ -0,0 +1,107 @@
++/*
++ * t_knob_map_i6c.c -- host test for the infinity6c knob scale map
++ * (src/infinity6c/i6c_upstream_compat.h). No HAL, no MI, no target:
++ *
++ *   cc -std=c11 -Wall -Wextra -Werror -Isrc/infinity6c -o /tmp/t_knob_map_i6c \
++ *      tests/t_knob_map_i6c.c && /tmp/t_knob_map_i6c
++ *
++ * The profiles are the ranges hal_isp_get_knob_caps reports on this backend.
++ */
++#include <stdio.h>
++
++#include "i6c_upstream_compat.h"
++
++static int failures;
++
++#define CHECK(cond, ...)                                                        \
++    do {                                                                        \
++        if (!(cond)) {                                                          \
++            printf("FAIL %s:%d: ", __FILE__, __LINE__);                         \
++            printf(__VA_ARGS__);                                                \
++            printf("\n");                                                       \
++            failures++;                                                         \
++        }                                                                       \
++    } while (0)
++
++static void check_profile(const char *name, rss_isp_knob_t c)
++{
++    int v, prev;
++
++    /* 128 leaves the tuning alone: auto, or the neutral where there is none. */
++    CHECK(i6c_knob_to_native(128, &c) == (c.has_auto ? RSS_ISP_AUTO : c.neutral),
++          "%s: 128 -> %d", name, i6c_knob_to_native(128, &c));
++
++    /* The ends of the scale are the ends of the range; out of range clamps. */
++    CHECK(i6c_knob_to_native(0, &c) == c.min, "%s: 0 -> %d", name, i6c_knob_to_native(0, &c));
++    CHECK(i6c_knob_to_native(255, &c) == c.max, "%s: 255 -> %d", name, i6c_knob_to_native(255, &c));
++    CHECK(i6c_knob_to_native(-7, &c) == c.min, "%s: -7 clamps", name);
++    CHECK(i6c_knob_to_native(999, &c) == c.max, "%s: 999 clamps", name);
++
++    /* Each half is monotonic and stays on its side of neutral. Where 128 is
++     * auto, the lower half reaches neutral at 127 ("manual at neutral"). */
++    prev = c.min;
++    for (v = 0; v < 128; v++) {
++        int n = i6c_knob_to_native(v, &c);
++
++        CHECK(n >= prev && n >= c.min, "%s: lower half not monotonic at %d", name, v);
++        if (c.has_auto)
++            CHECK(n <= c.neutral, "%s: %d -> %d passes neutral", name, v, n);
++        else
++            CHECK(c.neutral == c.min || n < c.neutral, "%s: %d -> %d reaches neutral", name, v, n);
++        prev = n;
++    }
++    if (c.has_auto)
++        CHECK(i6c_knob_to_native(127, &c) == c.neutral, "%s: 127 -> %d, not neutral", name,
++              i6c_knob_to_native(127, &c));
++    prev = c.neutral;
++    for (v = 129; v < 256; v++) {
++        int n = i6c_knob_to_native(v, &c);
++
++        CHECK(n >= prev && n <= c.max, "%s: upper half not monotonic at %d", name, v);
++        CHECK(c.max == c.neutral || n > c.neutral, "%s: %d -> %d stays on neutral", name, v, n);
++        prev = n;
++    }
++
++    /* Read-back: auto reads 128, the ends 0 and 255. A manual neutral reads
++     * 128 only where 128 IS the neutral; where 128 is auto it must not, or
++     * saving it back would hand the module to the tuning (DRC "off" -> auto). */
++    CHECK(i6c_knob_from_native(RSS_ISP_AUTO, &c) == 128, "%s: auto reads %d", name,
++          i6c_knob_from_native(RSS_ISP_AUTO, &c));
++    if (c.has_auto)
++        CHECK(i6c_knob_from_native(c.neutral, &c) != 128 &&
++                  i6c_knob_to_native(i6c_knob_from_native(c.neutral, &c), &c) == c.neutral,
++              "%s: manual neutral reads %d", name, i6c_knob_from_native(c.neutral, &c));
++    else
++        CHECK(i6c_knob_from_native(c.neutral, &c) == 128, "%s: neutral reads back", name);
++    CHECK(c.min == c.neutral || i6c_knob_from_native(c.min, &c) == 0, "%s: min reads %d", name,
++          i6c_knob_from_native(c.min, &c));
++    CHECK(i6c_knob_from_native(c.max, &c) == 255, "%s: max reads %d", name,
++          i6c_knob_from_native(c.max, &c));
++
++    /* Round trip: a slider reads back to a value that sets the same native. */
++    for (v = 0; v < 256; v++) {
++        int n = i6c_knob_to_native(v, &c);
++        int r = i6c_knob_from_native(n, &c);
++
++        CHECK(r >= 0 && r <= 255, "%s: %d reads back out of range (%d)", name, v, r);
++        CHECK(i6c_knob_to_native(r, &c) == n, "%s: %d -> %d -> %d -> %d", name, v, n, r,
++              i6c_knob_to_native(r, &c));
++    }
++}
++
++int main(void)
++{
++    /* brightness / contrast / saturation: 0..100 around 50, auto */
++    check_profile("colour", (rss_isp_knob_t){0, 100, 50, true, true});
++    /* DRC (WDR strength) and defog: 0..255 from 0, auto */
++    check_profile("drc", (rss_isp_knob_t){0, 255, 0, true, true});
++    /* temper (NR3D TfStrY): 0..127 around the tuning's 63, auto */
++    check_profile("temper", (rss_isp_knob_t){0, 127, 63, true, true});
++    /* ae_comp: signed EV steps around 0, no auto */
++    check_profile("ae_comp", (rss_isp_knob_t){-20, 20, 0, false, true});
++    /* ae_comp with a tuning that ships a non-zero EV */
++    check_profile("ae_comp+3", (rss_isp_knob_t){-20, 20, 3, false, true});
++
++    printf("%s: %d failure(s)\n", failures ? "FAIL" : "PASS", failures);
++    return failures != 0;
++}

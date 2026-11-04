@@ -1,0 +1,261 @@
+From d912d51b65d5942d626eb4ddab5730350c6b6e71 Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 08:19:16 -0500
+Subject: [PATCH 17/21] thingino-sysupgrade: ship thingino-update, fence
+ sysupgrade; dirty build-id
+
+---
+ package/thingino-sysupgrade/files/sysupgrade  |  14 ++
+ .../thingino-sysupgrade/files/thingino-update | 173 ++++++++++++++++++
+ .../thingino-sysupgrade.mk                    |   3 +
+ scripts/rootfs_script.sh                      |   9 +-
+ 4 files changed, 197 insertions(+), 2 deletions(-)
+ create mode 100644 package/thingino-sysupgrade/files/thingino-update
+
+diff --git a/package/thingino-sysupgrade/files/sysupgrade b/package/thingino-sysupgrade/files/sysupgrade
+index 89b243a82..a3b77a74a 100644
+--- a/package/thingino-sysupgrade/files/sysupgrade
++++ b/package/thingino-sysupgrade/files/sysupgrade
+@@ -3,6 +3,20 @@
+ 
+ echo "Run as $0 $*"
+ 
++# anjoy-class (OEM U-Boot) cameras have no env/all/upgrade partition and are
++# updated with ANJOY888 images by thingino-update. Upstream sysupgrade's GitHub
++# full/bootloader flows and U-Boot env reset do not apply here and could leave a
++# non-booting unit, so redirect anything but -h to thingino-update.
++if ! grep -qE '"(env|all|upgrade)"' /proc/mtd 2>/dev/null; then
++  case " $* " in
++    *" -h "*|*" --help "*) : ;;
++    *)
++      echo "This camera uses OEM U-Boot + ANJOY888 images."
++      echo "Use:  thingino-update <image.anjoy888|URL>   (thingino-update -h)"
++      exit 1 ;;
++  esac
++fi
++
+ # Releases older that the timestamp below
+ # are not eligible for partial updates.
+ RUBICON="1768337345" # 2026-01-13
+diff --git a/package/thingino-sysupgrade/files/thingino-update b/package/thingino-sysupgrade/files/thingino-update
+new file mode 100644
+index 000000000..2777cb97e
+--- /dev/null
++++ b/package/thingino-sysupgrade/files/thingino-update
+@@ -0,0 +1,173 @@
++#!/bin/sh
++# thingino-update - update/revert an anjoy-class SigmaStar camera from the
++# camera itself, from one ANJOY888 image. Our analog of upstream Thingino's
++# `sysupgrade` "upgrade from the camera itself", adapted for OEM U-Boot.
++#
++# It writes ONLY the kernel and rootfs partitions (by name from /proc/mtd):
++#   - never touches BOOT/mtd0 (OEM U-Boot + this unit's MAC in its env sector),
++#   - never touches the data/overlay partition (your settings survive).
++# Feed it a Thingino ANJOY888 to reflash, or an OEM ANJOY888 to revert to stock
++# -- same command; the container is just a kernel section + an fs section, so it
++# doesn't care which is inside.
++#
++# It refuses a wrong-model image unless --force:
++#   - SoC: the image's kernel_vinfo (e.g. ..._377D) must match the hardware,
++#     read from `soc` (ssc377d); version_kernel in the mtd0 env is the fallback.
++#   - Model: the image's fs_vinfo model token (e.g. MCL12D2) must match this
++#     unit's factory model code, version_rootfs in the mtd0 env (MCL12D2_V100 /
++#     MCA85_V0). version_rootfs is stable across flashes -- unlike `fsversion`,
++#     which a flash restamps -- and mtd0 is never written by an update.
++# The MAC is retained for the same reason: it lives in mtd0's `ethaddr` (and/or
++# the overlay's thingino.json), neither of which an update touches.
++#
++# Unlike upstream `sysupgrade -f`, there is no bootloader write and no env reset
++# (we keep OEM U-Boot and a file-backed env). "Full" here means kernel+rootfs.
++#
++# Usage (on the camera, over ssh):
++#   thingino-update [-n] [-y] <image.anjoy888 | http://host/image.anjoy888>
++#     -n   dry run: fetch, parse, extract, size-check, then STOP (no flash)
++#     -y   skip the confirmation prompt (non-interactive)
++#
++# v1 validates the ANJOY888 header fields and section sizes. Payload CRC32 is a
++# planned follow-up (needs a tiny helper; busybox has no zlib crc32). Pair with
++# a known-good image and keep a rollback copy.
++set -u
++
++KERNEL_RAM_MAX=0x200000   # OEM bootcmd copies exactly this from 0x30000
++DRY=0; YES=0; FORCE=0
++while [ $# -gt 0 ]; do
++	case "$1" in
++		-n) DRY=1; shift ;;
++		-y) YES=1; shift ;;
++		--force) FORCE=1; shift ;;
++		-h|--help) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
++		--) shift; break ;;
++		-*) echo "unknown option: $1" >&2; exit 2 ;;
++		*) break ;;
++	esac
++done
++[ $# -eq 1 ] || { echo "usage: thingino-update [-n] [-y] <image.anjoy888|URL>" >&2; exit 2; }
++SRC="$1"
++
++die() { echo "thingino-update: $*" >&2; exit 1; }
++
++# --- obtain the image -------------------------------------------------------
++IMG=/tmp/thingino-update.anjoy888
++case "$SRC" in
++	http://*|https://*)
++		echo "[*] fetching $SRC"
++		if command -v curl >/dev/null; then curl -fsSL -o "$IMG" "$SRC" || die "download failed"
++		elif command -v wget >/dev/null; then wget -q -O "$IMG" "$SRC" || die "download failed"
++		else die "no curl/wget on this unit -- copy the image to /tmp and pass its path"; fi
++		;;
++	*)
++		[ -f "$SRC" ] || die "no such file: $SRC"
++		IMG="$SRC"
++		;;
++esac
++IMGSZ=$(wc -c < "$IMG"); IMGSZ=${IMGSZ##* }
++[ "$IMGSZ" -ge 1556 ] || die "too small to be an ANJOY888 ($IMGSZ bytes)"
++
++# --- parse the ANJOY888 header ----------------------------------------------
++# little-endian u32 at byte offset $2 of file $1 (busybox dd/od/cut/$(( )))
++le32() {
++	# This busybox `od` is the minimal build (no -A/-t/-j/-N). `od -x` prints
++	# "<addr> <w1> <w2>", each word a 16-bit little-endian value in hex, so the
++	# LE u32 = w2<<16 | w1.
++	set -- $(dd if="$1" bs=1 skip="$2" count=4 2>/dev/null | od -x | head -n1)
++	[ $# -ge 3 ] || { echo 0; return; }
++	echo $(( 0x$3 * 65536 + 0x$2 ))
++}
++
++MAGIC=$(dd if="$IMG" bs=1 count=8 2>/dev/null)
++[ "$MAGIC" = "ANJOY888" ] || die "bad magic (not an ANJOY888 image)"
++KSTART=$(le32 "$IMG" 20)     # 0x014 - always 0x614
++KSIZE=$(le32 "$IMG" 24)      # 0x018
++FSTART=$(le32 "$IMG" 288)    # 0x120
++FSIZE=$(le32 "$IMG" 292)     # 0x124
++KVER=$(dd if="$IMG" bs=1 skip=32 count=64 2>/dev/null | tr -d '\0')
++[ "$KSTART" = 1556 ] || die "unexpected kernel_start=$KSTART (want 1556/0x614)"
++[ "$KSIZE" -gt 0 ] && [ "$FSIZE" -gt 0 ] || die "zero section size in header"
++[ $(( FSTART + FSIZE )) -le "$IMGSZ" ] || die "fs section runs past end of file"
++
++# --- map the target partitions by NAME --------------------------------------
++mtd_of() { awk -v n="\"$1\"" '$NF==n{sub(/:/,"",$1);print "/dev/"$1}' /proc/mtd; }
++mtd_sz() { _h=$(awk -v n="\"$1\"" '$NF==n{print $2}' /proc/mtd); [ -n "$_h" ] && echo $(( 0x$_h )); }
++KMTD=$(mtd_of kernel);  KMTDSZ=$(mtd_sz kernel)
++RMTD=$(mtd_of rootfs);  RMTDSZ=$(mtd_sz rootfs)
++[ -n "$KMTD" ] && [ -n "$RMTD" ] || die "no kernel/rootfs partition in /proc/mtd"
++[ "$KSIZE" -le "$KMTDSZ" ] || die "kernel $KSIZE > $KMTD ($KMTDSZ)"
++[ "$FSIZE" -le "$RMTDSZ" ] || die "rootfs $FSIZE > $RMTD ($RMTDSZ)"
++[ "$KSIZE" -le $((KERNEL_RAM_MAX)) ] || die "kernel $KSIZE > $KERNEL_RAM_MAX that OEM U-Boot loads"
++
++# --- never target the bootloader (mtd0 = OEM U-Boot + the unit's MAC) --------
++BMTD=$(mtd_of BOOT)
++[ -z "$BMTD" ] || { [ "$KMTD" != "$BMTD" ] && [ "$RMTD" != "$BMTD" ]; } \
++	|| die "refusing: a target maps to BOOT/mtd0"
++
++# --- model / SoC guard (refuse a wrong-model image unless --force) ----------
++# SoC: hardware truth from `soc` (ssc377d); the image's kernel_vinfo ends in the
++#   SoC (MSTAR_I6C_LINUX_377D -> 377d). Fall back to the env version_kernel.
++# Model: the unit's factory model code is version_rootfs in the mtd0 env
++#   (MCL12D2_V100 / MCA85_V0), stable across flashes; the image's fs_vinfo
++#   starts with the same model token (MCL12D2). Fall back to the hostname.
++IMG_FVER=$(dd if="$IMG" bs=1 skip=296 count=64 2>/dev/null | tr -d '\0')
++IMG_MODEL=$(printf %s "$IMG_FVER" | cut -d_ -f1 | tr 'A-Z' 'a-z')
++IMG_SOC=$(printf %s "$KVER" | sed 's/.*_//' | tr 'A-Z' 'a-z')
++UNIT_SOC=$(soc 2>/dev/null | tr 'A-Z' 'a-z')
++UNIT_KVER=$(grep -ao 'version_kernel=[A-Za-z0-9_.-]*' /dev/mtd0 2>/dev/null | head -n1 | cut -d= -f2)
++UNIT_RVER=$(grep -ao 'version_rootfs=[A-Za-z0-9_.-]*' /dev/mtd0 2>/dev/null | head -n1 | cut -d= -f2)
++UNIT_MODEL=$(printf %s "$UNIT_RVER" | cut -d_ -f1 | tr 'A-Z' 'a-z')
++[ -n "$UNIT_MODEL" ] || UNIT_MODEL=$(hostname | cut -d- -f2)   # fallback: ing-<model>-<soc>-<id>
++if [ "$FORCE" != 1 ]; then
++	if [ -n "$UNIT_SOC" ]; then
++		case "$UNIT_SOC" in *"$IMG_SOC"*) : ;; *) die "SoC mismatch: image '$IMG_SOC' vs hardware '$UNIT_SOC' (--force to override)";; esac
++	elif [ -n "$UNIT_KVER" ] && [ "$KVER" != "$UNIT_KVER" ]; then
++		die "SoC/kernel mismatch: image '$KVER' vs unit '$UNIT_KVER' (--force to override)"
++	fi
++	[ -n "$IMG_MODEL" ]  || die "image has no fs model token (vinfo); --force to flash anyway"
++	[ -n "$UNIT_MODEL" ] || die "cannot read this unit's model; --force to flash anyway"
++	[ "$IMG_MODEL" = "$UNIT_MODEL" ] || die "MODEL mismatch: image '$IMG_MODEL' vs unit '$UNIT_MODEL' (--force to override)"
++fi
++
++# --- extract the two payloads (tail/head: no slow bs=1 copy) ----------------
++dd_k=/tmp/tu-kernel.bin; dd_r=/tmp/tu-rootfs.bin
++tail -c +$(( KSTART + 1 )) "$IMG" | head -c "$KSIZE" > "$dd_k"
++tail -c +$(( FSTART + 1 )) "$IMG" | head -c "$FSIZE" > "$dd_r"
++[ "$(wc -c < "$dd_k")" -eq "$KSIZE" ] || die "kernel extract short"
++[ "$(wc -c < "$dd_r")" -eq "$FSIZE" ] || die "rootfs extract short"
++
++echo "image : $SRC ($IMGSZ bytes)"
++echo "kernel: $KSIZE bytes -> $KMTD ($KMTDSZ)   [$KVER]"
++echo "rootfs: $FSIZE bytes -> $RMTD ($RMTDSZ)"
++echo "model : image $IMG_MODEL ($IMG_SOC)   unit $UNIT_MODEL (${UNIT_SOC:-${UNIT_KVER:-?}})"
++[ "$FORCE" = 1 ] && echo "        (--force: model/SoC checks skipped)"
++echo "kept  : BOOT/mtd0 (U-Boot + MAC) and the data/overlay partition are untouched"
++echo "md5   : kernel $(md5sum "$dd_k" | cut -d' ' -f1)  rootfs $(md5sum "$dd_r" | cut -d' ' -f1)"
++
++if [ "$DRY" = 1 ]; then
++	echo "[dry run] parsed + extracted + size-checked OK. Nothing written. Re-run without -n to flash."
++	exit 0
++fi
++
++if [ "$YES" != 1 ]; then
++	printf "About to flash %s + %s and reboot. Type yes to proceed: " "$KMTD" "$RMTD"
++	read ans; [ "$ans" = yes ] || die "aborted"
++fi
++
++# --- flash: kernel first (not mounted), then rootfs+reboot in one shell ------
++# Stop writers so nothing new execs from the rootfs once mtd2 is overwritten.
++[ -x /etc/raptor.d/pre-stop ] && /etc/raptor.d/pre-stop
++killall lensd 2>/dev/null
++/etc/init.d/S31raptor stop 2>/dev/null
++killall watchdog 2>/dev/null
++sync
++
++echo "[*] flashcp kernel -> $KMTD"
++flashcp -v "$dd_k" "$KMTD" || die "kernel flash FAILED (rootfs untouched; reflash kernel before reboot)"
++
++# rootfs is the running squashfs: flash it and reboot -f in one resident shell;
++# if reboot can't exec from the replaced fs, the watchdog builtin resets us.
++echo "[*] flashcp rootfs -> $RMTD, then reboot"
++exec sh -c "flashcp -v '$dd_r' '$RMTD' && sync && echo FLASH_OK && \
++	{ reboot -f; exec 3>/dev/watchdog; while :; do :; done; }"
+diff --git a/package/thingino-sysupgrade/thingino-sysupgrade.mk b/package/thingino-sysupgrade/thingino-sysupgrade.mk
+index aaa4700a5..d41a36148 100644
+--- a/package/thingino-sysupgrade/thingino-sysupgrade.mk
++++ b/package/thingino-sysupgrade/thingino-sysupgrade.mk
+@@ -11,6 +11,9 @@ define THINGINO_SYSUPGRADE_INSTALL_TARGET_CMDS
+ 	$(INSTALL) -D -m 0755 $(THINGINO_SYSUPGRADE_PKGDIR)/files/sysupgrade-stage2 \
+ 		$(TARGET_DIR)/usr/sbin/sysupgrade-stage2
+ 
++	$(INSTALL) -D -m 0755 $(THINGINO_SYSUPGRADE_PKGDIR)/files/thingino-update \
++		$(TARGET_DIR)/usr/sbin/thingino-update
++
+ 	$(INSTALL) -D -m 0755 $(BR2_EXTERNAL_THINGINO_PATH)/scripts/cfg-backup.sh \
+ 		$(TARGET_DIR)/usr/sbin/cfg-backup
+ endef
+diff --git a/scripts/rootfs_script.sh b/scripts/rootfs_script.sh
+index e833ba5b8..1fa0b66b4 100755
+--- a/scripts/rootfs_script.sh
++++ b/scripts/rootfs_script.sh
+@@ -26,10 +26,14 @@ fi
+ cd $BR2_EXTERNAL
+ GIT_BRANCH=$(git branch | grep '^\*' | awk '{print $2}')
+ GIT_HASH=$(git show -s --format=%H)
++# Tracked files that differ from HEAD mark the build, so an image built from a
++# dirty tree cannot pass for its commit.
++GIT_DIRTY=
++git diff --quiet HEAD -- 2>/dev/null || GIT_DIRTY="-dirty"
+ GIT_TIME=$(TZ=UTC0 git show --quiet --date='format-local:%Y-%m-%d %H:%M:%S UTC' --format="%cd")
+ BUILD_TIME="$(env -u SOURCE_DATE_EPOCH TZ=UTC date '+%Y-%m-%d %H:%M:%S UTC')"
+-BUILD_ID="${GIT_BRANCH}+${GIT_HASH:0:7}, ${BUILD_TIME}"
+-COMMIT_ID="${GIT_BRANCH}+${GIT_HASH:0:7}, ${GIT_TIME}"
++BUILD_ID="${GIT_BRANCH}+${GIT_HASH:0:7}${GIT_DIRTY}, ${BUILD_TIME}"
++COMMIT_ID="${GIT_BRANCH}+${GIT_HASH:0:7}${GIT_DIRTY}, ${GIT_TIME}"
+ cd -
+ 
+ if grep -q "^BR2_TOOLCHAIN_USES_GLIBC=y" "$BR2_CONFIG"; then
+@@ -106,6 +110,7 @@ TOOLCHAIN_TYPE=${TOOLCHAIN_TYPE}
+ TOOLCHAIN_GCC=${TOOLCHAIN_GCC}
+ SOC=${SOC_FAMILY}
+ SOC_ARCH=${SOC_ARCH}
++SOC_MODEL=${SOC_MODEL}
+ IMAGE_ID=${IMAGE_ID}
+ IMAGE_NAME=\"${IMAGE_NAME}\"
+ BUILD_ID=\"${BUILD_ID}\"

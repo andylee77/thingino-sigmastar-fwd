@@ -1,0 +1,655 @@
+From 52784a9ac800ea46acfced136b27532e9f4b782f Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 08:19:16 -0500
+Subject: [PATCH 18/21] cameras: UVision MC-A85 / Anpviz IPC-D3B83B-S
+ (yma85_ssc378_gc8613, 4K)
+
+---
+ ...nity6c-add-the-UVision-MC-A85-module.patch |  93 +++++++
+ .../cameras/yma85_ssc378_gc8613/.gitignore    |   3 +
+ .../overlay/etc/fw_env.config                 |  12 +
+ .../overlay/etc/fw_env.dat                    | Bin 0 -> 65536 bytes
+ .../overlay/etc/init.d/S30light               |  19 ++
+ .../yma85_ssc378_gc8613/overlay/etc/timezone  |   1 +
+ .../overlay/usr/sbin/light                    | 151 +++++++++++
+ .../yma85_ssc378_gc8613.kernel.config         |  35 +++
+ .../yma85_ssc378_gc8613_defconfig             | 251 ++++++++++++++++++
+ 9 files changed, 565 insertions(+)
+ create mode 100644 board/sigmastar/infinity6c/patches/linux/0001-ARM-dts-infinity6c-add-the-UVision-MC-A85-module.patch
+ create mode 100644 configs/cameras/yma85_ssc378_gc8613/.gitignore
+ create mode 100755 configs/cameras/yma85_ssc378_gc8613/overlay/etc/fw_env.config
+ create mode 100755 configs/cameras/yma85_ssc378_gc8613/overlay/etc/fw_env.dat
+ create mode 100755 configs/cameras/yma85_ssc378_gc8613/overlay/etc/init.d/S30light
+ create mode 100644 configs/cameras/yma85_ssc378_gc8613/overlay/etc/timezone
+ create mode 100755 configs/cameras/yma85_ssc378_gc8613/overlay/usr/sbin/light
+ create mode 100644 configs/cameras/yma85_ssc378_gc8613/yma85_ssc378_gc8613.kernel.config
+ create mode 100644 configs/cameras/yma85_ssc378_gc8613/yma85_ssc378_gc8613_defconfig
+
+diff --git a/board/sigmastar/infinity6c/patches/linux/0001-ARM-dts-infinity6c-add-the-UVision-MC-A85-module.patch b/board/sigmastar/infinity6c/patches/linux/0001-ARM-dts-infinity6c-add-the-UVision-MC-A85-module.patch
+new file mode 100644
+index 000000000..53b149494
+--- /dev/null
++++ b/board/sigmastar/infinity6c/patches/linux/0001-ARM-dts-infinity6c-add-the-UVision-MC-A85-module.patch
+@@ -0,0 +1,93 @@
++From: Andy <andylee77@users.noreply.github.com>
++Subject: [PATCH] ARM: dts: infinity6c: add the UVision MC-A85 module
++
++SSC378DE + GC8613 camera module (Anpviz IPC-D3B83B-S and others). Starts
++from the SSC027D reference board and changes only the padmux: PWM on the LED
++pads instead of I2C0, the Ethernet PHY LED and 2-wire FUART pads. PWM0 is left
++unrouted so mi.ko's dual-sensor frame-sync wave (on by default in the dtsi)
++drives nothing instead of strobing the white LEDs. Selected with
++CONFIG_SS_DTB_NAME="infinity6c-ssc378de-mca85".
++
++---
++--- /dev/null	2026-10-17 15:21:06.361937226 -0400
+++++ b/arch/arm/boot/dts/infinity6c-ssc378de-mca85.dts	2026-10-18 00:24:49.999278444 -0400
++@@ -0,0 +1,79 @@
+++/*
+++ * infinity6c-ssc378de-mca85.dts - UVision MC-A85 camera module
+++ *
+++ * SigmaStar SSC378DE (Infinity6C) + GalaxyCore GC8613, 16 MB SPI NOR,
+++ * 128 MB DDR. Sold as the Anpviz IPC-D3B83B-S dome, among others.
+++ *
+++ * This program is free software; you can redistribute it and/or modify it
+++ * under the terms of the GNU General Public License version 2, as published
+++ * by the Free Software Foundation.
+++ *
+++ * The module follows SigmaStar's SSC027D reference design closely, so this
+++ * file starts from that board and overrides only what the module's own OEM
+++ * device tree (decompiled from the vendor kernel) does differently:
+++ *
+++ *  - PAD_PWM0/PAD_PWM1 drive the white and IR LED banks. The reference board
+++ *    gives both pads to I2C0, which this module does not use. IR is PWM1 on
+++ *    PAD_PWM1, as in the OEM DT. White is PWM9 on PAD_PWM0 (PWM9_MODE_2)
+++ *    rather than the OEM's PWM0: the result is the same, and it does not
+++ *    depend on mi.ko leaving PWM0 alone (see vif below).
+++ *  - PAD_PM_LED0/LED1 carry the Ethernet PHY LEDs, and PAD_FUART_RX/TX the
+++ *    2-wire FUART, as in the OEM DT.
+++ * infinity6c.dtsi leaves the dual-sensor frame-sync output on
+++ * (vif_ds_rt_pwm_sync = <1>), so mi.ko claims PWM0 for a frame-rate square
+++ * wave. That is deliberately NOT overridden here: PWM0 is routed to no pad in
+++ * the padmux above (white is PWM9, IR is PWM1), so the wave drives a dead end
+++ * and no LED strobes -- which is what caused the strobe on the reference board,
+++ * where PAD_PWM0 carried PWM0. Leaving the property at its default keeps mi.ko's
+++ * ISP bring-up on the same path the reference board uses; forcing it to 0 left
+++ * the ISP IQ semaphore uninitialised and crashed rvd in MI_ISP_IMPL_GetIQApiData
+++ * at the first-frame tuning load.
+++ *
+++ * Left as in the reference board:
+++ *  - SDIO. The OEM DT also muxes SDIO1 (PAD_SD_*, power on PAD_FUART_RTS,
+++ *    detect on PAD_PM_SD_CDZ) for an optional SD daughterboard; not fitted
+++ *    on the unit this was brought up on, so it is untested and not muxed.
+++ *  - core_power. The OEM board selects Vcore with two VID GPIOs (PM_GPIO7
+++ *    and PM_GPIO8: 860/920/980/1000 mV). The reference DT drives only
+++ *    PM_GPIO8, and PM_GPIO7 sits pulled high, so the levels it requests land
+++ *    at 920/1000 mV -- at or above the OEM's at every OPP. Adopting the OEM
+++ *    table would lower the 1.1-1.2 GHz level, which is only safe if its
+++ *    index-to-pin order matches the OEM driver's; not verified.
+++ */
+++
+++#include "infinity6c-ssc027d-s01a.dts"
+++
+++/ {
+++    model = "UVision MC-A85 (SSC378DE + GC8613)";
+++
+++    soc {
+++        padmux {
+++            schematic =
+++                <GPIO_NR                 PINMUX_FOR_UNKNOWN_MODE         MDRV_PUSE_NA>,
+++                /* white LED bank */
+++                <PAD_PWM0                PINMUX_FOR_PWM9_MODE_2          MDRV_PUSE_PWM9>,
+++                /* IR LED bank */
+++                <PAD_PWM1                PINMUX_FOR_PWM1_MODE_1          MDRV_PUSE_PWM1>,
+++                <PAD_PM_LED0             PINMUX_FOR_LED0_MODE_1          MDRV_PUSE_ETH0_LED>,
+++                <PAD_PM_LED1             PINMUX_FOR_LED1_MODE_1          MDRV_PUSE_ETH1_LED>,
+++                <PAD_FUART_RX            PINMUX_FOR_FUART_2W_MODE_1      MDRV_PUSE_FUART_RX>,
+++                <PAD_FUART_TX            PINMUX_FOR_FUART_2W_MODE_1      MDRV_PUSE_FUART_TX>,
+++                /* sensor I2C */
+++                <PAD_I2C1_SCL            PINMUX_FOR_I2C1_MODE_1          MDRV_PUSE_I2C1_SCL>,
+++                <PAD_I2C1_SDA            PINMUX_FOR_I2C1_MODE_1          MDRV_PUSE_I2C1_SDA>,
+++                /* SDMMC0, as the reference board */
+++                <PAD_SD1_IO1             PINMUX_FOR_SDIO_MODE_1          MDRV_PUSE_SDIO0_D1>,
+++                <PAD_SD1_IO0             PINMUX_FOR_SDIO_MODE_1          MDRV_PUSE_SDIO0_D0>,
+++                <PAD_SD1_IO5             PINMUX_FOR_SDIO_MODE_1          MDRV_PUSE_SDIO0_CLK>,
+++                <PAD_SD1_IO4             PINMUX_FOR_SDIO_MODE_1          MDRV_PUSE_SDIO0_CMD>,
+++                <PAD_SD1_IO3             PINMUX_FOR_SDIO_MODE_1          MDRV_PUSE_SDIO0_D3>,
+++                <PAD_SD1_IO2             PINMUX_FOR_SDIO_MODE_1          MDRV_PUSE_SDIO0_D2>,
+++                <PAD_PM_GPIO9            PINMUX_FOR_GPIO_MODE            MDRV_PUSE_SDIO0_PWR>,
+++                <PAD_SD1_IO6             PINMUX_FOR_SDIO_CDZ_MODE_1      MDRV_PUSE_SDIO0_CDZ>,
+++                <PAD_GPIO0               PINMUX_FOR_I2S_RX_MODE_1        MDRV_PUSE_I2S0_RX_WCK>,
+++                <PAD_GPIO1               PINMUX_FOR_I2S_RX_MODE_1        MDRV_PUSE_I2S0_RX_BCK>,
+++                <PAD_GPIO2               PINMUX_FOR_I2S_RX_MODE_1        MDRV_PUSE_I2S0_RX_SDI>,
+++                <PAD_GPIO3               PINMUX_FOR_I2S_RX_MODE_1        MDRV_PUSE_I2S0_TX_SDO>;
+++        };
+++    };
+++};
+diff --git a/configs/cameras/yma85_ssc378_gc8613/.gitignore b/configs/cameras/yma85_ssc378_gc8613/.gitignore
+new file mode 100644
+index 000000000..f0ad88300
+--- /dev/null
++++ b/configs/cameras/yma85_ssc378_gc8613/.gitignore
+@@ -0,0 +1,3 @@
++# OEM GC8613 tuning (proprietary) -- copy from the OEM rootfs /config/iqfile/gc4023_day.bin;
++# never commit it.
++gc8613.bin
+diff --git a/configs/cameras/yma85_ssc378_gc8613/overlay/etc/fw_env.config b/configs/cameras/yma85_ssc378_gc8613/overlay/etc/fw_env.config
+new file mode 100755
+index 000000000..4d2e2e30b
+--- /dev/null
++++ b/configs/cameras/yma85_ssc378_gc8613/overlay/etc/fw_env.config
+@@ -0,0 +1,12 @@
++# U-Boot environment location on the Anpviz / MC-A85 (OEM LX510 U-Boot).
++#
++# Deliberately a FILE, not flash. This OEM U-Boot keeps its saveenv copy at
++# flash 0x30000 -- the first block of the kernel partition (mtd1) -- and
++# thingino's default "/dev/mtd1 0x0" pointed straight at it, so every
++# fw_setenv (S97sysupgrade's "mark sysupgrade complete", the WebUI) erased the
++# kernel's first 64 KB and the next boot failed with "Wrong Image Format".
++# U-Boot boots from its built-in bootargs, so nothing needs to reach its env
++# from Linux; fw_setenv/fw_printenv work against this scratch file instead.
++#
++# <device> <offset> <env size>
++/etc/fw_env.dat 0x0 0x10000
+diff --git a/configs/cameras/yma85_ssc378_gc8613/overlay/etc/fw_env.dat b/configs/cameras/yma85_ssc378_gc8613/overlay/etc/fw_env.dat
+new file mode 100755
+index 0000000000000000000000000000000000000000..c97c12f9b0a24bfc19c74a2b265a97c924137775
+GIT binary patch
+literal 65536
+zcmeIufdBvi0Dz$VsTV1P3IhfV7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd
+z0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd0RsjM7%*VKfB^#r3>YwA
+zz<>b*1`HT5V8DO@0|pEjFkrxd0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEj
+zFkrxd0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd0RsjM7%*VKfB^#r
+z3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@
+u0|pEjFkrxd0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFi-;k4*&rG
+
+literal 0
+HcmV?d00001
+
+diff --git a/configs/cameras/yma85_ssc378_gc8613/overlay/etc/init.d/S30light b/configs/cameras/yma85_ssc378_gc8613/overlay/etc/init.d/S30light
+new file mode 100755
+index 000000000..76e0189d8
+--- /dev/null
++++ b/configs/cameras/yma85_ssc378_gc8613/overlay/etc/init.d/S30light
+@@ -0,0 +1,19 @@
++#!/bin/sh
++# S30light -- set up the MC-A85 LED PWM channels and leave both banks off.
++# Runs before S31raptor so ric's irled_cmd hook finds the channels ready.
++
++case "$1" in
++	start | restart | reload)
++		printf "Starting light: "
++		if /usr/sbin/light init; then echo "OK"; else echo "FAIL"; fi
++		;;
++	stop)
++		/usr/sbin/light ir off 2>/dev/null
++		/usr/sbin/light white off 2>/dev/null
++		;;
++	*)
++		echo "Usage: $0 {start|stop|restart}"
++		exit 1
++		;;
++esac
++exit 0
+diff --git a/configs/cameras/yma85_ssc378_gc8613/overlay/etc/timezone b/configs/cameras/yma85_ssc378_gc8613/overlay/etc/timezone
+new file mode 100644
+index 000000000..3eeea8cc9
+--- /dev/null
++++ b/configs/cameras/yma85_ssc378_gc8613/overlay/etc/timezone
+@@ -0,0 +1 @@
++America/New York
+diff --git a/configs/cameras/yma85_ssc378_gc8613/overlay/usr/sbin/light b/configs/cameras/yma85_ssc378_gc8613/overlay/usr/sbin/light
+new file mode 100755
+index 000000000..3c63c22e6
+--- /dev/null
++++ b/configs/cameras/yma85_ssc378_gc8613/overlay/usr/sbin/light
+@@ -0,0 +1,151 @@
++#!/bin/sh
++# light -- IR and white LED control for the Anpviz / UVision MC-A85 (SSC378DE)
++#
++#   light <ir|ir850|white|flood> <on|off|toggle|read|1|0|~>
++#   light <ir|ir850|white|flood> on <0-100>
++#   light <ir|ir850|white|flood> brightness [0-100]
++#   light init | status
++#
++# Same command line as thingino's GPIO light script (the web UI's light
++# buttons call "light <type> <0|1|~>"), but both banks here are PWM-dimmed.
++# The board wires them to the SoC's two PWM pads, as the OEM firmware does:
++#
++#   PAD_PWM1 -> IR (850 nm) bank, driven by PWM1
++#   PAD_PWM0 -> white bank, driven by PWM9 via PINMUX_FOR_PWM9_MODE_2
++#
++# The board device tree (infinity6c-ssc378de-mca85) sets that padmux at boot.
++# PWM9 rather than the OEM's PWM0 so the white bank cannot pick up mi.ko's
++# dual-sensor frame-sync wave: mi.ko drives that on PWM0, which the board DT
++# routes to no pad, so it strobes nothing (on the reference board PAD_PWM0
++# carried PWM0, which is what strobed the LEDs).
++#
++# Brightness persists in /etc/light.conf. "on <percent>" lights the bank at
++# that level once without saving it: ric's IR level ladder steps the IR bank
++# that way, and must not rewrite flash at every step. Off is duty 0 with the
++# channel left enabled, so switching does not re-export.
++
++CONF=/etc/light.conf
++PWM=/sys/class/pwm/pwmchip0
++PERIOD=50000 # ns, 20 kHz -- the OEM's period for this board family
++
++IR_CH=1
++WHITE_CH=9
++# The level for a plain "on" (web UI buttons, manual use). ric's automatic
++# night picks its own level from [ircut] ir_levels.
++IR_BRIGHTNESS=40
++WHITE_BRIGHTNESS=100
++[ -f "$CONF" ] && . "$CONF"
++
++die() {
++	echo "light: $*" >&2
++	exit 1
++}
++
++usage() {
++	echo "Usage: light <ir|ir850|white|flood> <on|off|toggle|read|brightness [0-100]>
++       light init | status" >&2
++	exit 1
++}
++
++save_conf() {
++	cat >"$CONF" <<EOF
++IR_BRIGHTNESS=$IR_BRIGHTNESS
++WHITE_BRIGHTNESS=$WHITE_BRIGHTNESS
++EOF
++}
++
++ch_setup() {
++	local ch=$1
++	[ -d $PWM/pwm$ch ] || echo "$ch" >$PWM/export || return 1
++	echo 0 >$PWM/pwm$ch/duty_cycle 2>/dev/null
++	echo $PERIOD >$PWM/pwm$ch/period
++	echo 0 >$PWM/pwm$ch/duty_cycle
++	echo 1 >$PWM/pwm$ch/enable
++}
++
++init() {
++	ch_setup $IR_CH || die "cannot set up pwm$IR_CH"
++	ch_setup $WHITE_CH || die "cannot set up pwm$WHITE_CH"
++}
++
++ready() {
++	[ -f $PWM/pwm$IR_CH/duty_cycle ] && [ -f $PWM/pwm$WHITE_CH/duty_cycle ] || init
++}
++
++duty_of() { cat $PWM/pwm$1/duty_cycle 2>/dev/null || echo 0; }
++
++set_level() { # set_level <ch> <percent>
++	echo $((PERIOD * $2 / 100)) >$PWM/pwm$1/duty_cycle
++}
++
++state() { [ "$(duty_of "$1")" -gt 0 ] && echo 1 || echo 0; }
++
++case "$1" in
++	init)
++		init
++		exit 0
++		;;
++	status)
++		ready
++		echo "{\"ir\":$(state $IR_CH),\"ir_brightness\":$IR_BRIGHTNESS,\"white\":$(state $WHITE_CH),\"white_brightness\":$WHITE_BRIGHTNESS}"
++		exit 0
++		;;
++	ir | ir850)
++		CH=$IR_CH
++		VAR=IR_BRIGHTNESS
++		;;
++	white | flood)
++		CH=$WHITE_CH
++		VAR=WHITE_BRIGHTNESS
++		;;
++	ir940)
++		die "this board has no 940 nm bank"
++		;;
++	*)
++		usage
++		;;
++esac
++
++ready
++eval "LEVEL=\$$VAR"
++
++case "${2:-read}" in
++	1 | on)
++		if [ -n "$3" ]; then
++			case "$3" in
++				*[!0-9]*) die "level must be 0-100" ;;
++			esac
++			[ "$3" -le 100 ] || die "level must be 0-100"
++			set_level $CH "$3"
++		else
++			set_level $CH "$LEVEL"
++		fi
++		;;
++	0 | off)
++		set_level $CH 0
++		;;
++	~ | toggle)
++		if [ "$(state $CH)" = 1 ]; then set_level $CH 0; else set_level $CH "$LEVEL"; fi
++		;;
++	\? | read)
++		echo -n "$(state $CH)"
++		;;
++	brightness)
++		if [ -z "$3" ]; then
++			echo "$LEVEL"
++			exit 0
++		fi
++		case "$3" in
++			*[!0-9]* | "") die "brightness must be 0-100" ;;
++		esac
++		[ "$3" -le 100 ] || die "brightness must be 0-100"
++		eval "$VAR=$3"
++		save_conf
++		# a bank that is on follows the new level at once
++		[ "$(state $CH)" = 1 ] && set_level $CH "$3"
++		;;
++	*)
++		usage
++		;;
++esac
++exit 0
+diff --git a/configs/cameras/yma85_ssc378_gc8613/yma85_ssc378_gc8613.kernel.config b/configs/cameras/yma85_ssc378_gc8613/yma85_ssc378_gc8613.kernel.config
+new file mode 100644
+index 000000000..bfbfcdb3f
+--- /dev/null
++++ b/configs/cameras/yma85_ssc378_gc8613/yma85_ssc378_gc8613.kernel.config
+@@ -0,0 +1,35 @@
++# Kernel config fragment for the UVision MC-A85 (yma85_ssc378_gc8613), merged
++# over board/sigmastar/infinity6c/kernel/5.10/infinity6c.config.
++
++# Board device tree instead of the SSC027D reference board's: PWM on the LED
++# pads, Ethernet LEDs, no dual-sensor frame-sync PWM. Added by
++# board/sigmastar/infinity6c/patches/linux/0001-ARM-dts-infinity6c-add-the-UVision-MC-A85-module.patch.
++CONFIG_SS_DTB_NAME="infinity6c-ssc378de-mca85"
++
++# Boot under the OEM U-Boot (the .anjoy888 install keeps it) without touching
++# its environment. Its bootcmd rebuilds bootargs from the env on every boot:
++#
++#   root=/dev/mtdblock2 rootfstype=squashfs ro init=/linuxrc LX_MEM=8000000
++#   mma_heap=mma_heap_name0,miu=0,sz=0x4600000 mma_memblock_remove=1 cma=2M
++#   mtdparts=nor0:0x30000(BOOT),0x200000(kernel),0xCD0000(rootfs),0x100000(DATA)
++#
++# Three things in it break Thingino: this kernel names the NOR device
++# NOR_FLASH (OpenIPC's rename; the vendor BSP said nor0), so no partitions are
++# created and root=/dev/mtdblock2 panics; /init and firstboot look for the
++# overlay as lowercase "data"; and there is no /linuxrc. The env cannot be
++# fixed instead: saveenv on this U-Boot writes over the start of the kernel
++# partition.
++#
++# So the kernel ignores the bootloader's arguments and uses these, which keep
++# the OEM flash layout and memory split. EXTEND would not do: this tree's fdt.c
++# puts CONFIG_CMDLINE *before* the bootloader's, so its mtdparts= and init=
++# would still win. The cost is that nothing can be passed from U-Boot; a board
++# moved to Thingino's own U-Boot and layout needs a different fragment.
++#
++# mtd0 keeps the OEM's uppercase BOOT on purpose: sysupgrade finds the
++# bootloader partition as exactly "boot", and writing a Thingino U-Boot over
++# this one would brick the board, so that path should fail instead.
++CONFIG_CMDLINE="console=ttyS0,115200 panic=20 root=/dev/mtdblock2 rootfstype=squashfs ro init=/init mtdparts=NOR_FLASH:0x30000(BOOT),0x200000(kernel),0xCD0000(rootfs),0x100000(data) LX_MEM=0x8000000 mma_heap=mma_heap_name0,miu=0,sz=0x4600000 mma_memblock_remove=1 cma=2M"
++CONFIG_CMDLINE_FORCE=y
++# CONFIG_CMDLINE_FROM_BOOTLOADER is not set
++# CONFIG_CMDLINE_EXTEND is not set
+diff --git a/configs/cameras/yma85_ssc378_gc8613/yma85_ssc378_gc8613_defconfig b/configs/cameras/yma85_ssc378_gc8613/yma85_ssc378_gc8613_defconfig
+new file mode 100644
+index 000000000..c5690b7cb
+--- /dev/null
++++ b/configs/cameras/yma85_ssc378_gc8613/yma85_ssc378_gc8613_defconfig
+@@ -0,0 +1,251 @@
++# NAME: Anpviz IPC-D3B83B-S (YMA85_IRCN) — SSC378DE, Infinity6C, GC8613 (8MP)
++#
++# STATUS (2026-10-18): self-contained. The image carries the GC8613 driver, the
++# board device tree and the OEM-U-Boot boot arguments, and streams 4K H.264 with
++# correct colour, 60 Hz flicker lock, day/night, IR-cut and both LED banks.
++# Installed as an .anjoy888 through the OEM web UI, which keeps the OEM U-Boot.
++#
++# A third Infinity6C target, cloned from johnchia's noname_ssc377qe_imx335
++# (thingino-firmware@sigmastar-6b0-platform) and our mcl12d2_ssc377d_imx335.
++# Differs in two axes: the SoC model (ssc378de, the 8MP member of the family)
++# and the sensor (GalaxyCore GC8613).
++#
++# Board:  UVision MC-A85 module (SSC027D reference design, die SSC378DE,
++#         128 MB DDR); device tree infinity6c-ssc378de-mca85, see LINUX below.
++#         Anpviz IPC-D3B83B-S U-series dome, OEM firmware "YMA85_IRCN V3.3.2.5"
++#         (A_ONVIF_CAMERA / YMA85_IRCN_AF). Anjvision-OEM, near-sibling of the
++#         JL12D2/MCL12D2 (same V3.3.2.x line).
++# Sensor: GalaxyCore GC8613, MIPI 10-bit, 8MP. Live OEM pipeline runs the raw
++#         VIF pad at 3840x2160@30 (confirmed from the running mi_sensor Pad dump
++#         via a root shell — real sensor readout, not an interpolated encode).
++#         OEM kernel module: drv_ms_cus_gc8613YA_MIPI_10bit_v2.2_20241015.
++# Flash:  16 MB SPI NOR, GigaDevice GD25Q128 (JEDEC c8 40 18), SOIC-8.
++# CPU:    ARMv7-A / Cortex-A7 (see infinity6c.mk — built v7 despite the ARMv8
++#         die; same as the rest of the family).
++# Boot:   OEM U-Boot KL_LX510; mtdparts IDENTICAL to the MCL12D2 —
++#         nor0:0x30000(BOOT),0x200000(kernel),0xCD0000(rootfs),0x100000(DATA),
++#         root=/dev/mtdblock2 rootfstype=squashfs ro init=/linuxrc. The kernel
++#         ignores those and boots with its own (LINUX below), so the OEM env is
++#         never touched.
++#
++# ---- SoC model ----
++# ssc378de is in infinity6c.mk's family filter
++# (ssc377 ssc377d ssc377de ssc377qe ssc378de ssc378qe), so SOC_FAMILY resolves
++# to infinity6c and the family kernel + U-Boot + toolchain serve it with no
++# package change — exactly as ssc377d does. The 378 members differ from the 377
++# members only in DRAM / encoder ceiling / package (378 = 8M@25 vs 377 = 5M@30),
++# none of which reaches the kernel config or the bootloader binary. ssc378de is
++# the 128 MB QFN128 part; our unit shows ~128 MB DRAM (LX_MEM=0x8000000, base
++# 0x20000000), but RAM is not load-bearing for boot anyway — post-image.sh
++# writes the carveout and the bootloader fills it from detected DRAM, so an
++# image built for de also boots a qe part.
++#
++# ---- SENSOR ----
++# GC8613 has no prebuilt driver in any drop, and the vendor's own module oopses
++# 1230's mi.ko. Our from-source driver is added to sigmastar-sdk's sensor-src by
++# package/sigmastar-sdk/0001-..., which also restores the sensor headers that
++# match 1230's mi.ko (the pre-fe5d953 set; the 0907 layout has no spi_bus, so
++# mi.ko dereferenced an AE field). BR2_SIGMASTAR_SENSOR_SOURCE builds the
++# sensor-src drivers against them instead of installing the prebuilts;
++# load_sigmastar loads gc8613 with chmap=1 lane_num=4 (4-lane MIPI).
++# FRAG: soc-sigmastar core-sigmastar
++
++# board.mk includes this file as a makefile before thingino.mk runs, so the
++# vendor/model are readable there and drive SOC_VENDOR / SOC_MODEL / SOC_FAMILY
++# / SOC_ARCH / SOC_CPU / KERNEL_VERSION.
++BR2_SOC_VENDOR_SIGMASTAR=y
++BR2_SIGMASTAR_SOC_MODEL="ssc378de"
++
++# GalaxyCore GC8613 (8MP), built from source (see SENSOR above).
++BR2_SENSOR_1_NAME="gc8613"
++BR2_SIGMASTAR_SENSOR_SOURCE=y
++
++FLASH_SIZE_MB=16
++
++# Wired Ethernet: installs the eth0 DHCP stanza (thingino-ethernet).
++BR2_ETHERNET=y
++
++# Toolchain — identical to the Infinity6E/6C targets. A generic
++# arm-thingino-linux-uclibcgnueabihf; Cortex-A35 runs the same aarch32 code,
++# and nothing in it is 6E-specific. uClibc (not glibc): every libmi_*.so in the
++# hardware's vendor drop is NEEDED libc.so.0, which no glibc rootfs satisfies.
++# This matches our own OEM toolchain reference (arm-sigmastar-...-uclibcgnueabihf
++# 9.1.0). Re-pointed here because the toolchain fragment is resolved from
++# TYPE/GCC/LIBC alone, with no architecture in it, so the appended default is
++# thingino's mipsel one; the camera defconfig is appended after the fragments,
++# so these win.
++BR2_THINGINO_TOOLCHAIN_LIBC_UCLIBC=y
++BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y
++BR2_TOOLCHAIN_EXTERNAL_DOWNLOAD=y
++BR2_TOOLCHAIN_EXTERNAL_URL="file://$(HOME)/src/mirrors/releases/johnchia__thingino-firmware/toolchain-x86_64/thingino-toolchain-x86_64_infinity6e_uclibc_gcc16-linux-arm.tar.gz"
++BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX="arm-thingino-linux-uclibcgnueabihf"
++BR2_TOOLCHAIN_EXTERNAL_CUSTOM_UCLIBC=y
++BR2_TOOLCHAIN_EXTERNAL_GCC_16=y
++BR2_TOOLCHAIN_EXTERNAL_CXX=y
++BR2_TOOLCHAIN_EXTERNAL_WCHAR=y
++BR2_TOOLCHAIN_EXTERNAL_LOCALE=y
++BR2_TOOLCHAIN_EXTERNAL_HAS_THREADS_DEBUG=y
++# Vendor blobs need __stack_chk_fail, so the producer builds uClibc with SSP and
++# Buildroot requires this stated for an external toolchain.
++BR2_TOOLCHAIN_EXTERNAL_HAS_SSP=y
++# BR2_TOOLCHAIN_EXTERNAL_INET_RPC is not set
++# Toolchain is built against 4.9 headers regardless of the 5.10 kernel; headers
++# older than the kernel is the supported direction.
++BR2_TOOLCHAIN_EXTERNAL_HEADERS_4_9=y
++
++# Build U-Boot. sigmastar-uboot is already family-generic (configures
++# $(SOC_FAMILY)_defconfig, passes the model as -DPRODUCT_SOC) and OpenIPC's tree
++# carries infinity6c_defconfig + ipl/infinity6c + the GCIS-at-36k NOR branch, so
++# ssc378de needs no package change. NB: producing BOOT.bin is not flashing it —
++# on this board mtd0 is the one place a bad write cannot be undone in software
++# (see boot-contract-ssc377d.md).
++BR2_PACKAGE_SIGMASTAR_UBOOT=y
++
++BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_THINGINO_PATH)/board/sigmastar/post-image.sh"
++
++# ---- LINUX ----
++# The board device tree (infinity6c-ssc378de-mca85) and a fixed kernel command
++# line for the OEM U-Boot and flash layout. The fragment says why the
++# bootloader's own arguments cannot be used.
++BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_THINGINO_PATH)/configs/cameras/yma85_ssc378_gc8613/yma85_ssc378_gc8613.kernel.config"
++
++# Gates the camera stack in Config.soc.in; pulls in raptor/raptor-common/
++# raptor-hal by default (INFINITY6C is a raptor-hal platform).
++BR2_THINGINO_DEV_IPCAM=y
++
++BR2_PACKAGE_DROPBEAR=y
++
++# No VPN: core-sigmastar.fragment selects WireGuard, but thingino-vpn selects
++# the out-of-tree wireguard-linux-compat under a guard (KERNEL_VERSION_7) that
++# is undefined and always reads n, so it tries to build the compat module on
++# this 5.10 kernel where WireGuard is already mainline and it does not compile.
++# A select cannot be declined by a defconfig, so choose None.
++BR2_PACKAGE_THINGINO_VPN_NONE=y
++
++# The external toolchain's bundled libz is not copied to target; anything
++# linking -lz needs a real target zlib.
++BR2_PACKAGE_ZLIB=y
++
++# ---- ISP TUNING ----
++# Two files, loaded by two different parties, and both are needed:
++#
++#  1. CUS3A's own iqfile, read when its AE/AWB initialise:
++#     /etc/firmware/iqfile<1 << isp_chn>.bin = iqfile1.bin. sigmastar-sdk
++#     installs the drop's generic iqfile0.bin and (our patch) aliases iqfile1.bin
++#     to it. Without iqfile1.bin the AWB never starts: gains 1.0x, green image.
++#     It must match the SDK's IQ version (1.4 on the 1230 drop) -- IspLoadIqCfg
++#     rejects the OEM GC8613 bin (1.2) here, so the generic file it is.
++#
++#  2. The per-sensor API bin raptor loads on the first frame via
++#     MI_ISP_ApiCmdLoadBinFile (accepted despite a minor-version warning):
++#     /usr/share/sensor/gc8613.bin. This is the OEM's own GC8613 tuning, shipped
++#     in its rootfs as /config/iqfile/gc4023_day.bin (137832 B, md5
++#     f76e4ebdfad1de7b3e7a84b685efa196, dated 2024-10-15 like the OEM gc8613
++#     driver; media_server's CIspGc4023 class loads it on this board -- the name
++#     is a vendor leftover). A/B against the generic tuning it is clearly better
++#     (contrast, black level, saturation). Proprietary: copied from
++#     ~/anpviz_harvest/rootfs into the build tree only, never into git.
++BR2_SENSOR_1_IQ_FILE="configs/cameras/yma85_ssc378_gc8613/gc8613.bin"
++
++# 60 Hz mains (US). On infinity6c our raptor-hal fork applies this as an
++# MI_ISP_AE_SetFlickerEx manual lock on the first frame, after the tuning loads:
++# exposure snaps to n x 1/120 s. Measured rolling band ripple 3.8 DN unlocked ->
++# 0.03 DN locked at a forced 12 ms shutter.
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_SENSOR_ANTIFLICKER="2"
++
++# ---- SENSOR IDENTITY FOR RVD ----
++# Upstream rvd reads the sensor's name and I2C address from /proc/jz/sensor, an
++# Ingenic driver node, and will not start without them, so on SigmaStar they
++# come from [sensor]. The address is 7-bit, raptor.conf's convention (the
++# driver's 8-bit slave is 0x62). The Infinity6C backend does not use it; rvd
++# only refuses 0.
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_SENSOR_NAME="gc8613"
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_SENSOR_I2C_ADDR="0x31"
++
++# ---- DAY/NIGHT ----
++# IR-cut: two-pin H-bridge coil, from the OEM kernel's built-in "IRLED driver
++# v2.1 for mca81" (pin table {gpio, pad, label} in its .data):
++#   gpio 81 PAD_SAR_GPIO0 "IRCUT A" -- pulsed high = night (filter out)
++#   gpio 80 PAD_SAR_GPIO1 "IRCUT B" -- pulsed high = day (filter in)
++# The OEM pulses ~250 ms (25 jiffies) then drives both low. ric's two-pin
++# convention pulses gpio_ircut for day and gpio_ircut2 for night, hence the
++# order. ric's default pulse_ms (10) is too short for this coil. Also in the
++# OEM table: gpio 23 PAD_PM_IRIN "irdetect" (input, IR-board status) and
++# gpio 27 PAD_PM_GPIO0 "wifi_pwr".
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_GPIO_IRCUT="80"
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_GPIO_IRCUT2="81"
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_PULSE_MS="250"
++
++# Auto day/night: ric's luma trigger, which judges night->day against a night
++# baseline taken with the IR lit, plus an IR level ladder. The legacy gain
++# trigger's fixed thresholds cannot hold: the IR-lit night gain is whatever the
++# scene makes it (IR 40% settled at 11000 in one spot and 7262 in the next, under
++# day_threshold 8000, so the camera flipped every ~20 s). Night starts at 10% IR
++# and steps up while the IR-lit gain stays above 16000 (on the bench: 29460 at
++# 5% down to 3003 at 100%); day returns when gain drops under 25% of the settled
++# night baseline, or when an IR-off probe finds gain at or under 20000 (half of
++# night_gain). Needs raptor patches 0003-0004 and the raptor-hal fork's 0..255
++# ae_luma. See docs/contrib/thingino/DAYNIGHT-TUNING.md.
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_TRIGGER="luma"
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_NIGHT_GAIN="40000"
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IR_LEVELS="10,20,40,70,100"
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IR_STEP_GAIN="16000"
++
++# ---- LIGHTS ----
++# IR (850 nm) and white banks are PWM-dimmed on the SoC's two PWM pads, as in
++# the OEM firmware (padmux PAD_PWM0/PAD_PWM1 -> PWM0/PWM1, period 50 us):
++#   PAD_PWM1 = IR bank   -> PWM1
++#   PAD_PWM0 = white bank -> PWM9 (PINMUX_FOR_PWM9_MODE_2), not the OEM's
++#     PWM0: mi.ko drives a dual-sensor frame-sync wave on PWM0 when the DT
++#     enables it (infinity6c.dtsi does: vif_ds_rt_pwm_sync = <1>, pin <0>), and
++#     with PWM0 on this pad that strobed the white LEDs at the frame rate.
++# The board device tree muxes both pads that way; PWM0 is routed to no pad, so
++# mi.ko's frame-sync wave on PWM0 strobes nothing and the sync output is left at
++# its default (the reference board gave these pads to I2C0 and carried PWM0 on
++# PAD_PWM0, which is what strobed). overlay/etc/init.d/
++# S30light sets up the two PWM channels at boot via overlay/usr/sbin/light,
++# which also provides thingino's "light <type> on|off|toggle|read" CLI (the
++# WebUI light buttons) plus "light <type> brightness 0-100". ric switches the
++# IR bank with day/night through our irled_cmd hook
++# (package/thingino-raptor/0002-ric-irled_cmd-hook-*.patch).
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IRLED_CMD="/usr/sbin/light ir"
++
++# ---- STREAMS / OSD / RING: fit full-4K main in the 70 MB MMA (2026-10-18) ----
++# This module has only 128 MB DDR (~54 MB Linux + 70 MB MMA). raptor makes one
++# JPEG encoder per video stream at that stream's resolution, so a 4K main would
++# add a SECOND full-4K pipeline (4K H.264 + 4K JPEG) the 70 MB cannot hold -- the
++# OEM fits 4K by not running a 4K JPEG. So: 4K H.264 main (3840x2160 stated,
++# because the backend's default was not sensor-native here), JPEG OFF on the
++# main, MJPEG/snapshot off the 720p sub. refmode (zero-copy ring) over-allocates here -- copy mode. OSD =
++# timestamp (date+clock) only; each MI_RGN element costs MMA. Verified streaming
++# with ~12 MB MMA free. See docs/contrib/thingino/RAPTOR-PACKAGE-TOPOLOGY.md.
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM0_WIDTH="3840"
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM0_HEIGHT="2160"
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM0_JPEG_FALSE=y
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM1_ENABLED_TRUE=y
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM1_WIDTH="1280"
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM1_HEIGHT="720"
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_RING_REFMODE_FALSE=y
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_OSD_ENABLED_TRUE=y
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_OSD_TIMESTAMP_VISIBLE_TRUE=y
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_OSD_UPTIME_VISIBLE_FALSE=y
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_OSD_CAMERA_VISIBLE_FALSE=y
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_OSD_LOGO_VISIBLE_FALSE=y
++
++# ---- RTSP ----
++# Four clients is not enough: Frigate holds two (main + sub), an NVR two
++# more, and a live view or snapshot client then gets refused (as on the
++# YMF46D).
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_RTSP_MAX_CLIENTS="8"
++
++# ---- HTTP (rhd) ----
++# rhd serves the snapshots and MJPEG the web UI previews. HTTPS on 8443, as on
++# the unit today: its [http] credentials travel as Basic auth.
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_HTTP_PORT="8443"
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_HTTP_HTTPS_TRUE=y
++
++# ---- AUDIO ----
++# One AI device on this chip (the analog mic); rad's default of device 1 does
++# not exist, so without this the mic stays off (the same fix the B8A63 needed).
++# The MC-A85 has no microSD slot, so no MMC config here (unlike the JL12D2/B8A63).
++BR2_PACKAGE_THINGINO_RAPTOR_CONF_AUDIO_DEVICE="0"

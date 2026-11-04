@@ -1,0 +1,240 @@
+From d822d54c99c2f9432534674331240cad84f8a5c9 Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 00:40:00 -0400
+Subject: [PATCH 3/6] infinity6c: anti-flicker via FlickerEx manual lock
+
+Upstream drives anti-flicker through the legacy MI_ISP_AE_SetFlicker, which
+this GC8613 tuning ignores (returns -22) because the AE runs the vendor newer
+FlickerEx. Set FlickerEx directly with a manual lock at the configured mains
+frequency. Measured banding at a forced 12 ms shutter: 3.8 DN -> 0.03 DN.
+
+The FlickerEx Get/Set must be deferred to the first frame exactly as the IQ
+knobs are: issued earlier (rvd sets anti-flicker from [sensor] during pipeline
+bringup) it reaches the ISP API store before MI has initialised the semaphore
+behind it, and MI_ISP_IMPL_GetIQApiData then downs an uninitialised semaphore
+and oopses the kernel on a cold ISP. Upstream got this for free by routing
+anti-flicker through i6c_iq_set_raw(AE_FLICKER); the FlickerEx path carries the
+same gate itself and i6c_isp_flush_knobs applies the held mode.
+---
+ src/infinity6c/hal_isp.c          | 171 ++++++++++++++++++++++++------
+ src/infinity6c/infinity6c_state.h |   1 +
+ 2 files changed, 141 insertions(+), 31 deletions(-)
+
+diff --git a/src/infinity6c/hal_isp.c b/src/infinity6c/hal_isp.c
+index c5cdfae..1399573 100644
+--- a/src/infinity6c/hal_isp.c
++++ b/src/infinity6c/hal_isp.c
+@@ -1987,6 +1987,13 @@ void i6c_isp_flush_knobs(infinity6c_state_t *st)
+      * value.
+      */
+     i6c_ct_apply(st);
++
++    /*
++     * Anti-flicker (FlickerEx) rides the same gate: it is an AE call that would
++     * oops the kernel if issued before now, so a mode set during pipeline bringup
++     * was held and is applied here. See hal_isp_set_antiflicker.
++     */
++    i6c_isp_flush_flicker(st);
+ }
+ 
+ void i6c_isp_forget_knobs(void)
+@@ -2206,54 +2213,156 @@ int hal_isp_get_ae_comp(void *ctx, int *val)
+     return i6c_iq_get_scalar(ctx, AE_EVCOMP, val);
+ }
+ 
++/*
++ * Anti-flicker through FlickerEx, not the legacy MI_ISP_AE_SetFlicker.
++ *
++ * This GC8613 tuning runs the vendor's newer FlickerEx, and the vendor
++ * documents (and the board confirms: -22) that the legacy MI_ISP_AE_SetFlicker
++ * is ignored while FlickerEx is enabled. So drive FlickerEx directly: a manual
++ * lock at the configured mains frequency. Measured banding at a forced 12 ms
++ * shutter was 3.8 DN unlocked, 0.03 DN locked. Symbols are resolved at call
++ * time -- a drop without them simply has no anti-flicker control.
++ *
++ * Deferred exactly like the IQ knobs (i6c_iq_set): a FlickerEx Get/Set issued
++ * before the first frame reaches the ISP's API store before MI has initialised
++ * the per-device semaphore behind it, and MI_ISP_IMPL_GetIQApiData then downs an
++ * uninitialised semaphore and oopses the kernel. rvd sets anti-flicker from the
++ * [sensor] block during pipeline bringup, i.e. before the first frame, so the
++ * mode is recorded here and applied by i6c_isp_flush_knobs at the first frame,
++ * alongside the tuning load and the knob flush. The upstream backend avoided
++ * this for free by routing anti-flicker through i6c_iq_set_raw(AE_FLICKER); the
++ * FlickerEx path has to carry the same gate itself.
++ */
++typedef struct {
++    unsigned int enable;
++    unsigned int op_type; /* 0 auto (AE picks the mains), 1 manual */
++    unsigned char amp_sensitivity;
++    unsigned char score_thd;
++    unsigned char refresh_cycles;
++    unsigned char valid_times_thd;
++    unsigned int flicker_type; /* MI_ISP_AE_FLICKER_DETECT_TYPE_e: 0 = 60Hz, 1 = 50Hz */
++} i6c_flicker_ex_t;
++
++#define I6C_FLICKEREX_MANUAL 1u
++#define I6C_FLICKEREX_60HZ   0u
++#define I6C_FLICKEREX_50HZ   1u
++
++/*
++ * The last anti-flicker mode asked for, and whether one has been. File scope to
++ * match g_iq: the pending state is per process, which is one HAL context. Held
++ * here until isp_knobs_live, then applied -- and kept, so a tuning reload (which
++ * resets the AE) can be followed by putting it back from i6c_isp_flush_knobs.
++ */
++static rss_antiflicker_t g_flicker_mode = RSS_ANTIFLICKER_OFF;
++static bool g_flicker_pending;
++
++/* The MI call itself, once the ISP is keeping writes. */
++static int i6c_flicker_apply(infinity6c_state_t *st, rss_antiflicker_t mode)
++{
++    i6c_isp_cmd_fn get_fx, set_fx;
++    i6c_flicker_ex_t fx;
++    int ret;
++
++    if (!st || !st->isp.lib)
++        return RSS_ERR_INVAL;
++
++    get_fx = (i6c_isp_cmd_fn)hal_symbol_load("i6c_isp", st->isp.lib, "MI_ISP_AE_GetFlickerEx");
++    set_fx = (i6c_isp_cmd_fn)hal_symbol_load("i6c_isp", st->isp.lib, "MI_ISP_AE_SetFlickerEx");
++    if (!get_fx || !set_fx)
++        return RSS_ERR_NOTSUP;
++
++    /* Read-modify-write so the tuning's detection thresholds survive. */
++    memset(&fx, 0, sizeof(fx));
++    if ((ret = get_fx(I6C_DEV_ID(I6C_ISP_DEV), I6C_ISP_CHN, &fx)) != 0) {
++        HAL_LOG_WARN("isp: MI_ISP_AE_GetFlickerEx failed: %d", ret);
++        return RSS_ERR_IO;
++    }
++
++    if (mode == RSS_ANTIFLICKER_OFF) {
++        fx.enable = 0;
++    } else {
++        fx.enable = 1;
++        fx.op_type = I6C_FLICKEREX_MANUAL;
++        fx.flicker_type =
++            (mode == RSS_ANTIFLICKER_50HZ) ? I6C_FLICKEREX_50HZ : I6C_FLICKEREX_60HZ;
++    }
++
++    if ((ret = set_fx(I6C_DEV_ID(I6C_ISP_DEV), I6C_ISP_CHN, &fx)) != 0) {
++        HAL_LOG_WARN("isp: MI_ISP_AE_SetFlickerEx failed: %d", ret);
++        return RSS_ERR_IO;
++    }
++
++    HAL_LOG_INFO("isp: anti-flicker %s (FlickerEx manual lock)",
++                 mode == RSS_ANTIFLICKER_OFF    ? "off"
++                 : mode == RSS_ANTIFLICKER_50HZ ? "50 Hz"
++                                                : "60 Hz");
++    return RSS_OK;
++}
++
++/* Applied by i6c_isp_flush_knobs at the first frame if one was asked for. */
++void i6c_isp_flush_flicker(infinity6c_state_t *st)
++{
++    if (st && g_flicker_pending)
++        i6c_flicker_apply(st, g_flicker_mode);
++}
++
+ int hal_isp_set_antiflicker(void *ctx, rss_antiflicker_t mode)
+ {
+-    uint32_t raw;
++    infinity6c_state_t *st = i6c_state(ctx);
+ 
+-    switch (mode) {
+-    case RSS_ANTIFLICKER_OFF:
+-        raw = I6C_FLICKER_DISABLE;
+-        break;
+-    case RSS_ANTIFLICKER_50HZ:
+-        raw = I6C_FLICKER_50HZ;
+-        break;
+-    case RSS_ANTIFLICKER_60HZ:
+-        raw = I6C_FLICKER_60HZ;
+-        break;
+-    default:
++    if (!st || !st->isp.lib)
++        return RSS_ERR_INVAL;
++    if (mode != RSS_ANTIFLICKER_OFF && mode != RSS_ANTIFLICKER_50HZ &&
++        mode != RSS_ANTIFLICKER_60HZ) {
+         HAL_LOG_WARN("isp: antiflicker mode %d out of range", (int)mode);
+         return RSS_ERR_INVAL;
+     }
+ 
+-    return i6c_iq_set_raw(ctx, AE_FLICKER, raw);
++    g_flicker_mode = mode;
++    g_flicker_pending = true;
++
++    if (!st->isp_knobs_live) {
++        HAL_LOG_DBG("isp: anti-flicker %d held until the tuning has loaded", (int)mode);
++        return RSS_OK;
++    }
++
++    return i6c_flicker_apply(st, mode);
+ }
+ 
+ int hal_isp_get_antiflicker(void *ctx, rss_antiflicker_t *mode)
+ {
+-    uint32_t raw;
+-    int ret;
++    infinity6c_state_t *st = i6c_state(ctx);
++    i6c_isp_cmd_fn get_fx;
++    i6c_flicker_ex_t fx;
+ 
+     if (!mode)
+         return RSS_ERR_INVAL;
++    if (!st || !st->isp.lib)
++        return RSS_ERR_INVAL;
+ 
+-    ret = i6c_iq_get_raw(ctx, AE_FLICKER, &raw);
+-    if (ret != RSS_OK)
+-        return ret;
+-
+-    switch (raw) {
+-    case I6C_FLICKER_50HZ:
+-        *mode = RSS_ANTIFLICKER_50HZ;
+-        break;
+-    case I6C_FLICKER_60HZ:
+-        *mode = RSS_ANTIFLICKER_60HZ;
+-        break;
+-    default:
+-        /* DISABLE and AUTO both. Auto is a mode raptor cannot express, and
+-         * reporting it as one of the two frequencies would be a guess. */
+-        *mode = RSS_ANTIFLICKER_OFF;
+-        break;
++    /*
++     * Before the first frame the hardware cannot be asked (that is the oops this
++     * whole gate avoids), so the queued value is the honest answer -- what the
++     * operator last set, or OFF if nothing was set.
++     */
++    if (!st->isp_knobs_live) {
++        *mode = g_flicker_pending ? g_flicker_mode : RSS_ANTIFLICKER_OFF;
++        return RSS_OK;
+     }
+ 
++    get_fx = (i6c_isp_cmd_fn)hal_symbol_load("i6c_isp", st->isp.lib, "MI_ISP_AE_GetFlickerEx");
++    if (!get_fx)
++        return RSS_ERR_NOTSUP;
++
++    memset(&fx, 0, sizeof(fx));
++    if (get_fx(I6C_DEV_ID(I6C_ISP_DEV), I6C_ISP_CHN, &fx) != 0)
++        return RSS_ERR_IO;
++
++    if (!fx.enable)
++        *mode = RSS_ANTIFLICKER_OFF;
++    else
++        *mode = (fx.flicker_type == I6C_FLICKEREX_50HZ) ? RSS_ANTIFLICKER_50HZ
++                                                        : RSS_ANTIFLICKER_60HZ;
+     return RSS_OK;
+ }
+ 
+diff --git a/src/infinity6c/infinity6c_state.h b/src/infinity6c/infinity6c_state.h
+index 519acde..b87e220 100644
+--- a/src/infinity6c/infinity6c_state.h
++++ b/src/infinity6c/infinity6c_state.h
+@@ -696,6 +696,7 @@ void i6c_isp_note_frame(infinity6c_state_t *st);
+  * survives. Also drops the queue's claim on the resolved symbols at teardown.
+  */
+ void i6c_isp_flush_knobs(infinity6c_state_t *st);
++void i6c_isp_flush_flicker(infinity6c_state_t *st);
+ void i6c_isp_forget_knobs(void);
+ 
+ /*

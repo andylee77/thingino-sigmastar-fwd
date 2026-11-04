@@ -1,0 +1,129 @@
+From 39a48ca03d64755d376357b33ee7cdd371237700 Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 18:16:05 -0500
+Subject: [PATCH] infinity6c: opt-in AE max-shutter cap from
+ RSS_AE_MAX_SHUTTER_US
+
+The backend deliberately runs without a shutter ceiling (the long exposure
+keeps the AE off the gain), so at night the tuning's ~100 ms ceiling slows
+the sensor: 25 -> ~11 fps on the IMX335, ~17 fps measured on the GC4653
+(2026-11-03), and moving animals smear. That stays the default.
+
+RSS_AE_MAX_SHUTTER_US (microseconds, from the environment, as
+RSS_SCL_RING_DIV) lowers maxShutterUs through MI_ISP_AE_Get/SetExposureLimit,
+never below the tuning's minimum and never raising its maximum. It is applied
+from i6c_isp_flush_knobs next to FlickerEx: once the tuning has loaded (an AE
+call before the first frame oopses the kernel) and after every reload, which
+resets the AE limits. A fixed value rather than one derived from the frame
+rate, so it cannot latch the way the removed cap did.
+---
+ src/infinity6c/hal_isp.c | 72 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 72 insertions(+)
+
+diff --git a/src/infinity6c/hal_isp.c b/src/infinity6c/hal_isp.c
+index 5351568..5e24c17 100644
+--- a/src/infinity6c/hal_isp.c
++++ b/src/infinity6c/hal_isp.c
+@@ -46,6 +46,8 @@
+  * SPDX-License-Identifier: GPL-3.0-or-later
+  */
+ 
++#include <stdlib.h>
++
+ #include "infinity6c_state.h"
+ 
+ /* Offsets and values inside a { bEnable, enOpType, stAuto[16], stManual } payload. */
+@@ -1931,6 +1933,9 @@ static int i6c_ct_get(void *ctx, int which, int *val)
+  * 11139, taking 25 fps down to about 11. So a dark scene now runs slow and
+  * blurred instead of fast and noisy. That is the trade, chosen deliberately, and
+  * it is the thing to undo first if the frame rate turns out to matter more.
++ * It stays the default; a camera where it does matter (night wildlife, where
++ * blur costs more than noise) can ask for a ceiling with RSS_AE_MAX_SHUTTER_US,
++ * applied by i6c_isp_flush_ae_limit below.
+  *
+  * Anyone restoring it should read the git history rather than start over: the
+  * cap had to derive its rate from these two fields and not from MI_SNR_GetFps,
+@@ -1943,6 +1948,70 @@ static unsigned int i6c_isp_nominal_fps(const infinity6c_state_t *st)
+     return st->fps ? st->fps : st->snr_fps_req;
+ }
+ 
++/*
++ * Opt-in AE exposure ceiling: RSS_AE_MAX_SHUTTER_US, microseconds, from the
++ * environment (S31raptor exports /etc/default/raptor to rvd, as for
++ * RSS_SCL_RING_DIV). Unset or 0 leaves the tuning's own ceiling, the long-exposure
++ * default chosen above. Set, it lowers maxShutterUs (never below the tuning's
++ * minShutterUs) and leaves gains and the minimum alone, so the AE takes the rest
++ * of a dark scene from gain: sharper motion and a held frame rate, more noise.
++ * A multiple of 8333 us stays on a 60 Hz flicker boundary (33333 = 1/30 s).
++ *
++ * A fixed value, not one derived from the frame rate, so it cannot latch the way
++ * the removed cap did. An AE call, so it rides i6c_isp_flush_knobs like FlickerEx:
++ * once the tuning has loaded (an AE call before the first frame oopses the
++ * kernel), and again after every reload, which resets the AE limits.
++ */
++static unsigned int i6c_ae_max_shutter_us(void)
++{
++    const char *s = getenv("RSS_AE_MAX_SHUTTER_US");
++    char *end;
++    unsigned long v;
++
++    if (!s || !*s)
++        return 0;
++    v = strtoul(s, &end, 10);
++    if (*end || v > 1000000) {
++        HAL_LOG_WARN("isp: RSS_AE_MAX_SHUTTER_US=%s ignored (microseconds, 0-1000000)", s);
++        return 0;
++    }
++    return (unsigned int)v;
++}
++
++static void i6c_isp_flush_ae_limit(infinity6c_state_t *st)
++{
++    unsigned int want = i6c_ae_max_shutter_us();
++    unsigned int tuning;
++    i6c_isp_exp lim;
++    int ret;
++
++    if (!st || !want)
++        return;
++    if (!st->isp.get_expo_limit || !st->isp.set_expo_limit) {
++        HAL_LOG_WARN("isp: no MI_ISP_AE_Get/SetExposureLimit; AE max shutter not set");
++        return;
++    }
++
++    memset(&lim, 0, sizeof(lim));
++    if ((ret = st->isp.get_expo_limit(I6C_DEV_ID(I6C_ISP_DEV), I6C_ISP_CHN, &lim)) != 0) {
++        HAL_LOG_WARN("isp: MI_ISP_AE_GetExposureLimit failed: %d", ret);
++        return;
++    }
++    tuning = lim.maxShutterUs;
++    if (want >= tuning) {
++        HAL_LOG_INFO("isp: AE max shutter %u us asked, the tuning's %u us is already lower", want,
++                     tuning);
++        return;
++    }
++    lim.maxShutterUs = want < lim.minShutterUs ? lim.minShutterUs : want;
++    if ((ret = st->isp.set_expo_limit(I6C_DEV_ID(I6C_ISP_DEV), I6C_ISP_CHN, &lim)) != 0) {
++        HAL_LOG_WARN("isp: MI_ISP_AE_SetExposureLimit failed: %d", ret);
++        return;
++    }
++    HAL_LOG_INFO("isp: AE max shutter %u us (the tuning's %u us; RSS_AE_MAX_SHUTTER_US)",
++                 lim.maxShutterUs, tuning);
++}
++
+ void i6c_isp_flush_knobs(infinity6c_state_t *st)
+ {
+     size_t i;
+@@ -1997,6 +2066,9 @@ void i6c_isp_flush_knobs(infinity6c_state_t *st)
+      * was held and is applied here. See hal_isp_set_antiflicker.
+      */
+     i6c_isp_flush_flicker(st);
++
++    /* The opt-in exposure ceiling, after anti-flicker: both are AE calls. */
++    i6c_isp_flush_ae_limit(st);
+ }
+ 
+ void i6c_isp_forget_knobs(void)
+-- 
+2.43.0
+
