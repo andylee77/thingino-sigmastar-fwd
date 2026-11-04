@@ -5,11 +5,13 @@ a patch series — 21 patches onto `themactep/thingino-firmware` master and 8 on
 `gtxaspec/raptor-hal` — that bring up five camera models and carry a set of
 general fixes meant to go back upstream.
 
-This page describes **what** the port adds and **where** each change belongs,
-at a product level rather than as a commit log. Development notes — process,
-methodology, and the change-by-change history — are kept separately and can be
-provided on request. For the headline summary and how to apply the patches, see
-the [README](../README.md).
+This page describes **what** the port adds and **where** each change belongs, at
+a product level rather than as a commit log. Each item is tagged with its patch
+number in brackets (e.g. `[0010]`, or `[raptor-hal 0008]`); the **Patch map**
+below is the index. Development notes — process, methodology, and the
+change-by-change history — are kept separately and can be provided on request.
+For the headline summary and how to apply the patches, see the
+[README](../README.md).
 
 - **Part 1:** fixes and features that belong in the packages this port starts
   from, grouped by upstream project.
@@ -30,6 +32,42 @@ Every item marked *verified* runs on at least one of the five camera models toda
 | [themactep/thingino-onvif](https://github.com/themactep/thingino-onvif) | a PTZ schema-order fix (Frigate) | one patch |
 | [themactep/thingino-firmware](https://github.com/themactep/thingino-firmware) | generic platform-enabling fixes; the SigmaStar platform (John Chia's, re-cut onto current master); two new packages (`thingino-lensd`, `thingino-nettest`); five camera profiles | separate PRs per group |
 
+## Patch map
+
+The 21 patches onto `themactep/thingino-firmware` master, in
+[`patches/thingino-sigmastar/`](../patches/thingino-sigmastar/):
+
+| # | Patch |
+|---|---|
+| 0001 | sigmastar: vendor packages (sdk, lib, u-boot) + SDK sensor-load fixes |
+| 0002 | sigmastar: Infinity6C board, SoC and kernel |
+| 0003 | sigmastar: config fragments and Config/Makefile wiring |
+| 0004 | sigmastar: ARM GCC 16 toolchains and CI build |
+| 0005 | sigmastar: thingino-system utilities and per-vendor lib-serial-mac |
+| 0006 | sigmastar: build Raptor against the raptor-hal fork; reference target |
+| 0007 | thingino-uhttpd: conditional requests and cache policy |
+| 0008 | thingino-onvif: zoom default spaces in schema order |
+| 0009 | thingino: platform-enabling fixes (ISP default, Ethernet, day/night link) |
+| 0010 | thingino-raptor: non-Ingenic link and day/night (ric) |
+| 0011 | thingino-raptor: RTSP/ONVIF delivery and Ch1 preview fallback |
+| 0012 | thingino-raptor: streaming/encoder rate-control, Image Quality, motion gating |
+| 0013 | thingino-raptor: raptor-watchdog |
+| 0014 | thingino-nettest: bandwidth test tool |
+| 0015 | thingino-lensd: AF feed, ONVIF PTZ, serial IR-cut, Pelco-D |
+| 0016 | thingino-lensd: web UI PTZ plugin |
+| 0017 | thingino-sysupgrade and build-ID stamping |
+| 0018 | cameras: MC-A85 (`yma85_ssc378_gc8613`) |
+| 0019 | cameras: JL12D2 (`mcl12d2_ssc377d_imx335`) |
+| 0020 | cameras: YMF46D (`ymf46d_ssc377d_gc4653`) |
+| 0021 | cameras: N803 (`n803_ssc378qe_imx415`) |
+
+The 8 HAL-fork patches onto `gtxaspec/raptor-hal`, in
+[`patches/raptor-hal/`](../patches/raptor-hal/): John Chia's backend import and
+build hooks `[0001]`, the upstream-interface bridge `[0002]`, FlickerEx `[0003]`,
+the knob scale map `[0004]`, the fork README `[0005]`, `ae_luma` scaling `[0006]`,
+the SCL→VENC ring depth `[0007]`, and the opt-in AE max-shutter cap `[0008]`. See
+[raptor-hal-FORK.md](raptor-hal-FORK.md).
+
 ## 1. Fixes and features for upstream
 
 ### 1.1 OpenWrt uhttpd
@@ -38,40 +76,41 @@ Conditional requests: `If-None-Match` decides when it is present, and
 `If-Modified-Since` is ignored then (RFC 9110 §13.2.2). uhttpd tested the date
 first, so a newer date answered 304 even when the ETag did not match — a browser
 that last saw another device at the same address kept that device's files.
-*Verified (curl matrix, MC-A85).*
+*Verified (curl matrix, MC-A85).* `[0007]`
 
 ### 1.2 Raptor (gtxaspec/raptor)
 
 None of these is SigmaStar-only in effect: each fixes a general bug or adds a
 general feature, found on SigmaStar first. They are individual patches in
-`package/thingino-raptor/`, ready to split into small PRs.
+`package/thingino-raptor/`, carried by shipped patches 0010–0013 and ready to
+split into small PRs.
 
 - **Non-Ingenic link fix** — `LDFLAGS_HAL` stops hard-coding the Ingenic SDK
   libraries, so a non-Ingenic HAL backend links instead of failing on
-  `cannot find -limp`. *Verified.*
+  `cannot find -limp`. *Verified.* `[0010]`
 - **Day/night for PWM-dimmed IR banks (ric)** — an `irled_cmd` hook for IR banks
   that are not on a GPIO, a luma trigger that treats them as IR, an IR level
   ladder that dims to the scene by night gain, and a fixed exposure-poll cadence.
-  *Verified (MC-A85, YMF46D).*
+  *Verified (MC-A85, YMF46D).* `[0010]`
 - **Init hooks** — `/etc/raptor.d/*` run with `stop` before the daemons go down
   and `start` after, so a process that calls the ISP (a lens daemon) can release
-  it first and the vendor MI module does not oops. *Verified (JL12D2).*
+  it first and the vendor MI module does not oops. *Verified (JL12D2).* `[0011]`
 - **RTSP delivery in one piece** — TCP_CORK around each reply; the Happytime RTSP
   client in Zosi/Ansjer NVRs stalled on the token-at-a-time writes and showed
-  "unconnected". *Verified (Zosi NVR).*
+  "unconnected". *Verified (Zosi NVR).* `[0011]`
 - **DESCRIBE with the parameter sets** — rsd waits for SPS/PPS before answering,
   so go2rtc/Frigate does not build MSE from a placeholder SPS and show 16:9 as
-  4:3. *Verified; Frigate fixed.*
+  4:3. *Verified; Frigate fixed.* `[0011]`
 - **Preview fallback** — Ch1 previews fall back to the main JPEG channel when the
-  sub has no JPEG channel. *Verified.*
-- **ONVIF profiles report the real stream sizes.** *Verified.*
+  sub has no JPEG channel. *Verified.* `[0011]`
+- **ONVIF profiles report the real stream sizes.** *Verified.* `[0011]`
 - **Streaming and encoder rate-control** — JPEG rings sized to the largest frame,
   explicit VBR caps, and stream frame rates constrained to divide the sensor rate.
-  *Verified.*
+  *Verified.* `[0012]`
 - **ISP-capability reporting** — rvd reports which image controls the HAL actually
-  applies, so the web UI can show only those. *Verified.*
+  applies, so the web UI can show only those. *Verified.* `[0012]`
 - **raptor-watchdog** — saves fault reports and recovers a wedged stack.
-  *Verified.*
+  *Verified.* `[0013]`
 
 ### 1.3 raptor-hal (gtxaspec/raptor-hal)
 
@@ -83,13 +122,13 @@ FlickerEx anti-flicker lock, a 0..255 image-knob scale map for the i6c ISP,
 SCL→VENC ring depth, and an opt-in AE max-shutter cap. Submit as one series with
 John Chia, since most of the code is his; the bridge disappears if his backend
 moves to the current interface. Full detail in
-[raptor-hal-FORK.md](raptor-hal-FORK.md).
+[raptor-hal-FORK.md](raptor-hal-FORK.md). `[raptor-hal 0001–0008]`
 
 ### 1.4 thingino-onvif (themactep/thingino-onvif)
 
 Each zoom default space is emitted in its schema-sequence position. Out of order,
 zeep (Frigate's ONVIF parser) dropped the pan/tilt spaces, so Frigate showed the
-zoom buttons but no arrows. *Verified (JL12D2 + Frigate).*
+zoom buttons but no arrows. *Verified (JL12D2 + Frigate).* `[0008]`
 
 ### 1.5 Thingino (themactep/thingino-firmware)
 
@@ -98,15 +137,15 @@ zoom buttons but no arrows. *Verified (JL12D2 + Frigate).*
 Small and independent; each is useful on Ingenic too.
 
 - Do not default the ISP choice to Ingenic's stack on other vendors (it pulled
-  the Ingenic SDK into a SigmaStar config).
+  the Ingenic SDK into a SigmaStar config). `[0009]`
 - Really disable git submodules when a package turns them off (Buildroot still
-  cloned them otherwise).
+  cloned them otherwise). `[0006]`
 - Per-vendor `lib-serial-mac` — the global copy reads Ingenic serial registers,
-  so elsewhere the hostname suffix came out empty.
+  so elsewhere the hostname suffix came out empty. `[0005]`
 - Hide the "Photosensing Config" web link when `thingino-daynightd` is absent
-  (under raptor the link 404s).
+  (under raptor the link 404s). `[0009]`
 - A cache policy so a reused camera address never shows the previous device's
-  config or footer (with the uhttpd fix in 1.1).
+  config or footer (with the uhttpd fix in 1.1). `[0007]`
 
 #### 1.5.2 The SigmaStar Infinity6C platform
 
@@ -117,14 +156,15 @@ him, crediting his work. It comprises:
 
 - the vendor packages `sigmastar-sdk`, `sigmastar-lib` and `sigmastar-uboot`
   (the MI stack), including two SDK sensor-load fixes — an `iqfile` alias so AWB
-  initialises (otherwise a green picture) and GC8613 4-lane loading;
+  initialises (otherwise a green picture) and GC8613 4-lane loading; `[0001]`
 - Infinity6C board and SoC support, and the kernel seam (`kernels/sigmastar.mk`);
-- ARM GCC 16 toolchain producers (glibc and uClibc);
+  `[0002]`
+- ARM GCC 16 toolchain producers (glibc and uClibc); `[0004]`
 - the config fragments and Config/Makefile wiring (SigmaStar packages sourced,
-  U-Boot kept Ingenic-only, the Maruko family mapping, image assembly);
-- a SigmaStar CI build job and a target-library check;
-- building upstream Raptor on SigmaStar against the raptor-hal fork (1.3);
-- a board-less reference target.
+  U-Boot kept Ingenic-only, the Maruko family mapping, image assembly); `[0003]`
+- a SigmaStar CI build job and a target-library check; `[0004]`
+- building upstream Raptor on SigmaStar against the raptor-hal fork (1.3), and a
+  board-less reference target. `[0006]`
 
 #### 1.5.3 New package: thingino-lensd (serial lens/PTZ boards)
 
@@ -132,14 +172,14 @@ For PTZ cameras built around a serial lens/PTZ board — the JL12D2's AF head an
 the N803's Pelco-D manual-focus head. It provides:
 
 - stock-equivalent **autofocus**, feeding the board two ISP-derived focus values
-  each frame (measured against a stock unit);
+  each frame (measured against a stock unit); `[0015]`
 - **ONVIF PTZ** — continuous pan/tilt/zoom, presets, home, zoom position — that
-  Frigate renders with arrows and zoom;
+  Frigate renders with arrows and zoom; `[0015]`
 - a **web UI PTZ plugin**: joystick with speed by reach, zoom/focus buttons,
-  presets and home;
+  presets and home; `[0016]`
 - **IR-cut driven over the serial frame** where the filter is on the lens head,
-  following ric's day/night decision, not a GPIO;
-- a **Pelco-only mode** (`lensd -P`, no AF feed) for manual-focus heads.
+  following ric's day/night decision, not a GPIO; `[0015]`
+- a **Pelco-only mode** (`lensd -P`, no AF feed) for manual-focus heads. `[0015]`
 
 The AF feed uses SigmaStar's MI ISP API; the PTZ, ONVIF and web-UI parts are
 protocol-level and would serve any Pelco-D board, so upstream may want them split
@@ -149,17 +189,17 @@ along that line.
 
 A diagnostic tool, generic to any camera: a **Tools → Bandwidth test** web page
 and CGI that run `iperf3` and read the PHY link rate, for chasing packet loss
-across a switch or NVR path.
+across a switch or NVR path. `[0014]`
 
 #### 1.5.5 Camera profiles
 
-| Camera (owner's units) | Profile |
-|---|---|
-| reference (John Chia) | `noname_ssc377qe_imx335` |
-| UVision MC-A85 / Anpviz IPC-D3B83B-S: SSC378DE + GC8613, fixed 4K | `yma85_ssc378_gc8613` |
-| Jennov JL12D2 PTZ / UVision MCL12D2: SSC377D + IMX335, 20x zoom | `mcl12d2_ssc377d_imx335` |
-| Anpviz IPC-B8A63WD-S / UVision MC-F46D: SSC377D + GC4653, 2560x1440 bullet | `ymf46d_ssc377d_gc4653` |
-| N803 PTZ: SSC378QE + IMX415, 8 MP, 5x zoom, Pelco-D manual-focus head | `n803_ssc378qe_imx415` |
+| Camera (owner's units) | Profile | Patch |
+|---|---|---|
+| reference (John Chia) | `noname_ssc377qe_imx335` | 0006 |
+| UVision MC-A85 / Anpviz IPC-D3B83B-S: SSC378DE + GC8613, fixed 4K | `yma85_ssc378_gc8613` | 0018 |
+| Jennov JL12D2 PTZ / UVision MCL12D2: SSC377D + IMX335, 20x zoom | `mcl12d2_ssc377d_imx335` | 0019 |
+| Anpviz IPC-B8A63WD-S / UVision MC-F46D: SSC377D + GC4653, 2560x1440 bullet | `ymf46d_ssc377d_gc4653` | 0020 |
+| N803 PTZ: SSC378QE + IMX415, 8 MP, 5x zoom, Pelco-D manual-focus head | `n803_ssc378qe_imx415` | 0021 |
 
 Each profile is one directory under `configs/cameras/<profile>/` (defconfig,
 kernel `.config` fragment, overlay) plus a board device-tree patch under
@@ -183,19 +223,19 @@ Tooling and notes specific to this port, not candidates:
 - **Build scripts:** a per-camera build wrapper plus a build-all wrapper, with
   in-squashfs checks and a build-ID guard (an image built from uncommitted
   changes is stamped `-dirty`, and each build verifies the image matches the
-  current commit).
+  current commit). `[0017]`
 - **Bring-up records and bench notes.**
 
 ## 2. What the build adds on top of Thingino (SigmaStar line)
 
 ### 2.1 Cameras supported
 
-| Camera | Streams | Highlights |
-|---|---|---|
-| MC-A85 (fixed 4K) | 3840x2160 + 1280x720 H.264 | OEM tuning, FlickerEx, luma day/night with IR ladder, IR + white lights |
-| JL12D2 (PTZ, 20x) | 2592x1944 + 1280x960 (native 4:3) | autofocus, pan/tilt/zoom/presets over ONVIF and web UI, microSD |
-| YMF46D (bullet) | 2560x1440 + 960x540 (sub) | correct orientation, mic, IR + white lights, GPIO IR-cut, microSD automount |
-| N803 (PTZ, 5x) | 3840x2160 + sub | Pelco-D pan/tilt/zoom/focus, limited autofocus, serial IR-cut, 256 MB DDR |
+| Camera | Streams | Highlights | Patch |
+|---|---|---|---|
+| MC-A85 (fixed 4K) | 3840x2160 + 1280x720 H.264 | OEM tuning, FlickerEx, luma day/night with IR ladder, IR + white lights | 0018 |
+| JL12D2 (PTZ, 20x) | 2592x1944 + 1280x960 (native 4:3) | autofocus, pan/tilt/zoom/presets over ONVIF and web UI, microSD | 0019 |
+| YMF46D (bullet) | 2560x1440 + 960x540 (sub) | correct orientation, mic, IR + white lights, GPIO IR-cut, microSD automount | 0020 |
+| N803 (PTZ, 5x) | 3840x2160 + sub | Pelco-D pan/tilt/zoom/focus, limited autofocus, serial IR-cut, 256 MB DDR | 0021 |
 
 All five run upstream Raptor with Thingino's own web UI and its Raptor plugin.
 They boot under the **stock OEM U-Boot and flash layout**, so a unit can be
@@ -205,37 +245,39 @@ flashed from stock and back without opening it.
 
 - **Streaming:** upstream raptor/ipc/common/compy at Thingino's pins; only the
   HAL is specific to this port (1.3). Eight RTSP clients per profile — enough for
-  Frigate plus an NVR plus viewers.
+  Frigate plus an NVR plus viewers. `[0006, raptor-hal 0001–0008]`
 - **Day/night:** ric's luma trigger works with PWM-dimmed IR banks and its IR
-  ladder dims to the scene; per-camera IR-cut GPIOs and pulse width; on the
-  JL12D2 the IR-cut filter is on the lens head and driven over serial by `lensd`,
+  ladder dims to the scene; per-camera IR-cut GPIOs and pulse width; on the JL12D2
+  the IR-cut filter is on the lens head and driven over serial by `lensd`,
   following ric's decision (day colour, night mono + IR); a `light` tool for IR
-  and white banks with brightness.
+  and white banks with brightness. `[0010, 0015]`
 - **PTZ and lens:** stock-equivalent autofocus, zoom position read-back, ONVIF
   PTZ that Frigate shows with arrows and zoom, a web UI joystick with speed by
-  reach, and 31 named presets plus home.
+  reach, and 31 named presets plus home. `[0015, 0016]`
 - **Encoder and rate control:** JPEG rings sized to the largest frame, the
   SCL→VENC ring depth tuned so the scaler cannot lap the encoder on a cascaded
   sub, explicit VBR caps, and frame rates constrained to divide the sensor rate.
+  `[0012, raptor-hal 0007]`
 - **Image Quality page honesty:** the web UI shows only the controls the HAL
   actually applies — on these SoCs brightness, contrast, saturation, AE
   compensation, anti-flicker, temporal NR, WDR and defog; the no-op sharpness and
   white-balance controls are gone. Flips save with a "restart stream" prompt,
-  since the SoC only applies a flip on restart.
+  since the SoC only applies a flip on restart. `[0012]`
 - **Night AE max-shutter cap:** an opt-in, per-profile shutter ceiling (off by
-  default) to hold frame rate at night at the cost of gain.
+  default) to hold frame rate at night at the cost of gain. `[raptor-hal 0008]`
 - **Motion gating:** these HALs have no on-camera motion detection (Frigate does
   it), so the web UI hides the Motion control and the camera refuses to enable it.
+  `[0012]`
 - **Interop:** Zosi/Ansjer NVRs connect; Frigate/go2rtc always gets the parameter
-  sets, so no 4:3 squish; ONVIF reports the real stream sizes.
+  sets, so no 4:3 squish; ONVIF reports the real stream sizes. `[0011]`
 - **Web UI:** never shows a stale config or footer (cache policy + the uhttpd
   fix); Ch1 previews work with JPEG off the main; no dead day/night link; the PTZ
-  plugin; a bandwidth-test diagnostic.
+  plugin; a bandwidth-test diagnostic. `[0007, 0011, 0014, 0016]`
 - **Storage:** microSD as modules (SDIO, MMC block, exFAT), with mdev automount
-  on the YMF46D and JL12D2.
+  on the YMF46D and JL12D2. `[0019, 0020]`
 - **Brick protection:** on the OEM layout the U-Boot env sits on the first block
   of the kernel partition, so `fw_setenv` used to wipe the uImage header; each
-  profile keeps the env in a file instead.
+  profile keeps the env in a file instead. `[0018–0021]`
 
 ## 3. Still open
 
