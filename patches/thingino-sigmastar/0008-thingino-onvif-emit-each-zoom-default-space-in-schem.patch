@@ -1,9 +1,11 @@
-From d1c7837ecee6c35e3c20f5dbc05a22af66b7dfa0 Mon Sep 17 00:00:00 2001
+From 1a3cd3a8dc9af939f2dc26f8142ecf538b6cdd1e Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 4 Nov 2026 08:19:15 -0500
-Subject: [PATCH 08/21] thingino-onvif: emit each zoom default space in schema
+Date: Wed, 11 Nov 2026 17:09:54 -0500
+Subject: [PATCH 08/22] thingino-onvif: emit each zoom default space in schema
  order
 
+Out of xs:sequence order, zeep (Frigate's ONVIF parser) dropped the pan/tilt
+spaces, so Frigate showed zoom buttons but no arrows.
 ---
  ...h-zoom-default-space-in-schema-order.patch | 402 ++++++++++++++++++
  1 file changed, 402 insertions(+)
@@ -11,7 +13,7 @@ Subject: [PATCH 08/21] thingino-onvif: emit each zoom default space in schema
 
 diff --git a/package/thingino-onvif/0001-ptz-emit-each-zoom-default-space-in-schema-order.patch b/package/thingino-onvif/0001-ptz-emit-each-zoom-default-space-in-schema-order.patch
 new file mode 100644
-index 000000000..87d99b7fc
+index 000000000..e2ec6997c
 --- /dev/null
 +++ b/package/thingino-onvif/0001-ptz-emit-each-zoom-default-space-in-schema-order.patch
 @@ -0,0 +1,402 @@
@@ -417,3 +419,6 @@ index 000000000..87d99b7fc
 +-- 
 +2.43.0
 +
+-- 
+2.43.0
+

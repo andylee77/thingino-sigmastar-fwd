@@ -1,23 +1,40 @@
-From 9a6e534a5c904e1b614bb6a65598cc4a20d4810f Mon Sep 17 00:00:00 2001
+From 68cc89026e8107a33c53c976ea2c11908905b89f Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 4 Nov 2026 08:19:15 -0500
-Subject: [PATCH 01/21] sigmastar: vendor packages (sdk, lib, u-boot)
+Date: Wed, 11 Nov 2026 17:09:54 -0500
+Subject: [PATCH 01/22] sigmastar: vendor packages (sdk, lib, u-boot, sensor
+ headers)
 
+sigmastar-sdk (the kernel modules, sensor drivers, IQ files and the MI load
+script, indexed by vendor drop), sigmastar-lib (the vendor's binary MI
+userspace libraries), sigmastar-uboot, and sigmastar-sensor-headers.
+
+The SDK aliases iqfile1.bin to iqfile0.bin: libcus3a picks the IQ file by
+channel mask, and without the alias AWB never initialised (a green picture).
+It loads the GC8613 on four lanes and builds the GC8613 driver from source.
+
+The sensor drivers must build against the framework headers that match the
+1230 drop's mi.ko, not the release_0907 set the SDK pin carries.
+sigmastar-sensor-headers fetches those at a pinned commit of openipc/sensors
+and the SDK copies them in before the build; the SDK's own patch adds only
+the GC8613 driver.
+
+Re-cut from John Chia's sigmastar-6b0-platform branch of
+johnchia/thingino-firmware onto current master.
 ---
  package/sigmastar-lib/Config.in               |  15 +
  package/sigmastar-lib/sigmastar-lib.mk        |  54 ++
- ...0001-infinity6c-gc8613-sensor-driver.patch | 752 ++++++++++++++++++
- package/sigmastar-sdk/Config.in               |  27 +
+ ...0001-infinity6c-gc8613-sensor-driver.patch | 764 ++++++++++++++++++
+ package/sigmastar-sdk/Config.in               |  23 +
  package/sigmastar-sdk/files/S20sigmastar      |  53 ++
  .../sigmastar-sdk/files/script/load_sigmastar | 180 +++++
  package/sigmastar-sdk/files/script/zoom.sh    | 183 +++++
- package/sigmastar-sdk/sigmastar-sdk.mk        | 200 +++++
+ package/sigmastar-sdk/sigmastar-sdk.mk        | 216 +++++
  package/sigmastar-sensor-headers/Config.in    |  12 +
  .../sigmastar-sensor-headers.mk               |  40 +
  ...rop-retrospective-rootfs-auto-sizing.patch |  64 ++
  package/sigmastar-uboot/Config.in             |  19 +
  package/sigmastar-uboot/sigmastar-uboot.mk    |  97 +++
- 13 files changed, 1696 insertions(+)
+ 13 files changed, 1720 insertions(+)
  create mode 100644 package/sigmastar-lib/Config.in
  create mode 100644 package/sigmastar-lib/sigmastar-lib.mk
  create mode 100644 package/sigmastar-sdk/0001-infinity6c-gc8613-sensor-driver.patch
@@ -55,7 +72,7 @@ index 000000000..7cf6a712a
 +	  https://github.com/johnchia/sigmastar-lib
 diff --git a/package/sigmastar-lib/sigmastar-lib.mk b/package/sigmastar-lib/sigmastar-lib.mk
 new file mode 100644
-index 000000000..ce5b4e226
+index 000000000..14b2ffc60
 --- /dev/null
 +++ b/package/sigmastar-lib/sigmastar-lib.mk
 @@ -0,0 +1,54 @@
@@ -77,8 +94,8 @@ index 000000000..ce5b4e226
 +################################################################################
 +
 +SIGMASTAR_LIB_SITE_METHOD = git
-+# Local mirror of https://github.com/johnchia/sigmastar-lib, kept by
-+# mirror-sigmastar-deps.sh so the build does not depend on that repository.
++# Local mirror of https://github.com/johnchia/sigmastar-lib, so the build
++# does not depend on that repository.
 +SIGMASTAR_LIB_SITE = file://$(HOME)/src/mirrors/git/johnchia__sigmastar-lib.git
 +SIGMASTAR_LIB_SITE_BRANCH = main
 +SIGMASTAR_LIB_VERSION = cd3c621fdb9e60e7f567ec6146af44ebeddc2630
@@ -115,10 +132,10 @@ index 000000000..ce5b4e226
 +$(eval $(generic-package))
 diff --git a/package/sigmastar-sdk/0001-infinity6c-gc8613-sensor-driver.patch b/package/sigmastar-sdk/0001-infinity6c-gc8613-sensor-driver.patch
 new file mode 100644
-index 000000000..fb220ae31
+index 000000000..741035449
 --- /dev/null
 +++ b/package/sigmastar-sdk/0001-infinity6c-gc8613-sensor-driver.patch
-@@ -0,0 +1,752 @@
+@@ -0,0 +1,764 @@
 +From: Andy <andylee77@users.noreply.github.com>
 +Subject: [PATCH] infinity6c: GC8613 sensor driver
 +
@@ -129,13 +146,17 @@ index 000000000..fb220ae31
 +It builds against the sensor-src headers that match 1230's mi.ko (the set
 +before fe5d953), which sigmastar-sensor-headers supplies.
 +
++License: GPL-2.0. The skeleton was started from SigmaStar's gc4653 driver;
++the file header records the derivation.
++
 +---
 +diff --git a/infinity6c/sensor-src/sensor_gc8613_mipi.c b/infinity6c/sensor-src/sensor_gc8613_mipi.c
 +new file mode 100644
-+index 0000000..72a968e
++index 0000000..28d5c06
 +--- /dev/null
 ++++ b/infinity6c/sensor-src/sensor_gc8613_mipi.c
-+@@ -0,0 +1,735 @@
++@@ -0,0 +1,744 @@
+++// SPDX-License-Identifier: GPL-2.0
 ++/*
 ++ * sensor_gc8613_mipi.c - GalaxyCore GC8613 (8MP, MIPI 4-lane, 10-bit) driver
 ++ * for SigmaStar Infinity6C (SSC378DE) under the ms_cus_sensor framework.
@@ -144,12 +165,20 @@ index 000000000..fb220ae31
 ++ * so the ms_cus_sensor ABI/offsets match the 1230 mi.ko by construction
 ++ * (the OEM prebuilt .ko ABI-crashes mi.ko). Register tables, gain curve, mode
 ++ * timing and power sequence were reverse-engineered from the unit's own OEM
-++ * driver gc8613YA_MIPI_10bit_v2.2_20241015.ko (build 202410151157). Template:
-++ * sensor_gc4653_mipi.c (same GalaxyCore register conventions).
+++ * driver gc8613YA_MIPI_10bit_v2.2_20241015.ko (build 202410151157).
+++ *
+++ * Derivation: the skeleton (the ms_cus_sensor callbacks, most of their names
+++ * and the framework boilerplate) was started from SigmaStar's
+++ * sensor_gc4653_mipi.c, which shares the GalaxyCore register conventions. That
+++ * file is marked confidential by SigmaStar and grants no license; none of its
+++ * register tables are used here. The SENSOR_DRV_ENTRY_IMPL_* macros come from
+++ * SigmaStar's drv_sensor_common.h, which declares MODULE_LICENSE("Proprietary")
+++ * for the module they build.
 ++ *
 ++ * Target: Anpviz IPC-D3B83B-S / UVision MC-A85. Load: chmap=1 lane_num=4.
 ++ * ISP IQ reuses the IMX307 profile (OEM iqfile0-3 -> imx307_iqfile.bin).
-++ * GPL-2.0.
+++ *
+++ * License: GPL-2.0, the kernel's, for the code written here.
 ++ */
 ++
 ++#ifdef __cplusplus
@@ -873,10 +902,10 @@ index 000000000..fb220ae31
 ++                            gc8613_params);
 diff --git a/package/sigmastar-sdk/Config.in b/package/sigmastar-sdk/Config.in
 new file mode 100644
-index 000000000..2a4ec5571
+index 000000000..faf4ca63c
 --- /dev/null
 +++ b/package/sigmastar-sdk/Config.in
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,23 @@
 +config BR2_PACKAGE_SIGMASTAR_SDK
 +	bool "sigmastar-sdk"
 +	depends on BR2_SOC_VENDOR_SIGMASTAR
@@ -900,10 +929,6 @@ index 000000000..2a4ec5571
 +	  the Raptor HAL dlopens. Neither half is useful alone.
 +
 +	  https://github.com/johnchia/sigmastar-sdk
-+
-+# The 1230-matching sensor headers it selects; a hidden symbol, so here rather
-+# than in the top-level Config.in.
-+source "$BR2_EXTERNAL_THINGINO_PATH/package/sigmastar-sensor-headers/Config.in"
 diff --git a/package/sigmastar-sdk/files/S20sigmastar b/package/sigmastar-sdk/files/S20sigmastar
 new file mode 100644
 index 000000000..9997d084c
@@ -1340,10 +1365,10 @@ index 000000000..567308d68
 +zoom_$1
 diff --git a/package/sigmastar-sdk/sigmastar-sdk.mk b/package/sigmastar-sdk/sigmastar-sdk.mk
 new file mode 100644
-index 000000000..1c4864ea8
+index 000000000..032c2a990
 --- /dev/null
 +++ b/package/sigmastar-sdk/sigmastar-sdk.mk
-@@ -0,0 +1,200 @@
+@@ -0,0 +1,216 @@
 +################################################################################
 +#
 +# sigmastar-sdk
@@ -1362,12 +1387,16 @@ index 000000000..1c4864ea8
 +################################################################################
 +
 +SIGMASTAR_SDK_SITE_METHOD = git
-+# Local mirror of https://github.com/johnchia/sigmastar-sdk, kept by
-+# mirror-sigmastar-deps.sh so the build does not depend on that repository.
++# Local mirror of https://github.com/johnchia/sigmastar-sdk, so the build
++# does not depend on that repository.
 +SIGMASTAR_SDK_SITE = file://$(HOME)/src/mirrors/git/johnchia__sigmastar-sdk.git
 +SIGMASTAR_SDK_SITE_BRANCH = drop-1230
 +SIGMASTAR_SDK_VERSION = bdfbbdd67407974372e1f07478b1edb2e22fce1a
-+SIGMASTAR_SDK_LICENSE = PROPRIETARY (mi modules), GPL-2.0 (sensor drivers)
++# The SigmaStar sensor drivers are not GPL: SigmaStar marks their sources
++# confidential, and drv_sensor_common.h builds them as
++# MODULE_LICENSE("Proprietary"). sensor_config.c declares MODULE_LICENSE("GPL");
++# the GC8613 driver is ours (0001), GPL-2.0.
++SIGMASTAR_SDK_LICENSE = PROPRIETARY (mi modules, SigmaStar sensor drivers), GPL-2.0+ (sensor_config.c), GPL-2.0 (sensor_gc8613_mipi.c)
 +SIGMASTAR_SDK_REDISTRIBUTE = NO
 +
 +SIGMASTAR_SDK_DEPENDENCIES = linux
@@ -1431,9 +1460,10 @@ index 000000000..1c4864ea8
 +#
 +# A drop that sets SIGMASTAR_SENSOR := prebuilt ships its own drivers in the
 +# kmod directory instead, and the source build is skipped entirely: the two
-+# install to the same names, so building both would overwrite the vendor's copy
-+# with one compiled against the wrong ms_cus_sensor layout -- which fails
-+# silently, at MI_SNR_QueryResCount, rather than at load.
++# install to the same names, and a driver compiled against the wrong
++# ms_cus_sensor layout fails silently, at MI_SNR_QueryResCount, rather than at
++# load. With SIGMASTAR_SENSOR := source both are installed and the prebuilt
++# copies are put back last (SIGMASTAR_SDK_PREBUILT_SENSORS_WIN below).
 +ifneq ($(SIGMASTAR_SENSOR),prebuilt)
 +SIGMASTAR_SDK_MODULE_SUBDIRS = $(SOC_FAMILY)/sensor-src
 +SIGMASTAR_SDK_MODULE_MAKE_OPTS = \
@@ -1542,6 +1572,17 @@ index 000000000..1c4864ea8
 +# builds $(@D) itself, and the repository root has no Kbuild.
 +ifneq ($(SIGMASTAR_SENSOR),prebuilt)
 +$(eval $(kernel-module))
++
++# The source-built drivers install after INSTALL_TARGET_CMDS (kernel-module's
++# own post-install hook), under the same names as the drop's prebuilt ones. The
++# drop's copies win: copy them back over. A prebuilt driver is the one proven
++# against this drop's mi.ko (the JL12D2's imx335); the source build only adds
++# the sensors the drop has no driver for. Every board then ships the same set.
++define SIGMASTAR_SDK_PREBUILT_SENSORS_WIN
++	$(INSTALL) -m 644 -t $(TARGET_DIR)/lib/modules/$(SIGMASTAR_SDK_KREL)/sigmastar \
++		$(SIGMASTAR_SDK_KMOD)/*
++endef
++SIGMASTAR_SDK_POST_INSTALL_TARGET_HOOKS += SIGMASTAR_SDK_PREBUILT_SENSORS_WIN
 +endif
 +$(eval $(generic-package))
 diff --git a/package/sigmastar-sensor-headers/Config.in b/package/sigmastar-sensor-headers/Config.in
@@ -1806,3 +1847,6 @@ index 000000000..bba409f2d
 +endef
 +
 +$(eval $(generic-package))
+-- 
+2.43.0
+

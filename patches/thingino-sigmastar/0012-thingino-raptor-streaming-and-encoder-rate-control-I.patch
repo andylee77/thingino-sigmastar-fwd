@@ -1,33 +1,45 @@
-From 35baa053ec97df5656090016edb2a9711c46388c Mon Sep 17 00:00:00 2001
+From e0db43a08ca3472b10b57167b45f0b0fdfad3f30 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 4 Nov 2026 08:19:15 -0500
-Subject: [PATCH 12/21] thingino-raptor: streaming and encoder rate-control,
+Date: Wed, 11 Nov 2026 17:09:54 -0500
+Subject: [PATCH 12/22] thingino-raptor: streaming and encoder rate-control,
  Image Quality, motion gating
 
+raptor patches 0109-0111: JPEG rings sized for the largest JPEG, S31raptor
+exports /etc/default/raptor to the daemons, and rvd reports which ISP
+controls the HAL has (get-isp-caps).
+
+The Streamer pages apply a stream as one change from per-camera menus;
+Image Quality shows only the controls the HAL applies, its noise-reduction
+knobs on the agent's noise_reduction and temporal_noise_reduction; there are
+no on-camera motion controls where the HAL has no IVS
+(raptor-sigmastar.webui.json, S32raptor-motion, raptor-motion-watch). The
+agent adapter carries the server side of these and of the Ch1 preview
+fallback: the stream state with its video-memory cost, the ISP caps, motion.
 ---
- ...ngs-for-the-largest-JPEG-not-the-ave.patch |  42 ++
- ...rt-etc-default-raptor-to-the-daemons.patch |  33 ++
- ...-reports-which-ISP-controls-the-HAL-.patch |  91 ++++
+ ...ngs-for-the-largest-JPEG-not-the-ave.patch |  42 +
+ ...rt-etc-default-raptor-to-the-daemons.patch |  33 +
+ ...-reports-which-ISP-controls-the-HAL-.patch |  91 ++
  .../thingino-raptor/files/S32raptor-motion    |   4 +-
+ package/thingino-raptor/files/agent-adapter   | 818 +++++++++++++++---
  .../thingino-raptor/files/raptor-motion-watch |  22 +
- .../files/raptor-sigmastar.webui.json         |   7 +
- .../files/www/a/streamer-image.js             | 341 ++++++++++--
- .../files/www/a/streamer-stream.js            | 488 ++++++++++++++++++
- .../files/www/streamer-image.html             | 228 +++++---
- .../files/www/streamer-main.html              | 163 +++---
- .../files/www/streamer-substream.html         | 163 +++---
- 11 files changed, 1299 insertions(+), 283 deletions(-)
- create mode 100755 package/thingino-raptor/0009-rvd-size-JPEG-rings-for-the-largest-JPEG-not-the-ave.patch
- create mode 100755 package/thingino-raptor/0010-S31raptor-export-etc-default-raptor-to-the-daemons.patch
- create mode 100644 package/thingino-raptor/0011-rvd-get-isp-caps-reports-which-ISP-controls-the-HAL-.patch
+ .../files/raptor-sigmastar.webui.json         |   9 +
+ .../files/www/a/streamer-image.js             | 387 +++++++--
+ .../files/www/a/streamer-stream.js            | 488 +++++++++++
+ .../files/www/streamer-image.html             | 236 +++--
+ .../files/www/streamer-main.html              | 157 ++--
+ .../files/www/streamer-substream.html         | 157 ++--
+ 12 files changed, 2022 insertions(+), 422 deletions(-)
+ create mode 100755 package/thingino-raptor/0109-rvd-size-JPEG-rings-for-the-largest-JPEG-not-the-ave.patch
+ create mode 100755 package/thingino-raptor/0110-S31raptor-export-etc-default-raptor-to-the-daemons.patch
+ create mode 100644 package/thingino-raptor/0111-rvd-get-isp-caps-reports-which-ISP-controls-the-HAL-.patch
  create mode 100644 package/thingino-raptor/files/raptor-sigmastar.webui.json
  create mode 100755 package/thingino-raptor/files/www/a/streamer-stream.js
 
-diff --git a/package/thingino-raptor/0009-rvd-size-JPEG-rings-for-the-largest-JPEG-not-the-ave.patch b/package/thingino-raptor/0009-rvd-size-JPEG-rings-for-the-largest-JPEG-not-the-ave.patch
+diff --git a/package/thingino-raptor/0109-rvd-size-JPEG-rings-for-the-largest-JPEG-not-the-ave.patch b/package/thingino-raptor/0109-rvd-size-JPEG-rings-for-the-largest-JPEG-not-the-ave.patch
 new file mode 100755
-index 000000000..9fe74781a
+index 000000000..57970462f
 --- /dev/null
-+++ b/package/thingino-raptor/0009-rvd-size-JPEG-rings-for-the-largest-JPEG-not-the-ave.patch
++++ b/package/thingino-raptor/0109-rvd-size-JPEG-rings-for-the-largest-JPEG-not-the-ave.patch
 @@ -0,0 +1,42 @@
 +From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 +From: Andy <andylee77@users.noreply.github.com>
@@ -71,11 +83,11 @@ index 000000000..9fe74781a
 +-- 
 +2.43.0
 +
-diff --git a/package/thingino-raptor/0010-S31raptor-export-etc-default-raptor-to-the-daemons.patch b/package/thingino-raptor/0010-S31raptor-export-etc-default-raptor-to-the-daemons.patch
+diff --git a/package/thingino-raptor/0110-S31raptor-export-etc-default-raptor-to-the-daemons.patch b/package/thingino-raptor/0110-S31raptor-export-etc-default-raptor-to-the-daemons.patch
 new file mode 100755
-index 000000000..c0b51b4f8
+index 000000000..91406df90
 --- /dev/null
-+++ b/package/thingino-raptor/0010-S31raptor-export-etc-default-raptor-to-the-daemons.patch
++++ b/package/thingino-raptor/0110-S31raptor-export-etc-default-raptor-to-the-daemons.patch
 @@ -0,0 +1,33 @@
 +From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 +From: Andy <andylee77@users.noreply.github.com>
@@ -92,9 +104,9 @@ index 000000000..c0b51b4f8
 +
 +--- a/config/S31raptor
 ++++ b/config/S31raptor
-+@@ -5,6 +5,14 @@
-+ RUNDIR=/var/run/rss
-+ SHMDIR=/dev/shm
++@@ -12,6 +12,14 @@ if [ -z "$S31RAPTOR_LOCKED" ] && command -v flock >/dev/null 2>&1; then
++ 	S31RAPTOR_LOCKED=1 exec flock "$RUNDIR/.lock" "$0" "$@"
++ fi
 + 
 ++# Environment the daemons read at start, set per camera (for example
 ++# RSS_SCL_RING_DIV for the Infinity6C HAL). Every assignment is exported.
@@ -110,11 +122,11 @@ index 000000000..c0b51b4f8
 +-- 
 +2.43.0
 +
-diff --git a/package/thingino-raptor/0011-rvd-get-isp-caps-reports-which-ISP-controls-the-HAL-.patch b/package/thingino-raptor/0011-rvd-get-isp-caps-reports-which-ISP-controls-the-HAL-.patch
+diff --git a/package/thingino-raptor/0111-rvd-get-isp-caps-reports-which-ISP-controls-the-HAL-.patch b/package/thingino-raptor/0111-rvd-get-isp-caps-reports-which-ISP-controls-the-HAL-.patch
 new file mode 100644
-index 000000000..44df98416
+index 000000000..c9825dd70
 --- /dev/null
-+++ b/package/thingino-raptor/0011-rvd-get-isp-caps-reports-which-ISP-controls-the-HAL-.patch
++++ b/package/thingino-raptor/0111-rvd-get-isp-caps-reports-which-ISP-controls-the-HAL-.patch
 @@ -0,0 +1,91 @@
 +From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 +From: Andy <andylee77@users.noreply.github.com>
@@ -222,6 +234,997 @@ index 60075b5d7..0830304fb 100644
  		rm -f "$PIDFILE"
  	else
  		killall raptor-motion-watch 2>/dev/null || true
+diff --git a/package/thingino-raptor/files/agent-adapter b/package/thingino-raptor/files/agent-adapter
+index 243df735f..5012652e3 100644
+--- a/package/thingino-raptor/files/agent-adapter
++++ b/package/thingino-raptor/files/agent-adapter
+@@ -4,6 +4,12 @@
+ AGENT_CONFIG="${AGENT_CONFIG:-/etc/raptor.conf}"
+ THINGINO_AGENT_SEND2_CONFIG="${THINGINO_AGENT_SEND2_CONFIG:-/etc/send2.json}"
+ AGENT_PRIVACY_STATE="${AGENT_PRIVACY_STATE:-/run/agent/raptor-privacy}"
++# Stream choices the WebUI offers: the camera profile's, built into the image,
++# then any key overridden on the camera. See agent_stream_options_load.
++AGENT_STREAM_OPTIONS="${AGENT_STREAM_OPTIONS:-/usr/share/raptor/streams.conf}"
++AGENT_STREAM_OPTIONS_LOCAL="${AGENT_STREAM_OPTIONS_LOCAL:-/etc/raptor-streams.conf}"
++AGENT_STREAM_LOCK="${AGENT_STREAM_LOCK:-/run/agent/stream-apply.lock}"
++AGENT_STREAM_BACKUP="${AGENT_STREAM_BACKUP:-/run/agent/raptor.conf.before-apply}"
+ 
+ # The adapter owns the EXIT trap of the agentctl shell that sources it.
+ trap 'rm -f /tmp/agent-raptor-isp.$$ /tmp/agent-raptor-wb.$$' EXIT
+@@ -143,7 +149,19 @@ agent_ctl() {
+ 		echo "raptorctl is not available" >&2
+ 		return 1
+ 	}
+-	raptorctl "$@"
++	# raptorctl exits 0 whenever the daemon answers, even when the answer is
++	# {"status":"error","reason":...} (not supported on this SoC, a bad value),
++	# so read the reply: the callers' "|| return 1" must see the failure, and
++	# the setting must not be saved as if it had been applied.
++	_ctl_out=$(raptorctl "$@") || return 1
++	case "$_ctl_out" in
++	*'"status":"error"'* | *'"status": "error"'*)
++		_ctl_reason=$(printf '%s' "$_ctl_out" | sed -n 's/.*"reason": *"\([^"]*\)".*/\1/p')
++		echo "$1 $2: ${_ctl_reason:-error}" >&2
++		return 1
++		;;
++	esac
++	[ -z "$_ctl_out" ] || printf '%s\n' "$_ctl_out"
+ }
+ 
+ agent_daemon_status() {
+@@ -420,6 +438,57 @@ agent_image_bool() {
+ 	agent_bool01_to_json "$(agent_image_raw "$1")" false
+ }
+ 
++# Which ISP controls the HAL publishes (rvd get-isp-caps), cached per rvd
++# process, since a restart can bring up another HAL. Empty when rvd is down or
++# too old to answer; every control then counts as present, as before.
++agent_isp_caps_json() {
++	_rvd=$(pidof rvd 2>/dev/null | awk '{ print $1 }')
++	[ -n "$_rvd" ] || return 0
++	_caps="/tmp/agent-isp-caps.$_rvd"
++	if [ ! -s "$_caps" ]; then
++		command -v raptorctl >/dev/null 2>&1 || return 0
++		_caps_out=$(raptorctl rvd get-isp-caps 2>/dev/null | tr -d ' \t\r\n') || return 0
++		case "$_caps_out" in
++			*'"status":"ok"'*) ;;
++			*) return 0 ;;
++		esac
++		rm -f /tmp/agent-isp-caps.*
++		printf '%s\n' "$_caps_out" >"$_caps"
++	fi
++	cat "$_caps" 2>/dev/null
++}
++
++# agent_isp_has <control>: false only when rvd says the HAL lacks it.
++agent_isp_has() {
++	case "$(agent_isp_caps_json)" in
++		*"\"$1\":false"*) return 1 ;;
++	esac
++	return 0
++}
++
++# An image knob for the config block: its value, or null when the HAL lacks it
++# (the web UI hides those rather than offering a control that does nothing).
++agent_image_knob() {
++	if agent_isp_has "$1"; then
++		agent_json_value_or "$(agent_image_raw "$2")" null
++	else
++		printf 'null'
++	fi
++}
++
++agent_print_image_capabilities() {
++	printf '{'
++	_sep=
++	for _pair in brightness:brightness contrast:contrast saturation:saturation \
++		sharpness:sharpness noise_reduction:sinter temporal_noise_reduction:temper drc_strength:drc defog_strength:defog \
++		ae_compensation:ae_comp anti_flicker:antiflicker hflip:hflip vflip:vflip wb:wb; do
++		if agent_isp_has "${_pair#*:}"; then _has=true; else _has=false; fi
++		printf '%s"%s":%s' "$_sep" "${_pair%%:*}" "$_has"
++		_sep=,
++	done
++	printf '}'
++}
++
+ # Map UI / prudynt-style WB mode integers onto raptor set-wb names (and back).
+ agent_wb_mode_to_int() {
+ 	mode=$(printf '%s' "$1" | tr 'A-Z' 'a-z' | tr '-' '_')
+@@ -775,6 +844,521 @@ agent_stream_mode() {
+ 	esac
+ }
+ 
++# ---- Stream settings: choices, video memory, apply -------------------------
++#
++# The Streamer pages change a stream as one request, and every change is
++# applied the same way: the keys are written to /etc/raptor.conf and the stack
++# restarts (about 6 s; RTSP clients reconnect). rvd's in-place paths --
++# set-resolution, set-codec, set-bitrate and the rest -- rebuild one encoder
++# channel inside the running pipeline. On Infinity6C the sub is a VENC cascade
++# off the main and the JPEG channel holds an SCL port of its own, and rebuilding
++# one of them in place disturbs the others: a live bitrate change on the main
++# alone was measured dropping the sub from 25 to 17 fps. A clean start is the
++# path every boot takes.
++#
++# The values the pages offer come from the camera profile, built into
++# AGENT_STREAM_OPTIONS; any key can be overridden on the camera in
++# AGENT_STREAM_OPTIONS_LOCAL. An empty list offers no choice: the page shows the
++# current value only.
++
++agent_stream_options_load() {
++	UI_STREAM0_RESOLUTIONS=
++	UI_STREAM1_RESOLUTIONS=
++	UI_FPS=
++	UI_STREAM0_BITRATES=
++	UI_STREAM1_BITRATES=
++	UI_CODECS=
++	UI_PROFILES=
++	UI_RC_MODES=
++	UI_GOP_SECONDS=
++	UI_JPEG_QUALITIES=
++	UI_MMA_RESERVE_KIB=
++	UI_MMA_MAIN_MBPP=
++	UI_MMA_SUB_MBPP=
++	UI_MMA_JPEG_MBPP=
++	# shellcheck disable=SC1090
++	[ -r "$AGENT_STREAM_OPTIONS" ] && . "$AGENT_STREAM_OPTIONS"
++	# shellcheck disable=SC1090
++	[ -r "$AGENT_STREAM_OPTIONS_LOCAL" ] && . "$AGENT_STREAM_OPTIONS_LOCAL"
++	# Video memory a stream costs, in thousandths of a byte per pixel, measured
++	# from the MI heap table (/proc/mi_modules/mi_sys_mma/mma_heap_name0) on the
++	# YMF46D and the JL12D2: the main's encoder buffers plus the SCL->VENC rings
++	# (~5.0), a cascade sub's encoder buffers (3.2-4.1), and a JPEG channel's
++	# three NV12 frames on its own SCL port plus its bitstream (6.5).
++	: "${UI_MMA_RESERVE_KIB:=4096}"
++	: "${UI_MMA_MAIN_MBPP:=5200}"
++	: "${UI_MMA_SUB_MBPP:=4100}"
++	: "${UI_MMA_JPEG_MBPP:=6600}"
++}
++
++agent_list_json() {
++	# A space-separated list as a JSON array; with "num", numbers only.
++	_lj=
++	for _li in $1; do
++		if [ "$2" = num ]; then
++			case "$_li" in '' | *[!0-9]*) continue ;; esac
++			_lj="$_lj${_lj:+,}$_li"
++		else
++			_lj="$_lj${_lj:+,}$(agent_json_string "$_li")"
++		fi
++	done
++	printf '[%s]' "$_lj"
++}
++
++agent_list_has() {
++	for _li in $1; do
++		[ "$_li" = "$2" ] && return 0
++	done
++	return 1
++}
++
++agent_bool_word() {
++	case "$(printf '%s' "$1" | tr 'A-Z' 'a-z')" in
++		1 | true | yes | on) printf 'true' ;;
++		0 | false | no | off) printf 'false' ;;
++		*) printf '%s' "$2" ;;
++	esac
++}
++
++agent_mma_kib() {
++	# "total_kib free_kib" of the MI heap the video pipeline allocates from.
++	_mma=$(awk '$1 ~ /^mma_heap_name/ { print $3, $4; exit }' \
++		/proc/mi_modules/mi_sys_mma/mma_heap_name0 2>/dev/null)
++	[ -n "$_mma" ] || return 1
++	set -- $_mma
++	printf '%s %s\n' $((0x$1 / 1024)) $((0x$2 / 1024))
++}
++
++agent_stream_mma_kib() {
++	# Video memory one stream holds, in KiB: <id> <width> <height> <jpeg> <enabled>.
++	if [ "$5" = false ]; then
++		printf '0'
++		return 0
++	fi
++	awk -v id="$1" -v w="$2" -v h="$3" -v j="$4" \
++		-v vm="$UI_MMA_MAIN_MBPP" -v vs="$UI_MMA_SUB_MBPP" -v vj="$UI_MMA_JPEG_MBPP" 'BEGIN {
++		px = w * h
++		c = px * (id == 0 ? vm : vs) / 1000
++		if (j == "true") c += px * vj / 1000
++		printf "%d", c / 1024 + 0.5
++	}'
++}
++
++agent_stream_state_load() {
++	# Effective settings of stream $1 (rvd's defaults merged) into _st_*.
++	_st_w=$(agent_stream_field "$1" width)
++	_st_h=$(agent_stream_field "$1" height)
++	_st_fps=$(agent_stream_field "$1" fps)
++	_st_bitrate=$(agent_stream_field "$1" bitrate)
++	_st_maxbr=$(agent_stream_field "$1" max_bitrate)
++	[ -n "$_st_maxbr" ] || _st_maxbr=0
++	_st_gop=$(agent_stream_field "$1" gop)
++	_st_codec=$(agent_stream_field "$1" codec | tr 'A-Z' 'a-z')
++	_st_profile=$(agent_profile_to_name "$(agent_stream_field "$1" profile)")
++	_st_rc=$(agent_stream_field "$1" rc_mode | tr 'A-Z' 'a-z')
++	# rvd pairs a JPEG channel with every stream unless [jpeg] or the stream
++	# says otherwise.
++	if [ "$(agent_config_bool jpeg enabled true)" = true ]; then
++		_st_jpeg=$(agent_bool_word "$(agent_stream_field "$1" jpeg)" true)
++	else
++		_st_jpeg=false
++	fi
++	_st_jq=$(agent_stream_field "$1" jpeg_quality)
++	[ -n "$_st_jq" ] || _st_jq=$(agent_config_get jpeg quality)
++	_st_enabled=$(agent_stream_enabled "$1")
++}
++
++agent_print_stream_state() {
++	agent_stream_options_load
++	agent_stream_state_load "$1"
++	printf '{"id":%s,"enabled":%s,' "$1" "$_st_enabled"
++	printf '"width":%s,"height":%s,' "$(agent_json_value_or "$_st_w" null)" "$(agent_json_value_or "$_st_h" null)"
++	printf '"fps":%s,"bitrate":%s,"max_bitrate":%s,"gop":%s,' "$(agent_json_value_or "$_st_fps" null)" \
++		"$(agent_json_value_or "$_st_bitrate" null)" "$_st_maxbr" "$(agent_json_value_or "$_st_gop" null)"
++	printf '"codec":%s,"profile":%s,"rc_mode":%s,' "$(agent_json_string_or_null "$_st_codec")" \
++		"$(agent_json_string_or_null "$_st_profile")" "$(agent_json_string_or_null "$_st_rc")"
++	printf '"jpeg":%s,"jpeg_quality":%s,' "$_st_jpeg" "$(agent_json_value_or "$_st_jq" null)"
++	printf '"rtsp_url":%s,' "$(agent_json_string_or_null "$(agent_stream_rtsp_url "$1")")"
++	printf '"mma_kib":%s}' "$(agent_stream_mma_kib "$1" "${_st_w:-0}" "${_st_h:-0}" "$_st_jpeg" "$_st_enabled")"
++}
++
++agent_print_stream_options() {
++	agent_stream_options_load
++	_mma=$(agent_mma_kib) || _mma="0 0"
++	set -- $_mma
++	printf '{"options":{"streams":['
++	for _s in 0 1; do
++		eval "_res=\$UI_STREAM${_s}_RESOLUTIONS _br=\$UI_STREAM${_s}_BITRATES"
++		[ "$_s" = 1 ] && printf ','
++		printf '{"id":%s,"resolutions":%s,"bitrates_kbps":%s}' "$_s" \
++			"$(agent_list_json "$_res")" "$(agent_list_json "$_br" num)"
++	done
++	printf '],"fps":%s,"codecs":%s,"profiles":%s,' "$(agent_list_json "$UI_FPS" num)" \
++		"$(agent_list_json "$UI_CODECS")" "$(agent_list_json "$UI_PROFILES")"
++	printf '"rc_modes":%s,"gop_seconds":%s,"jpeg_qualities":%s},' "$(agent_list_json "$UI_RC_MODES")" \
++		"$(agent_list_json "$UI_GOP_SECONDS" num)" "$(agent_list_json "$UI_JPEG_QUALITIES" num)"
++	printf '"mma":{"total_kib":%s,"free_kib":%s,"reserve_kib":%s,' "$1" "$2" "$UI_MMA_RESERVE_KIB"
++	printf '"main_mbpp":%s,"sub_mbpp":%s,"jpeg_mbpp":%s},' "$UI_MMA_MAIN_MBPP" "$UI_MMA_SUB_MBPP" "$UI_MMA_JPEG_MBPP"
++	printf '"streams":[%s,%s]}\n' "$(agent_print_stream_state 0)" "$(agent_print_stream_state 1)"
++}
++
++agent_stream_req() {
++	# A field of the request body as plain text; empty when absent.
++	agent_json_config_value "$1" "$2" | tr -d '"'
++}
++
++agent_stream_check() {
++	# <value> <min> <max> <name>: an integer in range, or a message and failure.
++	case "$1" in
++		'' | *[!0-9]*)
++			echo "$4 must be a whole number" >&2
++			return 1
++			;;
++	esac
++	if [ "$1" -lt "$2" ] || [ "$1" -gt "$3" ]; then
++		echo "$4 must be between $2 and $3" >&2
++		return 1
++	fi
++}
++
++agent_stream_offered() {
++	# <list> <value> <old value> <name>: a changed value must be one of the
++	# choices, when there are any. An unchanged one may be anything, so a value
++	# set outside the list does not block every other change.
++	[ "$2" = "$3" ] && return 0
++	[ -n "$1" ] || return 0
++	agent_list_has "$1" "$2" && return 0
++	echo "$4 $2 is not offered on this camera (choices: $1)" >&2
++	return 1
++}
++
++agent_streamer_restart_verified() {
++	# Restart the stack and wait for rvd to run stream <id> at <w>x<h>, or only
++	# to come up when <enabled> is false. Fails on a timeout, or when MI logged a
++	# buffer-allocation failure meanwhile -- the sign the pipeline does not fit.
++	_rv_errs=$(dmesg | grep -cE "Buf Allocation|Get Buffer Faild")
++	_rv_t0=$(cut -d ' ' -f 1 /proc/uptime)
++	/etc/init.d/S31raptor restart >/dev/null 2>&1
++	_rv_i=0
++	while [ "$_rv_i" -lt 60 ]; do
++		_rv_status=$(raptorctl rvd status 2>/dev/null)
++		case "$_rv_status" in
++			*'"status":"ok"'*)
++				[ "$4" = false ] && break
++				case "$_rv_status" in
++					*"\"chn\":$1,\"w\":$2,\"h\":$3,"*) break ;;
++				esac
++				;;
++		esac
++		usleep 250000
++		_rv_i=$((_rv_i + 1))
++	done
++	[ "$_rv_i" -lt 60 ] || return 1
++	sleep 2
++	[ "$(dmesg | grep -cE "Buf Allocation|Get Buffer Faild")" -gt "$_rv_errs" ] && return 2
++	_rv_t1=$(cut -d ' ' -f 1 /proc/uptime)
++	_sa_restart_ms=$(awk -v a="$_rv_t0" -v b="$_rv_t1" 'BEGIN { printf "%d", (b - a) * 1000 }')
++	return 0
++}
++
++agent_stream_unlock() {
++	rmdir "$AGENT_STREAM_LOCK" 2>/dev/null
++}
++
++agent_stream_apply() {
++	# Apply a stream change from a JSON body: any of resolution ("WxH") or
++	# width/height, fps, bitrate (bps), gop (frames), codec (format), profile,
++	# rc_mode (mode), jpeg, jpeg_quality, enabled. Absent fields keep their
++	# value. Sets _sa_changed (the keys written) and _sa_restarted.
++	_sa_id=$1
++	_sa_body=$2
++	_sa_changed=
++	_sa_restarted=false
++	_sa_restart_ms=0
++	case "$_sa_id" in
++		0 | 1) ;;
++		*)
++			echo "unsupported stream id" >&2
++			return 1
++			;;
++	esac
++	agent_stream_options_load
++	agent_stream_state_load "$_sa_id"
++
++	_sa_w=$_st_w
++	_sa_h=$_st_h
++	_v=$(agent_stream_req "$_sa_body" resolution)
++	if [ -n "$_v" ]; then
++		case "$_v" in
++			[0-9]*x[0-9]*)
++				_sa_w=${_v%%x*}
++				_sa_h=${_v#*x}
++				;;
++			*)
++				echo "resolution must be WIDTHxHEIGHT" >&2
++				return 1
++				;;
++		esac
++	fi
++	_v=$(agent_stream_req "$_sa_body" width)
++	[ -n "$_v" ] && _sa_w=$_v
++	_v=$(agent_stream_req "$_sa_body" height)
++	[ -n "$_v" ] && _sa_h=$_v
++	_v=$(agent_stream_req "$_sa_body" fps)
++	_sa_fps=${_v:-$_st_fps}
++	_v=$(agent_stream_req "$_sa_body" bitrate)
++	_sa_bitrate=${_v:-$_st_bitrate}
++	_v=$(agent_stream_req "$_sa_body" max_bitrate)
++	_sa_maxbr=${_v:-$_st_maxbr}
++	_v=$(agent_stream_req "$_sa_body" gop)
++	_sa_gop=${_v:-$_st_gop}
++	_v=$(agent_stream_req "$_sa_body" codec)
++	[ -n "$_v" ] || _v=$(agent_stream_req "$_sa_body" format)
++	_sa_codec=$(printf '%s' "${_v:-$_st_codec}" | tr 'A-Z' 'a-z')
++	_v=$(agent_stream_req "$_sa_body" profile)
++	if [ -n "$_v" ]; then
++		agent_profile_to_int "$_v" >/dev/null || return 1
++		_sa_profile=$(agent_profile_to_name "$_v")
++	else
++		_sa_profile=$_st_profile
++	fi
++	_v=$(agent_stream_req "$_sa_body" rc_mode)
++	[ -n "$_v" ] || _v=$(agent_stream_req "$_sa_body" mode)
++	_sa_rc=$(printf '%s' "${_v:-$_st_rc}" | tr 'A-Z' 'a-z')
++	_v=$(agent_stream_req "$_sa_body" jpeg)
++	_sa_jpeg=$(agent_bool_word "${_v:-$_st_jpeg}" invalid)
++	_v=$(agent_stream_req "$_sa_body" jpeg_quality)
++	_sa_jq=${_v:-$_st_jq}
++	_v=$(agent_stream_req "$_sa_body" enabled)
++	_sa_en=$(agent_bool_word "${_v:-$_st_enabled}" invalid)
++
++	agent_stream_check "$_sa_w" 64 4096 width || return 1
++	agent_stream_check "$_sa_h" 64 4096 height || return 1
++	if [ $((_sa_w % 2)) -ne 0 ] || [ $((_sa_h % 2)) -ne 0 ]; then
++		echo "width and height must be even" >&2
++		return 1
++	fi
++	agent_stream_check "$_sa_fps" 1 60 fps || return 1
++	agent_stream_check "$_sa_bitrate" 32000 20000000 bitrate || return 1
++	agent_stream_check "$_sa_gop" 1 1000 gop || return 1
++	[ -z "$_sa_jq" ] || agent_stream_check "$_sa_jq" 1 100 "JPEG quality" || return 1
++	case "$_sa_codec" in
++		h264 | h265) ;;
++		*)
++			echo "codec must be h264 or h265" >&2
++			return 1
++			;;
++	esac
++	case "$_sa_rc" in
++		cbr | vbr | capped_vbr | capped_quality | smart | fixqp) ;;
++		*)
++			echo "rate control must be cbr, vbr, capped_vbr, capped_quality, smart or fixqp" >&2
++			return 1
++			;;
++	esac
++	case "$_sa_jpeg$_sa_en" in
++		*invalid*)
++			echo "jpeg and enabled must be true or false" >&2
++			return 1
++			;;
++	esac
++	if [ "$_sa_id" = 0 ] && [ "$_sa_en" = false ]; then
++		echo "the main stream cannot be turned off" >&2
++		return 1
++	fi
++
++	# VBR and the capped modes are bounded by max_bitrate (by bitrate when it
++	# is 0). Write the cap out so the config says what the encoder does.
++	agent_stream_check "$_sa_maxbr" 0 20000000 "max bitrate" || return 1
++	if [ "$_sa_rc" != cbr ]; then
++		[ "$_sa_maxbr" -eq 0 ] && _sa_maxbr=$_sa_bitrate
++		if [ "$_sa_maxbr" -lt "$_sa_bitrate" ]; then
++			echo "max bitrate must be at least the bitrate" >&2
++			return 1
++		fi
++	fi
++
++	# The pipeline can only drop sensor frames, so a stream rate that does not
++	# divide the sensor's drops them unevenly: a stutter every few frames. The
++	# main stream's rate is the sensor's (setting it sets [sensor] fps), and the
++	# sub's must divide the main's.
++	if [ "$_sa_id" = 1 ] && [ "$_sa_en" = true ] &&
++		{ [ "$_sa_fps" != "$_st_fps" ] || [ "$_sa_en" != "$_st_enabled" ]; }; then
++		_sa_mfps=$(agent_stream_field 0 fps)
++		if [ "$_sa_fps" -gt "${_sa_mfps:-0}" ] || [ $((${_sa_mfps:-0} % _sa_fps)) -ne 0 ]; then
++			echo "$_sa_fps fps does not divide the main stream's $_sa_mfps fps, so frames would be dropped unevenly; use $_sa_mfps fps or a whole divisor of it" >&2
++			return 1
++		fi
++	fi
++
++	eval "_sa_list=\$UI_STREAM${_sa_id}_RESOLUTIONS _sa_brs=\$UI_STREAM${_sa_id}_BITRATES"
++	agent_stream_offered "$_sa_list" "${_sa_w}x${_sa_h}" "${_st_w}x${_st_h}" resolution || return 1
++	agent_stream_offered "$UI_FPS" "$_sa_fps" "$_st_fps" "frame rate" || return 1
++	agent_stream_offered "$_sa_brs" "$((_sa_bitrate / 1000))" "$((${_st_bitrate:-0} / 1000))" "bitrate (kbps)" || return 1
++	if [ "$_sa_maxbr" -ne 0 ]; then
++		agent_stream_offered "$_sa_brs" "$((_sa_maxbr / 1000))" "$((_st_maxbr / 1000))" "max bitrate (kbps)" || return 1
++	fi
++	agent_stream_offered "$UI_CODECS" "$_sa_codec" "$_st_codec" codec || return 1
++	agent_stream_offered "$UI_PROFILES" "$_sa_profile" "$_st_profile" profile || return 1
++	agent_stream_offered "$UI_RC_MODES" "$_sa_rc" "$_st_rc" "rate control" || return 1
++	agent_stream_offered "$UI_JPEG_QUALITIES" "$_sa_jq" "$_st_jq" "JPEG quality" || return 1
++
++	# The sub is a VENC cascade off the main, and the cascade only scales down.
++	if [ "$_sa_id" = 1 ]; then
++		_sa_ow=$(agent_stream_field 0 width)
++		_sa_oh=$(agent_stream_field 0 height)
++		if [ "$_sa_w" -gt "${_sa_ow:-4096}" ] || [ "$_sa_h" -gt "${_sa_oh:-4096}" ]; then
++			echo "the substream cannot be larger than the main stream (${_sa_ow}x${_sa_oh})" >&2
++			return 1
++		fi
++	elif [ "$(agent_stream_enabled 1)" = true ]; then
++		_sa_ow=$(agent_stream_field 1 width)
++		_sa_oh=$(agent_stream_field 1 height)
++		if [ "$_sa_w" -lt "${_sa_ow:-0}" ] || [ "$_sa_h" -lt "${_sa_oh:-0}" ]; then
++			echo "the main stream cannot be smaller than the substream (${_sa_ow}x${_sa_oh})" >&2
++			return 1
++		fi
++	fi
++
++	# What would change, as raptor.conf keys.
++	_sa_set=
++	[ "$_sa_w" = "$_st_w" ] || _sa_set="$_sa_set width=$_sa_w"
++	[ "$_sa_h" = "$_st_h" ] || _sa_set="$_sa_set height=$_sa_h"
++	[ "$_sa_fps" = "$_st_fps" ] || _sa_set="$_sa_set fps=$_sa_fps"
++	[ "$_sa_bitrate" = "$_st_bitrate" ] || _sa_set="$_sa_set bitrate=$_sa_bitrate"
++	[ "$_sa_maxbr" = "$_st_maxbr" ] || _sa_set="$_sa_set max_bitrate=$_sa_maxbr"
++	[ "$_sa_gop" = "$_st_gop" ] || _sa_set="$_sa_set gop=$_sa_gop"
++	[ "$_sa_codec" = "$_st_codec" ] || _sa_set="$_sa_set codec=$_sa_codec"
++	[ "$_sa_profile" = "$_st_profile" ] || _sa_set="$_sa_set profile=$(agent_profile_to_int "$_sa_profile")"
++	[ "$_sa_rc" = "$_st_rc" ] || _sa_set="$_sa_set rc_mode=$_sa_rc"
++	[ "$_sa_jpeg" = "$_st_jpeg" ] || _sa_set="$_sa_set jpeg=$_sa_jpeg"
++	[ "$_sa_jq" = "$_st_jq" ] || _sa_set="$_sa_set jpeg_quality=$_sa_jq"
++	[ "$_sa_en" = "$_st_enabled" ] || _sa_set="$_sa_set enabled=$_sa_en"
++	[ -n "$_sa_set" ] || return 0
++
++	# Refuse what will not fit before touching anything: the heap's free space,
++	# plus what this stream holds now, less what it would hold, must leave the
++	# reserve.
++	if _mma=$(agent_mma_kib); then
++		set -- $_mma
++		_sa_old_kib=$(agent_stream_mma_kib "$_sa_id" "${_st_w:-0}" "${_st_h:-0}" "$_st_jpeg" "$_st_enabled")
++		_sa_new_kib=$(agent_stream_mma_kib "$_sa_id" "$_sa_w" "$_sa_h" "$_sa_jpeg" "$_sa_en")
++		_sa_after=$(($2 + _sa_old_kib - _sa_new_kib))
++		if [ "$_sa_after" -lt "$UI_MMA_RESERVE_KIB" ]; then
++			echo "not enough video memory: this needs about $(((_sa_new_kib - _sa_old_kib + 1023) / 1024)) MiB more, $(($2 / 1024)) MiB is free and $((UI_MMA_RESERVE_KIB / 1024)) MiB is kept in reserve -- turn JPEG snapshots off or choose a smaller size" >&2
++			return 1
++		fi
++	fi
++
++	mkdir -p "$(dirname "$AGENT_STREAM_LOCK")"
++	if ! mkdir "$AGENT_STREAM_LOCK" 2>/dev/null; then
++		# A lock older than two minutes is left over from an apply that died.
++		if [ -n "$(find "$AGENT_STREAM_LOCK" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then
++			rmdir "$AGENT_STREAM_LOCK" 2>/dev/null
++			mkdir "$AGENT_STREAM_LOCK" 2>/dev/null
++		else
++			echo "another stream change is being applied; try again in a few seconds" >&2
++			return 1
++		fi
++	fi
++
++	cp /etc/raptor.conf "$AGENT_STREAM_BACKUP" || {
++		agent_stream_unlock
++		echo "could not back up /etc/raptor.conf" >&2
++		return 1
++	}
++	for _kv in $_sa_set; do
++		if ! agent_config_set "stream$_sa_id" "${_kv%%=*}" "${_kv#*=}"; then
++			cp "$AGENT_STREAM_BACKUP" /etc/raptor.conf
++			agent_stream_unlock
++			return 1
++		fi
++		_sa_changed="$_sa_changed ${_kv%%=*}"
++	done
++
++	# The main's rate is the sensor's. A sub that no longer divides it moves to
++	# the divisor closest to its rate (the lower on a tie), keeping its keyframe
++	# interval in seconds -- so 25 -> 20 -> 25 on the main brings it back.
++	_sa_sub_fps=
++	if [ "$_sa_id" = 0 ] && [ "$_sa_fps" != "$_st_fps" ]; then
++		_sf=$(agent_stream_field 1 fps)
++		_sg=$(agent_stream_field 1 gop)
++		if ! agent_config_set sensor fps "$_sa_fps"; then
++			cp "$AGENT_STREAM_BACKUP" /etc/raptor.conf
++			agent_stream_unlock
++			return 1
++		fi
++		if [ "$(agent_stream_enabled 1)" = true ] && [ -n "$_sf" ] && [ "$_sf" -gt 0 ] &&
++			{ [ "$_sf" -gt "$_sa_fps" ] || [ $((_sa_fps % _sf)) -ne 0 ]; }; then
++			_d=
++			_dd=
++			_c=1
++			while [ "$_c" -le "$_sa_fps" ]; do
++				if [ $((_sa_fps % _c)) -eq 0 ]; then
++					_e=$((_c - _sf))
++					[ "$_e" -lt 0 ] && _e=$((-_e))
++					if [ -z "$_d" ] || [ "$_e" -lt "$_dd" ]; then
++						_d=$_c
++						_dd=$_e
++					fi
++				fi
++				_c=$((_c + 1))
++			done
++			_gs=$(((${_sg:-$_sf} + _sf / 2) / _sf))
++			[ "$_gs" -ge 1 ] || _gs=1
++			if ! agent_config_set stream1 fps "$_d" || ! agent_config_set stream1 gop $((_gs * _d)); then
++				cp "$AGENT_STREAM_BACKUP" /etc/raptor.conf
++				agent_stream_unlock
++				return 1
++			fi
++			_sa_sub_fps=$_d
++		fi
++	fi
++	rm -f "/tmp/agent-raptor-stream0.$$" "/tmp/agent-raptor-stream1.$$"
++
++	_sa_check_w=$_sa_w
++	_sa_check_h=$_sa_h
++	_sa_check_en=$_sa_en
++	agent_streamer_restart_verified "$_sa_id" "$_sa_check_w" "$_sa_check_h" "$_sa_check_en"
++	_sa_rc_restart=$?
++	if [ "$_sa_rc_restart" -ne 0 ]; then
++		# Put the old settings back and bring the stack up on them.
++		cp "$AGENT_STREAM_BACKUP" /etc/raptor.conf
++		rm -f "/tmp/agent-raptor-stream0.$$" "/tmp/agent-raptor-stream1.$$"
++		agent_streamer_restart_verified "$_sa_id" "${_st_w:-0}" "${_st_h:-0}" "$_st_enabled"
++		agent_stream_unlock
++		if [ "$_sa_rc_restart" -eq 2 ]; then
++			echo "the video pipeline ran out of memory with these settings; the previous settings are back" >&2
++		else
++			echo "the streamer did not come up with these settings; the previous settings are back" >&2
++		fi
++		return 1
++	fi
++	_sa_restarted=true
++
++	# ONVIF tells clients each profile's size; S96onvif_discovery writes it from
++	# raptor.conf.
++	case "$_sa_set" in
++		*width=* | *height=* | *enabled=*)
++			[ -x /etc/init.d/S96onvif_discovery ] &&
++				/etc/init.d/S96onvif_discovery restart >/dev/null 2>&1
++			;;
++	esac
++	agent_stream_unlock
++	return 0
++}
++
++agent_print_stream_apply() {
++	# The response to a whole-stream change: <stream id>.
++	_pa=
++	for _k in $_sa_changed; do
++		_pa="$_pa${_pa:+,}\"settings.streams.$1.$_k\""
++	done
++	printf '{"status":"accepted","applied":[%s],"staged":[],"restart_required":[],' "$_pa"
++	printf '"restarted":%s,"restart_ms":%s,"sub_fps_followed":%s,"resource":%s}\n' "$_sa_restarted" \
++		"$_sa_restart_ms" "$(agent_json_value_or "$_sa_sub_fps" null)" "$(agent_print_stream_state "$1")"
++}
++
+ agent_rtsp_port() {
+ 	port=$(agent_config_get rtsp port)
+ 	if [ -n "$port" ]; then
+@@ -1282,14 +1866,21 @@ agent_get_events() {
+ 	done
+ }
+ 
++# Motion is rvd's IVS path, which RMD reads; a HAL without IVS (the
++# Infinity6C) has no on-camera motion at all.
++agent_print_motion_capabilities() {
++	if agent_isp_has ivs; then _m=true; else _m=false; fi
++	printf '{"enabled":%s,"sensitivity":%s,"cooldown_time":%s}' "$_m" "$_m" "$_m"
++}
++
+ agent_get_capabilities() {
+ 	group=${1:-all}
+ 	case "$group" in
+ 		all)
+ 			printf '{'
+ 			printf '"backend":{"name":"raptor"},'
+-			printf '"image":{"brightness":true,"contrast":true,"saturation":true,"sharpness":true,"anti_flicker":true,"hflip":true,"vflip":true},'
+-			printf '"motion":{"enabled":true,"sensitivity":true,"cooldown_time":true},'
++			printf '"image":%s,' "$(agent_print_image_capabilities)"
++			printf '"motion":%s,' "$(agent_print_motion_capabilities)"
+ 			printf '"daynight":{"enabled":%s,"force_mode":%s,"modes":["auto","day","night"]},' \
+ 				"$(agent_json_bool "$(agent_has_daynight)")" \
+ 				"$(agent_json_bool "$(agent_has_daynight)")"
+@@ -1307,10 +1898,12 @@ agent_get_capabilities() {
+ 			printf '}\n'
+ 			;;
+ 		image)
+-			printf '{"brightness":true,"contrast":true,"saturation":true,"sharpness":true,"anti_flicker":true,"hflip":true,"vflip":true}\n'
++			agent_print_image_capabilities
++			printf '\n'
+ 			;;
+ 		motion)
+-			printf '{"enabled":true,"sensitivity":true,"cooldown_time":true}\n'
++			agent_print_motion_capabilities
++			printf '\n'
+ 			;;
+ 		daynight)
+ 			printf '{"enabled":%s,"force_mode":%s,"modes":["auto","day","night"]}\n' \
+@@ -1351,6 +1944,23 @@ agent_get_capabilities() {
+ 	esac
+ }
+ 
++# The AE's live state for the Image Quality page: shutter, gain and luma, and
++# the sensor rate beside its base (a long night exposure slows the sensor).
++agent_print_runtime_exposure() {
++	_exp=$(agent_exposure_status)
++	_fps=$(raptorctl rvd get-sensor-fps 2>/dev/null)
++	printf '{"exposure_us":%s,"total_gain":%s,"ae_luma":%s,' \
++		"$(agent_json_value_or "$(agent_json_number_field exposure_us "$_exp")" null)" \
++		"$(agent_json_value_or "$(agent_json_number_field total_gain "$_exp")" null)" \
++		"$(agent_json_value_or "$(agent_json_number_field ae_luma "$_exp")" null)"
++	printf '"fps_num":%s,"fps_den":%s,"base_fps_num":%s,"base_fps_den":%s,' \
++		"$(agent_json_value_or "$(agent_json_number_field fps_num "$_fps")" null)" \
++		"$(agent_json_value_or "$(agent_json_number_field fps_den "$_fps")" null)" \
++		"$(agent_json_value_or "$(agent_json_number_field base_fps_num "$_fps")" null)" \
++		"$(agent_json_value_or "$(agent_json_number_field base_fps_den "$_fps")" null)"
++	printf '"daynight_mode":%s}' "$(agent_json_string "$(agent_daynight_running_mode)")"
++}
++
+ agent_get_runtime() {
+ 	resource=${1:-all}
+ 	case "$resource" in
+@@ -1412,6 +2022,10 @@ agent_get_runtime() {
+ 			agent_print_runtime_streaming_service
+ 			printf '\n'
+ 			;;
++		exposure)
++			agent_print_runtime_exposure
++			printf '\n'
++			;;
+ 		streams/0)
+ 			agent_print_stream_runtime 0
+ 			printf '\n'
+@@ -1493,16 +2107,26 @@ agent_print_config() {
+ 	printf '"brightness":%s,' "$(agent_json_value_or "$(agent_image_raw brightness)" null)"
+ 	printf '"contrast":%s,' "$(agent_json_value_or "$(agent_image_raw contrast)" null)"
+ 	printf '"saturation":%s,' "$(agent_json_value_or "$(agent_image_raw saturation)" null)"
+-	printf '"sharpness":%s,' "$(agent_json_value_or "$(agent_image_raw sharpness)" null)"
+-	printf '"noise_reduction":%s,' "$(agent_json_value_or "$(agent_config_get image sinter)" null)"
+-	printf '"temporal_noise_reduction":%s,' "$(agent_json_value_or "$(agent_config_get image temper)" null)"
++	printf '"sharpness":%s,' "$(agent_image_knob sharpness sharpness)"
++	printf '"noise_reduction":%s,' "$(agent_image_knob sinter sinter)"
++	printf '"temporal_noise_reduction":%s,' "$(agent_image_knob temper temper)"
++	printf '"drc_strength":%s,' "$(agent_image_knob drc drc_strength)"
++	printf '"defog_strength":%s,' "$(agent_image_knob defog defog_strength)"
+ 	printf '"anti_flicker":%s,' "$(agent_json_value_or "$(agent_config_get sensor antiflicker)" null)"
+-	printf '"ae_compensation":%s,' "$(agent_json_value_or "$(agent_image_raw ae_comp)" null)"
+-	printf '"core_wb_mode":%s,' "$(agent_json_value_or "$(agent_wb_mode_to_int "$(agent_wb_mode_raw)")" null)"
+-	printf '"wb_rgain":%s,' "$(agent_json_value_or "$(agent_wb_gain_raw r)" null)"
+-	printf '"wb_bgain":%s,' "$(agent_json_value_or "$(agent_wb_gain_raw b)" null)"
++	printf '"ae_compensation":%s,' "$(agent_image_knob ae_comp ae_comp)"
++	if agent_isp_has wb; then
++		printf '"core_wb_mode":%s,' "$(agent_json_value_or "$(agent_wb_mode_to_int "$(agent_wb_mode_raw)")" null)"
++		printf '"wb_rgain":%s,' "$(agent_json_value_or "$(agent_wb_gain_raw r)" null)"
++		printf '"wb_bgain":%s,' "$(agent_json_value_or "$(agent_wb_gain_raw b)" null)"
++	else
++		printf '"core_wb_mode":null,"wb_rgain":null,"wb_bgain":null,'
++	fi
++	# hflip/vflip are the sensor's state; *_saved is raptor.conf's, which a
++	# camera that flips only at pipeline build applies at the next restart.
+ 	printf '"hflip":%s,' "$(agent_image_bool hflip)"
+-	printf '"vflip":%s' "$(agent_image_bool vflip)"
++	printf '"vflip":%s,' "$(agent_image_bool vflip)"
++	printf '"hflip_saved":%s,' "$(agent_bool01_to_json "$(agent_config_get image hflip)" false)"
++	printf '"vflip_saved":%s' "$(agent_bool01_to_json "$(agent_config_get image vflip)" false)"
+ 	printf '},'
+ 	printf '"motion":{"enabled":%s},' "$(agent_motion_enabled)"
+ 	printf '"daynight":{"enabled":%s,"force_mode":%s},' \
+@@ -2132,7 +2756,13 @@ agent_get_setting() {
+ 			agent_print_setting_leaf saturation "$(agent_json_value_or "$(agent_image_raw saturation)" null)"
+ 			;;
+ 		image/sharpness)
+-			agent_print_setting_leaf sharpness "$(agent_json_value_or "$(agent_image_raw sharpness)" null)"
++			agent_print_setting_leaf sharpness "$(agent_image_knob sharpness sharpness)"
++			;;
++		image/drc-strength)
++			agent_print_setting_leaf drc_strength "$(agent_image_knob drc drc_strength)"
++			;;
++		image/defog-strength)
++			agent_print_setting_leaf defog_strength "$(agent_image_knob defog defog_strength)"
+ 			;;
+ 		image/noise-reduction)
+ 			agent_print_setting_leaf noise_reduction "$(agent_json_value_or "$(agent_config_get image sinter)" null)"
+@@ -2235,6 +2865,13 @@ agent_get_setting() {
+ 		storage/*)
+ 			agent_print_storage_setting "$path"
+ 			;;
++		streams/options)
++			agent_print_stream_options
++			;;
++		streams/[01])
++			agent_print_stream_state "${path#streams/}"
++			printf '\n'
++			;;
+ 		streams/[01]/enabled)
+ 			stream_id=${path#streams/}
+ 			stream_id=${stream_id%/enabled}
+@@ -2328,6 +2965,25 @@ agent_get_setting() {
+ 	esac
+ }
+ 
++# PATCH one 0..255 ISP knob. rvd first, so a refusal leaves raptor.conf alone.
++agent_set_image_knob() {
++	value=$(agent_setting_value "$2" "$3") || return 1
++	agent_validate_int "$value" || return 1
++	if [ "$value" -lt 0 ] || [ "$value" -gt 255 ]; then
++		echo "$3 must be 0-255" >&2
++		return 1
++	fi
++	agent_ctl rvd "$4" "$value" >/dev/null 2>&1 || return 1
++	agent_config_set image "$5" "$value" || return 1
++	agent_config_save
++	agent_print_setting_update "$1" "$3" "$value"
++}
++
++agent_print_setting_restart() {
++	printf '{"status":"accepted","applied":[],"staged":["settings.%s"],"restart_required":["streaming"],"resource":{"%s":%s}}\n' \
++		"$(agent_setting_path_label "$1")" "$2" "$(agent_json_value_or "$3" null)"
++}
++
+ agent_set_setting() {
+ 	path=$1
+ 	body_file=$2
+@@ -2380,6 +3036,12 @@ agent_set_setting() {
+ 			agent_config_save
+ 			agent_print_setting_update "$path" sharpness "$value"
+ 			;;
++		image/drc-strength)
++			agent_set_image_knob "$path" "$body_file" drc_strength set-drc drc_strength
++			;;
++		image/defog-strength)
++			agent_set_image_knob "$path" "$body_file" defog_strength set-defog-strength defog_strength
++			;;
+ 		image/anti-flicker)
+ 			value=$(agent_setting_value "$body_file" anti_flicker) || return 1
+ 			agent_validate_int "$value" || return 1
+@@ -2388,23 +3050,27 @@ agent_set_setting() {
+ 			agent_config_save
+ 			agent_print_setting_update "$path" anti_flicker "$value"
+ 			;;
+-		image/hflip)
+-			value=$(agent_setting_value "$body_file" hflip) || return 1
++		image/hflip | image/vflip)
++			flip=${path#image/}
++			value=$(agent_setting_value "$body_file" "$flip") || return 1
+ 			agent_validate_bool "$value" || return 1
+ 			raw=$(agent_json_bool_to_01 "$value") || return 1
+-			agent_ctl rvd set-hflip "$raw" >/dev/null 2>&1 || return 1
+-			agent_config_set image hflip "$raw" || return 1
+-			agent_config_save
+-			agent_print_setting_update "$path" hflip "$value"
+-			;;
+-		image/vflip)
+-			value=$(agent_setting_value "$body_file" vflip) || return 1
+-			agent_validate_bool "$value" || return 1
+-			raw=$(agent_json_bool_to_01 "$value") || return 1
+-			agent_ctl rvd set-vflip "$raw" >/dev/null 2>&1 || return 1
+-			agent_config_set image vflip "$raw" || return 1
++			agent_isp_has "$flip" || {
++				echo "$flip is not supported on this camera" >&2
++				return 1
++			}
++			# agent_config_set assigns $value; the reply wants the JSON boolean.
++			want=$value
++			agent_config_set image "$flip" "$raw" || return 1
+ 			agent_config_save
+-			agent_print_setting_update "$path" vflip "$value"
++			# A SoC that flips only while the pipeline is built (the Infinity6C
++			# refuses a live change) takes the saved value at the next streamer
++			# restart, and the reply says so instead of failing.
++			if agent_ctl rvd "set-$flip" "$raw" >/dev/null 2>&1; then
++				agent_print_setting_update "$path" "$flip" "$want"
++			else
++				agent_print_setting_restart "$path" "$flip" "$want"
++			fi
+ 			;;
+ 		image/ae-compensation)
+ 			value=$(agent_setting_value "$body_file" ae_compensation) || return 1
+@@ -2571,6 +3237,10 @@ agent_set_setting() {
+ 			;;
+ 		motion/enabled)
+ 			value=$(agent_setting_value "$body_file" enabled) || return 1
++			if [ "$value" = true ] && ! agent_isp_has ivs; then
++				echo "motion detection is not supported on this camera" >&2
++				return 1
++			fi
+ 			agent_validate_bool "$value" || return 1
+ 			agent_motion_set_enabled "$value" || return 1
+ 			agent_print_setting_update "$path" enabled "$value"
+@@ -2685,6 +3355,11 @@ agent_set_setting() {
+ 		storage/*)
+ 			agent_set_storage_setting "$path" "$body_file"
+ 			;;
++		streams/[01])
++			stream_id=${path#streams/}
++			agent_stream_apply "$stream_id" "$body_file" || return 1
++			agent_print_stream_apply "$stream_id"
++			;;
+ 		streams/[01]/enabled)
+ 			stream_id=${path#streams/}
+ 			stream_id=${stream_id%/enabled}
+@@ -2697,13 +3372,7 @@ agent_set_setting() {
+ 					agent_ctl rvd stream-stop 0 >/dev/null 2>&1 || true
+ 				fi
+ 			else
+-				agent_config_set stream1 enabled "$value" || return 1
+-				agent_config_save
+-				if [ "$value" = true ]; then
+-					agent_ctl rvd stream-start 1 >/dev/null 2>&1 || true
+-				else
+-					agent_ctl rvd stream-stop 1 >/dev/null 2>&1 || true
+-				fi
++				agent_stream_apply 1 "$body_file" || return 1
+ 			fi
+ 			agent_print_setting_update "$path" enabled "$value"
+ 			;;
+@@ -2714,59 +3383,16 @@ agent_set_setting() {
+ 			agent_config_save
+ 			agent_print_setting_update "$path" audio_enabled "$value"
+ 			;;
+-		streams/[01]/width)
++		streams/[01]/width | streams/[01]/height | streams/[01]/fps | streams/[01]/bitrate | streams/[01]/gop)
++			# One field at a time still goes through the whole-stream apply: the
++			# same checks, the same clean restart.
+ 			stream_id=${path#streams/}
+-			stream_id=${stream_id%/width}
+-			value=$(agent_setting_value "$body_file" width) || return 1
++			leaf=${stream_id#*/}
++			stream_id=${stream_id%%/*}
++			value=$(agent_setting_value "$body_file" "$leaf") || return 1
+ 			agent_validate_int "$value" || return 1
+-			height=$(agent_stream_field "$stream_id" height)
+-			[ -n "$height" ] || height=1080
+-			agent_ctl rvd set-resolution "$stream_id" "$value" "$height" >/dev/null 2>&1 || return 1
+-			agent_config_set "$(agent_stream_section "$stream_id")" width "$value" || return 1
+-			agent_config_save
+-			agent_print_setting_update "$path" width "$value"
+-			;;
+-		streams/[01]/height)
+-			stream_id=${path#streams/}
+-			stream_id=${stream_id%/height}
+-			value=$(agent_setting_value "$body_file" height) || return 1
+-			agent_validate_int "$value" || return 1
+-			width=$(agent_stream_field "$stream_id" width)
+-			[ -n "$width" ] || width=1920
+-			agent_ctl rvd set-resolution "$stream_id" "$width" "$value" >/dev/null 2>&1 || return 1
+-			agent_config_set "$(agent_stream_section "$stream_id")" height "$value" || return 1
+-			agent_config_save
+-			agent_print_setting_update "$path" height "$value"
+-			;;
+-		streams/[01]/fps)
+-			stream_id=${path#streams/}
+-			stream_id=${stream_id%/fps}
+-			value=$(agent_setting_value "$body_file" fps) || return 1
+-			agent_validate_int "$value" || return 1
+-			agent_ctl rvd set-fps "$stream_id" "$value" >/dev/null 2>&1 || return 1
+-			agent_config_set "$(agent_stream_section "$stream_id")" fps "$value" || return 1
+-			agent_config_save
+-			agent_print_setting_update "$path" fps "$value"
+-			;;
+-		streams/[01]/bitrate)
+-			stream_id=${path#streams/}
+-			stream_id=${stream_id%/bitrate}
+-			value=$(agent_setting_value "$body_file" bitrate) || return 1
+-			agent_validate_int "$value" || return 1
+-			agent_ctl rvd set-bitrate "$stream_id" "$value" >/dev/null 2>&1 || return 1
+-			agent_config_set "$(agent_stream_section "$stream_id")" bitrate "$value" || return 1
+-			agent_config_save
+-			agent_print_setting_update "$path" bitrate "$value"
+-			;;
+-		streams/[01]/gop)
+-			stream_id=${path#streams/}
+-			stream_id=${stream_id%/gop}
+-			value=$(agent_setting_value "$body_file" gop) || return 1
+-			agent_validate_int "$value" || return 1
+-			agent_ctl rvd set-gop "$stream_id" "$value" >/dev/null 2>&1 || return 1
+-			agent_config_set "$(agent_stream_section "$stream_id")" gop "$value" || return 1
+-			agent_config_save
+-			agent_print_setting_update "$path" gop "$value"
++			agent_stream_apply "$stream_id" "$body_file" || return 1
++			agent_print_setting_update "$path" "$leaf" "$value"
+ 			;;
+ 		streams/[01]/buffers)
+ 			stream_id=${path#streams/}
+@@ -2784,9 +3410,7 @@ agent_set_setting() {
+ 			value=$(agent_setting_value "$body_file" profile) || return 1
+ 			profile_int=$(agent_profile_to_int "$value") || return 1
+ 			profile_name=$(agent_profile_to_name "$profile_int")
+-			# Encoder profile is persisted; applies after streamer restart.
+-			agent_config_set "$(agent_stream_section "$stream_id")" profile "$profile_int" || return 1
+-			agent_config_save
++			agent_stream_apply "$stream_id" "$body_file" || return 1
+ 			agent_print_setting_update "$path" profile "$(agent_json_string "$profile_name")"
+ 			;;
+ 		streams/[01]/rtsp-endpoint)
+@@ -2816,10 +3440,7 @@ agent_set_setting() {
+ 			stream_id=${stream_id%/format}
+ 			value=$(agent_setting_value "$body_file" format) || return 1
+ 			value=$(agent_validate_stream_format "$value") || return 1
+-			codec=$(agent_format_to_codec "$value")
+-			agent_ctl rvd set-codec "$stream_id" "$codec" >/dev/null 2>&1 || return 1
+-			agent_config_set "$(agent_stream_section "$stream_id")" codec "$codec" || return 1
+-			agent_config_save
++			agent_stream_apply "$stream_id" "$body_file" || return 1
+ 			agent_print_setting_update "$path" format "$(agent_json_string "$value")"
+ 			;;
+ 		streams/[01]/mode)
+@@ -2827,12 +3448,7 @@ agent_set_setting() {
+ 			stream_id=${stream_id%/mode}
+ 			value=$(agent_setting_value "$body_file" mode) || return 1
+ 			value=$(agent_validate_stream_mode "$value") || return 1
+-			rc_mode=$(agent_mode_to_rc "$value")
+-			bitrate=$(agent_stream_field "$stream_id" bitrate)
+-			[ -n "$bitrate" ] || bitrate=3000000
+-			agent_ctl rvd set-rc-mode "$stream_id" "$rc_mode" "$bitrate" >/dev/null 2>&1 || return 1
+-			agent_config_set "$(agent_stream_section "$stream_id")" rc_mode "$rc_mode" || return 1
+-			agent_config_save
++			agent_stream_apply "$stream_id" "$body_file" || return 1
+ 			agent_print_setting_update "$path" mode "$(agent_json_string "$value")"
+ 			;;
+ 		streams/[01]/osd/*)
+@@ -2939,6 +3555,10 @@ agent_apply_config() {
+ 
+ agent_snapshot() {
+ 	channel=${1:-0}
++	# rvd numbers JPEG channels over the streams that have one; a channel
++	# that does not exist (the sub's is 0 when the main has no JPEG) falls
++	# back to channel 0.
++	[ -e "/dev/shm/rss_ring_jpeg$channel" ] || channel=0
+ 	command -v raptorctl >/dev/null 2>&1 || {
+ 		echo "snapshot is not supported on this camera" >&2
+ 		return 1
 diff --git a/package/thingino-raptor/files/raptor-motion-watch b/package/thingino-raptor/files/raptor-motion-watch
 index 9d7b568ec..d385fbbfd 100644
 --- a/package/thingino-raptor/files/raptor-motion-watch
@@ -257,22 +1260,24 @@ index 9d7b568ec..d385fbbfd 100644
  	if ! pidof rmd >/dev/null 2>&1; then
 diff --git a/package/thingino-raptor/files/raptor-sigmastar.webui.json b/package/thingino-raptor/files/raptor-sigmastar.webui.json
 new file mode 100644
-index 000000000..165f11435
+index 000000000..91cbd756f
 --- /dev/null
 +++ b/package/thingino-raptor/files/raptor-sigmastar.webui.json
-@@ -0,0 +1,7 @@
+@@ -0,0 +1,9 @@
 +{
 +  "name": "raptor-sigmastar",
-+  "description": "SigmaStar backend: its HAL has no IVS, so the camera does not detect motion itself (Frigate does).",
++  "description": "SigmaStar backend: its HAL has no IVS, so the camera does not detect motion itself (Frigate does). Our SigmaStar boards have no wired speaker-enable, so the speaker control is locked. A stream restart applies saved OSD changes (verified on Infinity6C), so the OSD page offers that instead of a reboot.",
 +  "featureFlags": {
-+    "motion": false
++    "motion": false,
++    "audio_out": false,
++    "osd_restart_applies": true
 +  }
 +}
 diff --git a/package/thingino-raptor/files/www/a/streamer-image.js b/package/thingino-raptor/files/www/a/streamer-image.js
-index 5cbe5775e..5231f9c87 100644
+index ce72e00bc..4d470d2ef 100644
 --- a/package/thingino-raptor/files/www/a/streamer-image.js
 +++ b/package/thingino-raptor/files/www/a/streamer-image.js
-@@ -1,74 +1,331 @@
+@@ -1,121 +1,336 @@
  /**
   * Raptor Image Quality page.
   *
@@ -287,6 +1292,9 @@ index 5cbe5775e..5231f9c87 100644
   *
 - * brightness/contrast/sharpness/saturation are already handled end-to-end by
 - * preview.js; this module owns only the fields preview.js leaves disabled.
+- * Noise-reduction fields additionally get their own save path via the agent
+- * settings endpoints (image/noise-reduction, image/temporal-nr), which map to
+- * the sinter/temper tuning controls (SetModule_Ratio on Gen3 SoCs).
 + * The agent decides what is shown: /capabilities/image says which controls
 + * the HAL applies (rvd get-isp-caps), and /config returns null for the rest,
 + * so a knob the camera ignores is hidden instead of offered. Each change is
@@ -304,6 +1312,21 @@ index 5cbe5775e..5231f9c87 100644
 -    image_ae_compensation: "ae_compensation",
 -    image_hflip: "hflip",
 -    image_vflip: "vflip",
+-    noise_reduction: "sinter",
+-    temporal_noise_reduction: "temper",
+-  };
+-
+-  // field id -> agent settings endpoint (own save path; preview.js does not
+-  // wire these two fields)
+-  var ENDPOINT_MAP = {
+-    noise_reduction: "image/noise-reduction",
+-    temporal_noise_reduction: "image/temporal-nr",
+-  };
+-
+-  // field id -> JSON payload member name the agent expects
+-  var PAYLOAD_MAP = {
+-    noise_reduction: "noise_reduction",
+-    temporal_noise_reduction: "temporal_noise_reduction",
 -  };
 +  // key = the /config image field and the PATCH body field; cap = capability.
 +  var CONTROLS = [
@@ -313,7 +1336,8 @@ index 5cbe5775e..5231f9c87 100644
 +    { id: "sharpness", type: "knob", key: "sharpness", path: "sharpness", cap: "sharpness", label: "Sharpness" },
 +    { id: "ae_comp", type: "knob", key: "ae_compensation", path: "ae-compensation", cap: "ae_compensation", label: "AE compensation" },
 +    { id: "antiflicker", type: "select", key: "anti_flicker", path: "anti-flicker", cap: "anti_flicker", label: "Anti-flicker" },
-+    { id: "temper", type: "knob", key: "temper", path: "temper", cap: "temper", label: "Temporal noise reduction" },
++    { id: "sinter", type: "knob", key: "noise_reduction", path: "noise-reduction", cap: "noise_reduction", label: "Noise reduction" },
++    { id: "temper", type: "knob", key: "temporal_noise_reduction", path: "temporal-nr", cap: "temporal_noise_reduction", label: "Temporal noise reduction" },
 +    { id: "drc", type: "knob", key: "drc_strength", path: "drc-strength", cap: "drc_strength", label: "WDR" },
 +    { id: "defog", type: "knob", key: "defog_strength", path: "defog-strength", cap: "defog_strength", label: "Defog" },
 +    { id: "hflip", type: "switch", key: "hflip", path: "hflip", cap: "hflip", label: "H-Flip" },
@@ -341,20 +1365,20 @@ index 5cbe5775e..5231f9c87 100644
 -    var node = el(id);
 -    if (!node) return;
 -    node.disabled = false;
--    var wrap =
--      node.closest("p, .select, .boolean, .col") || node.parentElement;
--    if (wrap) wrap.classList.remove("disabled");
+-    // Walk every ancestor the preview.js disable paths may have tagged, up
+-    // to the column; the nearest wrapper alone is not enough because
+-    // preview.js and the hideUnsupportedControls path pick different ones.
+-    var wrap = node.closest("p, .select, .boolean, .mb-3, .col");
+-    while (wrap) {
+-      wrap.classList.remove("disabled");
+-      wrap.classList.remove("d-none");
+-      wrap = wrap.parentElement
+-        ? wrap.parentElement.closest("p, .mb-3, .col")
+-        : null;
 +  function input(c) {
 +    return el("iq_" + c.id);
-   }
- 
--  function populate(id, value) {
--    var node = el(id);
--    if (!node) return;
--    if (node.type === "checkbox") {
--      node.checked = value === true || value === 1 || value === "1";
--    } else if (value === null || value === undefined) {
--      node.value = "";
++  }
++
 +  function slider(c) {
 +    return el("iq_" + c.id + "-slider");
 +  }
@@ -367,16 +1391,15 @@ index 5cbe5775e..5231f9c87 100644
 +  function notify(type, message, timeout) {
 +    if (typeof window.showAlert === "function") {
 +      window.showAlert(type, message, timeout);
-     } else {
--      node.value = value;
++    } else {
 +      console.warn(message);
      }
    }
  
--  async function load() {
+-  function populate(id, value) {
+-    var node = el(id);
 +  function api(path, options) {
-     var helper = window.thinginoStreamer;
--    if (!helper || typeof helper.agentRequest !== "function") return;
++    var helper = window.thinginoStreamer;
 +    if (!helper || typeof helper.agentRequest !== "function") {
 +      return Promise.reject(new Error("agent unavailable"));
 +    }
@@ -387,7 +1410,9 @@ index 5cbe5775e..5231f9c87 100644
 +
 +  function show(c, value) {
 +    var node = input(c);
-+    if (!node) return;
+     if (!node) return;
+-    if (value === null || value === undefined || value === "") return;
+-    node.value = value;
 +    last[c.id] = value;
 +    if (c.type === "switch") {
 +      node.checked = value === true || value === 1 || value === "1";
@@ -396,8 +1421,13 @@ index 5cbe5775e..5231f9c87 100644
 +    node.value = value === null || value === undefined ? "" : String(value);
 +    var range = slider(c);
 +    if (range && value !== null && value !== undefined) range.value = value;
-+  }
-+
+   }
+ 
+-  function saveField(id) {
+-    var helper = window.thinginoStreamer;
+-    var endpoint = ENDPOINT_MAP[id];
+-    var node = el(id);
+-    if (!helper || !endpoint || !node) return;
 +  function setBusy(c, busy) {
 +    var node = input(c);
 +    var range = slider(c);
@@ -426,13 +1456,23 @@ index 5cbe5775e..5231f9c87 100644
 +  }
 +
 +  async function apply(c, value) {
-+    var body = {};
+     var body = {};
+-    body[PAYLOAD_MAP[id]] = node.value;
+-    helper
+-      .agentRequest("/api/v1/settings/" + endpoint, {
+-        method: "PATCH",
+-        headers: { "Content-Type": "application/json" },
+-        body: JSON.stringify(body),
+-      })
+-      .then(function () {
+-        enable(id);
+-      })
+-      .catch(function (err) {
+-        console.warn("Failed to save " + id, err);
 +    body[c.key] = value;
 +    setBusy(c, true);
 +    var res = null;
-     try {
--      var cfg = await helper.agentRequest("/api/v1/config", {
--        cache: "no-store",
++    try {
 +      res = await api("/api/v1/settings/image/" + c.path, { method: "PATCH", body: body });
 +    } catch (err) {
 +      console.warn("PATCH", c.path, err);
@@ -469,16 +1509,12 @@ index 5cbe5775e..5231f9c87 100644
 +      node.addEventListener("change", function () {
 +        apply(c, node.checked);
        });
--      var image = (cfg && cfg.image) || {};
--      Object.keys(FIELD_MAP).forEach(function (id) {
--        populate(id, image[FIELD_MAP[id]]);
--        enable(id);
 +      return;
 +    }
 +    if (c.type === "select") {
 +      node.addEventListener("change", function () {
 +        apply(c, parseInt(node.value, 10));
-       });
++      });
 +      return;
 +    }
 +    node.addEventListener("change", function () {
@@ -500,9 +1536,14 @@ index 5cbe5775e..5231f9c87 100644
 +    range.addEventListener("dblclick", function () {
 +      apply(c, KNOB_DEFAULT);
 +    });
-+  }
-+
-+  async function load() {
+   }
+ 
+   async function load() {
+-    var helper = window.thinginoStreamer;
+-    if (!helper || typeof helper.agentRequest !== "function") return;
+-    var config = await helper.agentRequest("/api/v1/config");
+-    Object.keys(FIELD_MAP).forEach(function (id) {
+-      populate(id, config.image[FIELD_MAP[id]]);
 +    var got = await Promise.all([
 +      api("/api/v1/capabilities/image").catch(function (err) {
 +        console.warn("image capabilities", err);
@@ -529,7 +1570,7 @@ index 5cbe5775e..5231f9c87 100644
 +      var shown = caps[c.cap] !== false && value !== null && value !== undefined;
 +      setShown(c, shown);
 +      if (shown) show(c, value);
-+    });
+     });
 +    setFlipPending(
 +      (image.hflip_saved !== undefined && image.hflip_saved !== image.hflip) ||
 +        (image.vflip_saved !== undefined && image.vflip_saved !== image.vflip),
@@ -538,8 +1579,19 @@ index 5cbe5775e..5231f9c87 100644
 +    var controls = el("iq_controls");
 +    if (controls) controls.classList.remove("opacity-50", "pe-none");
 +    document.body.dataset.iqLoadedMs = String(Math.round(performance.now()));
-+  }
-+
+   }
+ 
+-  function init() {
+-    // Re-enable immediately; values arrive when the config fetch resolves.
+-    Object.keys(FIELD_MAP).forEach(enable);
+-    // Noise-reduction fields save through the agent directly (preview.js
+-    // does not wire them).
+-    Object.keys(ENDPOINT_MAP).forEach(function (id) {
+-      var node = el(id);
+-      if (!node) return;
+-      node.addEventListener("change", function () {
+-        saveField(id);
+-      });
 +  // The sub stream's MJPEG while the page is visible, as preview.js does it.
 +  function initPreview() {
 +    var img = el("preview");
@@ -563,7 +1615,7 @@ index 5cbe5775e..5231f9c87 100644
 +    document.addEventListener("visibilitychange", function () {
 +      if (document.hidden) stop();
 +      else start();
-+    });
+     });
 +    window.addEventListener("pagehide", stop);
 +    setInterval(function () {
 +      var now = Date.now();
@@ -624,15 +1676,12 @@ index 5cbe5775e..5231f9c87 100644
 +    if (document.visibilityState !== "visible") return;
 +    try {
 +      renderLive(await api("/api/v1/runtime/exposure"));
-     } catch (err) {
--      console.warn("Failed to load raptor image settings", err);
++    } catch (err) {
 +      console.warn("exposure", err);
-     }
-   }
- 
-   function init() {
--    // Re-enable immediately; values arrive when the config fetch resolves.
--    Object.keys(FIELD_MAP).forEach(enable);
++    }
++  }
++
++  function init() {
 +    CONTROLS.forEach(wire);
 +    var button = el("iq_restart");
 +    if (button) button.addEventListener("click", restartStream);
@@ -646,6 +1695,11 @@ index 5cbe5775e..5231f9c87 100644
    }
  
    if (document.readyState === "loading") {
+-    document.addEventListener("DOMContentLoaded", init);
++    document.addEventListener("DOMContentLoaded", init, { once: true });
+   } else {
+     init();
+   }
 diff --git a/package/thingino-raptor/files/www/a/streamer-stream.js b/package/thingino-raptor/files/www/a/streamer-stream.js
 new file mode 100755
 index 000000000..371eb97b1
@@ -1141,7 +2195,7 @@ index 000000000..371eb97b1
 +    .catch((err) => setStatus("danger", `Could not read the stream settings: ${err.message}`));
 +})();
 diff --git a/package/thingino-raptor/files/www/streamer-image.html b/package/thingino-raptor/files/www/streamer-image.html
-index 80a8f1e04..565879dfb 100644
+index 2744c463c..1e38c2705 100644
 --- a/package/thingino-raptor/files/www/streamer-image.html
 +++ b/package/thingino-raptor/files/www/streamer-image.html
 @@ -13,6 +13,10 @@
@@ -1155,7 +2209,7 @@ index 80a8f1e04..565879dfb 100644
  </head>
  
  <body id="page-streamer-image">
-@@ -24,95 +28,156 @@
+@@ -24,99 +28,164 @@
  
      <section>
        <h3>Image Quality</h3>
@@ -1170,19 +2224,7 @@ index 80a8f1e04..565879dfb 100644
            <div id="frame" class="position-relative">
              <img id="preview" src="/a/nostream.svg" class="img-fluid" alt="Image: Preview" tabindex="-1" data-stream="ch1">
            </div>
-+          <div class="iq-group card mt-3" id="iq_live_wrap">
-+            <div class="card-body">
-+              <h5>Live exposure</h5>
-+              <dl class="row small mb-0" id="iq_live">
-+                <dt class="col-5">Shutter</dt><dd class="col-7" id="iq_live_shutter">—</dd>
-+                <dt class="col-5">Gain</dt><dd class="col-7" id="iq_live_gain">—</dd>
-+                <dt class="col-5">Luma</dt><dd class="col-7" id="iq_live_luma">—</dd>
-+                <dt class="col-5">Frame rate</dt><dd class="col-7" id="iq_live_fps">—</dd>
-+                <dt class="col-5">Mode</dt><dd class="col-7" id="iq_live_mode">—</dd>
-+              </dl>
-+            </div>
-+          </div>
-         </div>
+-        </div>
 -        <div class="col col-xl-8">
 -          <div class="row g-2">
 -            <div class="col">
@@ -1202,7 +2244,17 @@ index 80a8f1e04..565879dfb 100644
 -                <label for="saturation">Saturation</label>
 -                <input type="text" id="saturation" name="saturation" class="form-control text-end" value="" pattern="[0-9]{1,}" data-min="0" data-max="255" data-step="1">
 -              </p>
--            </div><!-- .col -->
++          <div class="iq-group card mt-3" id="iq_live_wrap">
++            <div class="card-body">
++              <h5>Live exposure</h5>
++              <dl class="row small mb-0" id="iq_live">
++                <dt class="col-5">Shutter</dt><dd class="col-7" id="iq_live_shutter">—</dd>
++                <dt class="col-5">Gain</dt><dd class="col-7" id="iq_live_gain">—</dd>
++                <dt class="col-5">Luma</dt><dd class="col-7" id="iq_live_luma">—</dd>
++                <dt class="col-5">Frame rate</dt><dd class="col-7" id="iq_live_fps">—</dd>
++                <dt class="col-5">Mode</dt><dd class="col-7" id="iq_live_mode">—</dd>
++              </dl>
+             </div>
 -            <div class="col">
 -              <p>
 -                <label for="backlight">Backlight</label>
@@ -1224,21 +2276,12 @@ index 80a8f1e04..565879dfb 100644
 -                <label for="noise_reduction">Noise reduction</label>
 -                <input type="text" id="noise_reduction" name="noise_reduction" class="form-control text-end" value="" pattern="[0-9]{1,}" data-min="0" data-max="255" data-step="1">
 -              </p>
--            </div><!-- .col -->
--            <div class="col">
--              <p class="select" id="image_core_wb_mode_wrap">
--                <label for="image_core_wb_mode">White balance mode</label>
--                <select class="form-select" id="image_core_wb_mode" name="image_core_wb_mode">
--                  <option value="0">AUTO</option>
--                  <option value="1">MANUAL</option>
--                  <option value="2">DAY LIGHT</option>
--                  <option value="3">CLOUDY</option>
--                  <option value="4">INCANDESCENT</option>
--                  <option value="5">FLOURESCENT</option>
--                  <option value="6">TWILIGHT</option>
--                  <option value="7">SHADE</option>
--                  <option value="8">WARM FLOURESCENT</option>
--                  <option value="9">CUSTOM</option>
+-              <p>
+-                <label for="temporal_noise_reduction">Temporal NR</label>
+-                <input type="text" id="temporal_noise_reduction" name="temporal_noise_reduction" class="form-control text-end" value="" pattern="[0-9]{1,}" data-min="0" data-max="255" data-step="1">
+-              </p>
++          </div>
++        </div>
 +
 +        <div class="col col-xl-8 opacity-50 pe-none" id="iq_controls">
 +          <div class="row g-3">
@@ -1272,7 +2315,21 @@ index 80a8f1e04..565879dfb 100644
 +                  <input type="text" class="form-control form-control-sm text-end iq-value" id="iq_sharpness" inputmode="numeric">
 +                </div>
 +              </div>
-+            </div>
+             </div>
+-            <div class="col">
+-              <p class="select" id="image_core_wb_mode_wrap">
+-                <label for="image_core_wb_mode">White balance mode</label>
+-                <select class="form-select" id="image_core_wb_mode" name="image_core_wb_mode">
+-                  <option value="0">AUTO</option>
+-                  <option value="1">MANUAL</option>
+-                  <option value="2">DAY LIGHT</option>
+-                  <option value="3">CLOUDY</option>
+-                  <option value="4">INCANDESCENT</option>
+-                  <option value="5">FLOURESCENT</option>
+-                  <option value="6">TWILIGHT</option>
+-                  <option value="7">SHADE</option>
+-                  <option value="8">WARM FLOURESCENT</option>
+-                  <option value="9">CUSTOM</option>
 +
 +            <div class="col-12 col-lg-6 iq-group" id="iq_group_exposure">
 +              <h5>Exposure</h5>
@@ -1290,13 +2347,45 @@ index 80a8f1e04..565879dfb 100644
 +                  <option value="0">Off</option>
 +                  <option value="1">50 Hz mains</option>
 +                  <option value="2">60 Hz mains</option>
-+                </select>
+                 </select>
+-              </p>
+-              <p>
+-                <label for="image_wb_bgain">Blue channel gain</label>
+-                <input type="text" id="image_wb_bgain" name="image_wb_bgain" class="form-control text-end" value="" pattern="[0-9]{1,}" data-min="0" data-max="1024" data-step="1">
+-              </p>
+-              <p>
+-                <label for="image_wb_rgain">Red channel gain</label>
+-                <input type="text" id="image_wb_rgain" name="image_wb_rgain" class="form-control text-end" value="" pattern="[0-9]{1,}" data-min="0" data-max="1024" data-step="1">
+-              </p>
+-              <p>
+-                <label for="image_ae_compensation"><abbr title="Automatic Exposure">AE</abbr> compensation</label>
+-                <input type="text" id="image_ae_compensation" name="image_ae_compensation" class="form-control text-end" value="" pattern="[0-9]{1,}" data-min="0" data-max="255" data-step="1">
+-              </p>
 +                <div class="form-text">Holds the shutter to the mains frequency so lit scenes do not band.</div>
 +              </div>
-+            </div>
+             </div>
+-            <div class="col">
+-              <p class="boolean form-switch" id="image_hflip_wrap">
+-                <input type="hidden" id="image_hflip-false" name="image_hflip" value="false">
+-                <input type="checkbox" id="image_hflip" name="image_hflip" value="true" role="switch" class="form-check-input">
+-                <label for="image_hflip" class="form-check-label">H-Flip</label>
+-              </p>
+-              <p class="boolean form-switch" id="image_vflip_wrap">
+-                <input type="hidden" id="image_vflip-false" name="image_vflip" value="false">
+-                <input type="checkbox" id="image_vflip" name="image_vflip" value="true" role="switch" class="form-check-input">
+-                <label for="image_vflip" class="form-check-label">V-Flip</label>
+-              </p>
 +
 +            <div class="col-12 col-lg-6 iq-group" id="iq_group_noise">
 +              <h5>Noise and dynamic range</h5>
++              <div class="mb-3 iq-knob" data-knob="sinter">
++                <label for="iq_sinter" class="form-label">Noise reduction</label>
++                <div class="d-flex align-items-center gap-2">
++                  <input type="range" class="form-range" id="iq_sinter-slider" min="0" max="255" step="1">
++                  <input type="text" class="form-control form-control-sm text-end iq-value" id="iq_sinter" inputmode="numeric">
++                </div>
++                <div class="form-text">Spatial, within each frame: higher is smoother and softer.</div>
++              </div>
 +              <div class="mb-3 iq-knob" data-knob="temper">
 +                <label for="iq_temper" class="form-label">Temporal noise reduction</label>
 +                <div class="d-flex align-items-center gap-2">
@@ -1355,32 +2444,7 @@ index 80a8f1e04..565879dfb 100644
 +                  <option value="7">Shade</option>
 +                  <option value="8">Warm fluorescent</option>
 +                  <option value="9">Custom</option>
-                 </select>
--              </p>
--              <p>
--                <label for="image_wb_bgain">Blue channel gain</label>
--                <input type="text" id="image_wb_bgain" name="image_wb_bgain" class="form-control text-end" value="" pattern="[0-9]{1,}" data-min="0" data-max="1024" data-step="1">
--              </p>
--              <p>
--                <label for="image_wb_rgain">Red channel gain</label>
--                <input type="text" id="image_wb_rgain" name="image_wb_rgain" class="form-control text-end" value="" pattern="[0-9]{1,}" data-min="0" data-max="1024" data-step="1">
--              </p>
--              <p>
--                <label for="image_ae_compensation"><abbr title="Automatic Exposure">AE</abbr> compensation</label>
--                <input type="text" id="image_ae_compensation" name="image_ae_compensation" class="form-control text-end" value="" pattern="[0-9]{1,}" data-min="0" data-max="255" data-step="1">
--              </p>
--            </div><!-- .col -->
--            <div class="col">
--              <p class="boolean form-switch" id="image_hflip_wrap">
--                <input type="hidden" id="image_hflip-false" name="image_hflip" value="false">
--                <input type="checkbox" id="image_hflip" name="image_hflip" value="true" role="switch" class="form-check-input">
--                <label for="image_hflip" class="form-check-label">H-Flip</label>
--              </p>
--              <p class="boolean form-switch" id="image_vflip_wrap">
--                <input type="hidden" id="image_vflip-false" name="image_vflip" value="false">
--                <input type="checkbox" id="image_vflip" name="image_vflip" value="true" role="switch" class="form-check-input">
--                <label for="image_vflip" class="form-check-label">V-Flip</label>
--              </p>
++                </select>
 +              </div>
 +              <div class="mb-3 iq-knob" data-knob="wb">
 +                <label for="iq_wb_rgain" class="form-label">Red gain</label>
@@ -1393,7 +2457,7 @@ index 80a8f1e04..565879dfb 100644
              </div>
            </div>
          </div>
-@@ -134,7 +199,6 @@
+@@ -138,7 +207,6 @@
  <script src="/a/navigation.js"></script>
  <script src="/a/footer.js"></script>
  <script src="/a/streamer.js"></script>
@@ -1402,7 +2466,7 @@ index 80a8f1e04..565879dfb 100644
  <script src="/a/streamer-image.js"></script>
  </body>
 diff --git a/package/thingino-raptor/files/www/streamer-main.html b/package/thingino-raptor/files/www/streamer-main.html
-index af0fbce53..9ec97c361 100644
+index bc268ba99..9ec97c361 100644
 --- a/package/thingino-raptor/files/www/streamer-main.html
 +++ b/package/thingino-raptor/files/www/streamer-main.html
 @@ -22,89 +22,96 @@
@@ -1453,7 +2517,22 @@ index af0fbce53..9ec97c361 100644
 -                  <option value="">- Select -</option>
 -                </select>
 -              </p>
--            </div><!-- .col -->
++
++        <div class="col-12 col-lg-7">
++          <form id="ss-form" class="row g-3" onsubmit="return false">
++            <div class="col-sm-6">
++              <label for="ss-resolution" class="form-label">Resolution</label>
++              <select id="ss-resolution" class="form-select"></select>
++            </div>
++            <div class="col-sm-6">
++              <label for="ss-fps" class="form-label">Frame rate</label>
++              <select id="ss-fps" class="form-select"></select>
++              <div id="ss-fps-note" class="form-text"></div>
++            </div>
++            <div class="col-sm-6">
++              <label for="ss-codec" class="form-label">Codec</label>
++              <select id="ss-codec" class="form-select"></select>
+             </div>
 -            <div class="col">
 -              <p>
 -                <label for="stream0_fps">FPS</label>
@@ -1467,7 +2546,10 @@ index af0fbce53..9ec97c361 100644
 -                <label for="stream0_max_gop">Max GOP</label>
 -                <input type="text" id="stream0_max_gop" name="stream0_max_gop" class="form-control" value="">
 -              </p>
--            </div><!-- .col -->
++            <div class="col-sm-6">
++              <label for="ss-profile" class="form-label">Profile</label>
++              <select id="ss-profile" class="form-select"></select>
+             </div>
 -            <div class="col">
 -              <p>
 -                <label for="stream0_mode">Mode</label>
@@ -1483,7 +2565,10 @@ index af0fbce53..9ec97c361 100644
 -                <label for="stream0_profile">Profile</label>
 -                <input type="text" id="stream0_profile" name="stream0_profile" class="form-control" value="">
 -              </p>
--            </div><!-- .col -->
++            <div class="col-sm-6">
++              <label for="ss-rc" class="form-label">Rate control</label>
++              <select id="ss-rc" class="form-select"></select>
+             </div>
 -            <div class="col">
 -              <p>
 -                <label for="stream0_buffers">Buffers</label>
@@ -1503,34 +2588,10 @@ index af0fbce53..9ec97c361 100644
 -                <input type="checkbox" id="stream0_audio_enabled" name="stream0_audio_enabled" value="true" role="switch" class="form-check-input">
 -                <label for="stream0_audio_enabled" class="form-check-label">Audio in stream</label>
 -              </p>
-+
-+        <div class="col-12 col-lg-7">
-+          <form id="ss-form" class="row g-3" onsubmit="return false">
-+            <div class="col-sm-6">
-+              <label for="ss-resolution" class="form-label">Resolution</label>
-+              <select id="ss-resolution" class="form-select"></select>
-+            </div>
-+            <div class="col-sm-6">
-+              <label for="ss-fps" class="form-label">Frame rate</label>
-+              <select id="ss-fps" class="form-select"></select>
-+              <div id="ss-fps-note" class="form-text"></div>
-+            </div>
-+            <div class="col-sm-6">
-+              <label for="ss-codec" class="form-label">Codec</label>
-+              <select id="ss-codec" class="form-select"></select>
-+            </div>
-+            <div class="col-sm-6">
-+              <label for="ss-profile" class="form-label">Profile</label>
-+              <select id="ss-profile" class="form-select"></select>
-+            </div>
-+            <div class="col-sm-6">
-+              <label for="ss-rc" class="form-label">Rate control</label>
-+              <select id="ss-rc" class="form-select"></select>
-             </div>
 +            <div class="col-sm-6">
 +              <label for="ss-gop" class="form-label">Keyframe interval</label>
 +              <select id="ss-gop" class="form-select"></select>
-+            </div>
+             </div>
 +            <div class="col-sm-6">
 +              <label for="ss-bitrate" class="form-label">Bitrate</label>
 +              <select id="ss-bitrate" class="form-select"></select>
@@ -1589,7 +2650,7 @@ index af0fbce53..9ec97c361 100644
  </body>
  </html>
 diff --git a/package/thingino-raptor/files/www/streamer-substream.html b/package/thingino-raptor/files/www/streamer-substream.html
-index e0eaca231..bcafd185c 100644
+index 56c62edda..bcafd185c 100644
 --- a/package/thingino-raptor/files/www/streamer-substream.html
 +++ b/package/thingino-raptor/files/www/streamer-substream.html
 @@ -22,89 +22,96 @@
@@ -1640,7 +2701,22 @@ index e0eaca231..bcafd185c 100644
 -                  <option value="">- Select -</option>
 -                </select>
 -              </p>
--            </div><!-- .col -->
++
++        <div class="col-12 col-lg-7">
++          <form id="ss-form" class="row g-3" onsubmit="return false">
++            <div class="col-sm-6">
++              <label for="ss-resolution" class="form-label">Resolution</label>
++              <select id="ss-resolution" class="form-select"></select>
++            </div>
++            <div class="col-sm-6">
++              <label for="ss-fps" class="form-label">Frame rate</label>
++              <select id="ss-fps" class="form-select"></select>
++              <div id="ss-fps-note" class="form-text"></div>
++            </div>
++            <div class="col-sm-6">
++              <label for="ss-codec" class="form-label">Codec</label>
++              <select id="ss-codec" class="form-select"></select>
+             </div>
 -            <div class="col">
 -              <p>
 -                <label for="stream1_fps">FPS</label>
@@ -1654,7 +2730,10 @@ index e0eaca231..bcafd185c 100644
 -                <label for="stream1_max_gop">Max GOP</label>
 -                <input type="text" id="stream1_max_gop" name="stream1_max_gop" class="form-control" value="">
 -              </p>
--            </div><!-- .col -->
++            <div class="col-sm-6">
++              <label for="ss-profile" class="form-label">Profile</label>
++              <select id="ss-profile" class="form-select"></select>
+             </div>
 -            <div class="col">
 -              <p>
 -                <label for="stream1_mode">Mode</label>
@@ -1670,7 +2749,10 @@ index e0eaca231..bcafd185c 100644
 -                <label for="stream1_profile">Profile</label>
 -                <input type="text" id="stream1_profile" name="stream1_profile" class="form-control" value="">
 -              </p>
--            </div><!-- .col -->
++            <div class="col-sm-6">
++              <label for="ss-rc" class="form-label">Rate control</label>
++              <select id="ss-rc" class="form-select"></select>
+             </div>
 -            <div class="col">
 -              <p>
 -                <label for="stream1_buffers">Buffers</label>
@@ -1690,34 +2772,10 @@ index e0eaca231..bcafd185c 100644
 -                <input type="checkbox" id="stream1_audio_enabled" name="stream1_audio_enabled" value="true" role="switch" class="form-check-input">
 -                <label for="stream1_audio_enabled" class="form-check-label">Audio in stream</label>
 -              </p>
-+
-+        <div class="col-12 col-lg-7">
-+          <form id="ss-form" class="row g-3" onsubmit="return false">
-+            <div class="col-sm-6">
-+              <label for="ss-resolution" class="form-label">Resolution</label>
-+              <select id="ss-resolution" class="form-select"></select>
-+            </div>
-+            <div class="col-sm-6">
-+              <label for="ss-fps" class="form-label">Frame rate</label>
-+              <select id="ss-fps" class="form-select"></select>
-+              <div id="ss-fps-note" class="form-text"></div>
-+            </div>
-+            <div class="col-sm-6">
-+              <label for="ss-codec" class="form-label">Codec</label>
-+              <select id="ss-codec" class="form-select"></select>
-+            </div>
-+            <div class="col-sm-6">
-+              <label for="ss-profile" class="form-label">Profile</label>
-+              <select id="ss-profile" class="form-select"></select>
-+            </div>
-+            <div class="col-sm-6">
-+              <label for="ss-rc" class="form-label">Rate control</label>
-+              <select id="ss-rc" class="form-select"></select>
-             </div>
 +            <div class="col-sm-6">
 +              <label for="ss-gop" class="form-label">Keyframe interval</label>
 +              <select id="ss-gop" class="form-select"></select>
-+            </div>
+             </div>
 +            <div class="col-sm-6">
 +              <label for="ss-bitrate" class="form-label">Bitrate</label>
 +              <select id="ss-bitrate" class="form-select"></select>
@@ -1775,3 +2833,6 @@ index e0eaca231..bcafd185c 100644
 +<script src="/a/streamer-stream.js"></script>
  </body>
  </html>
+-- 
+2.43.0
+

@@ -1,7 +1,7 @@
-From 30384e698e1cbff29a728e697b6d71bc39e12397 Mon Sep 17 00:00:00 2001
+From 03af906e57234cec223c180a4a4fc7696f9b82cf Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 12:50:44 -0400
-Subject: [PATCH 2/6] infinity6c: build against the upstream HAL interface
+Subject: [PATCH 04/13] infinity6c: build against the upstream HAL interface
 
 John's backend uses interface items only his fork's raptor_hal.h has. When
 RSS_ISP_AUTO is absent (upstream), i6c_upstream_compat.h selects
@@ -204,3 +204,6 @@ index 68c0348..519acde 100644
  
  #include "i6c_aud_load.h"
  #include "i6c_isp_load.h"
+-- 
+2.43.0
+

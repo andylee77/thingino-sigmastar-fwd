@@ -1,22 +1,33 @@
-From 0e3167d43b221f650324c47348256b4ea5b94870 Mon Sep 17 00:00:00 2001
+From 1142957580d63ce94ef5825de96712ff770b476a Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 4 Nov 2026 08:19:15 -0500
-Subject: [PATCH 06/21] sigmastar: build Raptor against the raptor-hal fork;
+Date: Wed, 11 Nov 2026 17:09:54 -0500
+Subject: [PATCH 06/22] sigmastar: build Raptor against the raptor-hal fork;
  reference target
 
+SigmaStar builds raptor-hal from the fork that carries the Infinity6C
+backend (published as its own series, on gtxaspec main 9f09664); every other
+vendor keeps upstream's pin. The HAL dlopens the MI libraries, so the linker
+never pulls them in: its SigmaStar symbol selects sigmastar-lib. Submodules
+are off for the fork: Buildroot fetches them for any non-empty value, NO
+included.
+
+Also the board-less reference target noname_ssc377qe_imx335 (SSC377QE +
+IMX335) with its raptor.config, the CI default.
 ---
- .../noname_ssc377qe_imx335_defconfig          | 127 ++++++++++++++++++
+ .../noname_ssc377qe_imx335_defconfig          | 130 ++++++++++++++++++
+ .../noname_ssc377qe_imx335/raptor.config      |   2 +
  package/thingino-raptor-hal/Config.in         |   8 ++
- .../thingino-raptor-hal.mk                    |  15 +++
- 3 files changed, 150 insertions(+)
+ .../thingino-raptor-hal.mk                    |  15 ++
+ 4 files changed, 155 insertions(+)
  create mode 100644 configs/cameras/noname_ssc377qe_imx335/noname_ssc377qe_imx335_defconfig
+ create mode 100644 configs/cameras/noname_ssc377qe_imx335/raptor.config
 
 diff --git a/configs/cameras/noname_ssc377qe_imx335/noname_ssc377qe_imx335_defconfig b/configs/cameras/noname_ssc377qe_imx335/noname_ssc377qe_imx335_defconfig
 new file mode 100644
-index 000000000..afcfa6cf6
+index 000000000..892d301d0
 --- /dev/null
 +++ b/configs/cameras/noname_ssc377qe_imx335/noname_ssc377qe_imx335_defconfig
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,130 @@
 +# NAME: Unbranded SSC377QE (Infinity6C, IMX335)
 +#
 +# First Infinity6C target. See board/sigmastar/infinity6c/ and sigmastar-sdk's
@@ -26,6 +37,11 @@ index 000000000..afcfa6cf6
 +# implemented on the infinity6c backend -- no tuning load, no exposure or
 +# colour control -- so on this target a bad picture is expected and tells you
 +# nothing, while no picture is a real result.
++#
++# CI-ONLY: a build target, never a flash target. It has no camera overlay, so
++# fw_env.config stays on /dev/mtd1, which is the kernel on the OEM-U-Boot
++# boards: flashed onto one, it bricks on its second boot. The profile checks
++# (check-profile-contract.sh and friends) skip CI-ONLY profiles.
 +# FRAG: soc-sigmastar core-sigmastar
 +
 +# board.mk includes this file as a makefile before thingino.mk runs, so the
@@ -142,8 +158,14 @@ index 000000000..afcfa6cf6
 +# Ingenic driver node, and will not start without them, so on SigmaStar they
 +# come from [sensor]. 7-bit address, raptor.conf's convention (the driver's
 +# 8-bit slave is 0x34); the Infinity6C backend does not use it.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_SENSOR_NAME="imx335"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_SENSOR_I2C_ADDR="0x1a"
+diff --git a/configs/cameras/noname_ssc377qe_imx335/raptor.config b/configs/cameras/noname_ssc377qe_imx335/raptor.config
+new file mode 100644
+index 000000000..1632d91bc
+--- /dev/null
++++ b/configs/cameras/noname_ssc377qe_imx335/raptor.config
+@@ -0,0 +1,2 @@
++RAPTOR_SENSOR_NAME="imx335"
++RAPTOR_SENSOR_I2C_ADDR="0x1a"
 diff --git a/package/thingino-raptor-hal/Config.in b/package/thingino-raptor-hal/Config.in
 index 20000d147..62c5fa1ca 100644
 --- a/package/thingino-raptor-hal/Config.in
@@ -168,7 +190,7 @@ index 20000d147..62c5fa1ca 100644
 +	bool
 +	select BR2_PACKAGE_SIGMASTAR_LIB
 diff --git a/package/thingino-raptor-hal/thingino-raptor-hal.mk b/package/thingino-raptor-hal/thingino-raptor-hal.mk
-index a96f9ad55..a6637fdb7 100644
+index 2c6517a87..db93ca70a 100644
 --- a/package/thingino-raptor-hal/thingino-raptor-hal.mk
 +++ b/package/thingino-raptor-hal/thingino-raptor-hal.mk
 @@ -40,4 +40,19 @@ define THINGINO_RAPTOR_HAL_INSTALL_STAGING_CMDS
@@ -176,7 +198,7 @@ index a96f9ad55..a6637fdb7 100644
  endef
  
 +# SigmaStar builds our raptor-hal fork: upstream plus John Chia's Infinity6C
-+# backend (FORK.md in that repository says what else). Local only for now.
++# backend (FORK.md in that repository says what else); no public remote yet.
 +#
 +# Down here rather than beside the pin at the top, so upstream's pin bumps never
 +# conflict with it; Buildroot reads _VERSION and _SITE when generic-package is
@@ -185,9 +207,12 @@ index a96f9ad55..a6637fdb7 100644
 +# Buildroot fetches submodules for any non-empty value, NO included, so off is
 +# empty.
 +ifeq ($(BR2_SOC_VENDOR_SIGMASTAR),y)
-+THINGINO_RAPTOR_HAL_VERSION = 39a48ca03d64755d376357b33ee7cdd371237700
++THINGINO_RAPTOR_HAL_VERSION = 6f00723a7b40bc0d7d86b7eda9a1bfe3317c0af8
 +THINGINO_RAPTOR_HAL_SITE = file://$(HOME)/src/forks/raptor-hal
 +THINGINO_RAPTOR_HAL_GIT_SUBMODULES =
 +endif
 +
  $(eval $(generic-package))
+-- 
+2.43.0
+

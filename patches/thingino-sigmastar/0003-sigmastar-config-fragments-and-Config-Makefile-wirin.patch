@@ -1,24 +1,34 @@
-From ba0d43a840eaa8cf3803883150fba166af5ab501 Mon Sep 17 00:00:00 2001
+From 7737fdf321acaf7ebe1b8cbb40b9d133340b646e Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 4 Nov 2026 08:19:15 -0500
-Subject: [PATCH 03/21] sigmastar: config fragments and Config/Makefile wiring
+Date: Wed, 11 Nov 2026 17:09:54 -0500
+Subject: [PATCH 03/22] sigmastar: config fragments and Config/Makefile wiring
 
+The soc- and core-sigmastar fragments (re-synced with core.fragment); the
+Config.in wiring, with BR2_TARGET_UBOOT kept Ingenic-only; Config.soc.in
+mapping the six Maruko parts to BR2_SOC_FAMILY; image assembly in the split
+Makefiles. Config.in also sources the SigmaStar packages, thingino-lensd,
+thingino-nettest and thingino-ipud.
+
+core-sigmastar selects one package set for every SigmaStar board: the PWM
+light tool, lensd, the block-device automount and ipud, which stays off until
+enabled. What a board's hardware has is config in its defconfig: the light
+channels, the lensd mode, the microSD modules.
 ---
- Config.in                                 |  11 +-
- Config.soc.in                             |  13 ++-
+ Config.in                                 |  14 +-
+ Config.soc.in                             |  14 +-
  Makefile                                  |   2 +
- Makefile.ota                              |   7 ++
- Makefile.utils                            |  34 +++++-
- configs/fragments/core-sigmastar.fragment | 129 ++++++++++++++++++++++
+ Makefile.ota                              |   7 +
+ Makefile.utils                            |  34 ++++-
+ configs/fragments/core-sigmastar.fragment | 157 ++++++++++++++++++++++
  configs/fragments/soc-sigmastar.fragment  |  15 +++
  configs/fragments/uclibc/gnu-hash.config  |   1 +
- 8 files changed, 208 insertions(+), 4 deletions(-)
+ 8 files changed, 240 insertions(+), 4 deletions(-)
  create mode 100644 configs/fragments/core-sigmastar.fragment
  create mode 100644 configs/fragments/soc-sigmastar.fragment
  create mode 100644 configs/fragments/uclibc/gnu-hash.config
 
 diff --git a/Config.in b/Config.in
-index 49105ddfc..c13966970 100644
+index 49105ddfc..b4e9b45a7 100644
 --- a/Config.in
 +++ b/Config.in
 @@ -71,6 +71,7 @@ menuconfig BR2_THINGINO_SYSTEM_PACKAGES
@@ -40,25 +50,30 @@ index 49105ddfc..c13966970 100644
  	select BR2_THINGINO_PACKAGES
  	# buildroot package configuration
  	select BR2_PACKAGE_DROPBEAR_SMALL if BR2_PACKAGE_DROPBEAR
-@@ -124,6 +127,9 @@ source "$BR2_EXTERNAL_THINGINO_PATH/package/mbedtls-certgen/Config.in"
+@@ -124,6 +127,11 @@ source "$BR2_EXTERNAL_THINGINO_PATH/package/mbedtls-certgen/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/open-tx-isp/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/openimp/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-isp/Config.in"
 +source "$BR2_EXTERNAL_THINGINO_PATH/package/sigmastar-lib/Config.in"
++source "$BR2_EXTERNAL_THINGINO_PATH/package/sigmastar-light/Config.in"
 +source "$BR2_EXTERNAL_THINGINO_PATH/package/sigmastar-sdk/Config.in"
++source "$BR2_EXTERNAL_THINGINO_PATH/package/sigmastar-sensor-headers/Config.in"
 +source "$BR2_EXTERNAL_THINGINO_PATH/package/sigmastar-uboot/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/spi-tmi8152/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/subzeroclaw/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/telegrambot/Config.in"
-@@ -139,6 +145,7 @@ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-gpio/Config.in"
+@@ -137,8 +145,10 @@ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-ethernet/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-floodlightd/Config.in"
+ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-gpio/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-httpd-ssl/Config.in"
++source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-ipud/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-isp-inspector/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-jct/Config.in"
 +source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-lensd/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-libble/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-libcurl/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-libubox/Config.in"
-@@ -146,6 +153,7 @@ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-mmc/Config.in"
+@@ -146,6 +156,7 @@ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-mmc/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-motors/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-sensor-info/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-mxml/Config.in"
@@ -66,7 +81,7 @@ index 49105ddfc..c13966970 100644
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-nimble/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-odhcp6c/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-onvif/Config.in"
-@@ -156,6 +164,7 @@ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-ssl/Config.in"
+@@ -156,6 +167,7 @@ source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-ssl/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-secureboop/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-system/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-system/Config.ingenic.in"
@@ -75,10 +90,10 @@ index 49105ddfc..c13966970 100644
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-uboot/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-ubus/Config.in"
 diff --git a/Config.soc.in b/Config.soc.in
-index ab5bcedb9..d4834cadb 100644
+index ab5bcedb9..41b26b332 100644
 --- a/Config.soc.in
 +++ b/Config.soc.in
-@@ -44,10 +44,20 @@ config BR2_SIGMASTAR_SOC_MODEL
+@@ -44,10 +44,21 @@ config BR2_SIGMASTAR_SOC_MODEL
  	  Enter the SigmaStar SoC model name for your device (e.g., ssc30kq).
  	  This value is used to automatically derive the SoC family.
  
@@ -92,15 +107,16 @@ index ab5bcedb9..d4834cadb 100644
 +	bool "Build sensor drivers from source"
 +	depends on BR2_SOC_VENDOR_SIGMASTAR
 +	help
-+	  Build the sensor drivers in sigmastar-sdk's sensor-src instead of
++	  Build the sensor drivers in sigmastar-sdk's sensor-src as well as
 +	  installing the ones the MI drop ships prebuilt. Needed for a sensor
-+	  the drop has no prebuilt driver for. Families default to whichever
-+	  their drop supports (see soc/sigmastar/<family>.mk).
++	  the drop has no prebuilt driver for. Where both exist, the drop's
++	  prebuilt driver is the one installed. Without it a family gets
++	  whatever its drop supports (see soc/sigmastar/<family>.mk).
 +
  config BR2_SOC_FAMILY
  	string
  	default "t10" if BR2_INGENIC_SOC_MODEL = "t10l" || BR2_INGENIC_SOC_MODEL = "t10n" || BR2_INGENIC_SOC_MODEL = "t10a"
-@@ -64,6 +74,7 @@ config BR2_SOC_FAMILY
+@@ -64,6 +75,7 @@ config BR2_SOC_FAMILY
  	# Only one vendor's model symbol is ever non-empty, so the two halves of
  	# this chain cannot both match and their order does not matter.
  	default "infinity6e" if BR2_SIGMASTAR_SOC_MODEL = "ssc30kq"
@@ -109,7 +125,7 @@ index ab5bcedb9..d4834cadb 100644
  config BR2_SOC_RAM_MB
  	int "RAM size in MB"
 diff --git a/Makefile b/Makefile
-index 487793017..f755bc8d8 100644
+index 86f21483d..d2c04e9f4 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -300,6 +300,8 @@ NPROC := $(shell nproc)
@@ -140,10 +156,10 @@ index 297eb63fc..59d5b2685 100644
  	$(info Aligned at: $(ALIGN_BLOCK))
  	$(info U-Boot Env: $(shell strings $(UB_ENV_BIN) 2>/dev/null | grep "^mtdparts" || echo "mtdparts not found"))
 diff --git a/Makefile.utils b/Makefile.utils
-index 6b016bef9..9b48e06a7 100644
+index 3acc8ca2e..eb987da76 100644
 --- a/Makefile.utils
 +++ b/Makefile.utils
-@@ -29,7 +29,26 @@ $(OUTPUT_DIR)/.config:
+@@ -45,7 +45,26 @@ $(OUTPUT_DIR)/.config:
  	@$(TEAL) "$@"
  	$(MAKE) force-config
  
@@ -171,7 +187,7 @@ index 6b016bef9..9b48e06a7 100644
  # MMC SD card image layout:
  #   Block 0:      INGE header (total size + descriptor terminator)
  #   Block 1-33:   Reserved
-@@ -256,10 +275,21 @@ endif
+@@ -272,10 +291,21 @@ endif
  	fi
  	exit
  
@@ -196,10 +212,10 @@ index 6b016bef9..9b48e06a7 100644
  	@$(TEAL) "$@"
 diff --git a/configs/fragments/core-sigmastar.fragment b/configs/fragments/core-sigmastar.fragment
 new file mode 100644
-index 000000000..c18ce1c34
+index 000000000..d35614d98
 --- /dev/null
 +++ b/configs/fragments/core-sigmastar.fragment
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,157 @@
 +# SigmaStar counterpart to core.fragment.
 +#
 +# One core fragment per vendor rather than overrides layered on core.fragment:
@@ -239,7 +255,12 @@ index 000000000..c18ce1c34
 +BR2_TARGET_GENERIC_ROOT_PASSWD="root"
 +BR2_SYSTEM_DEFAULT_PATH="/bin:/sbin:/usr/bin:/usr/sbin"
 +# BR2_TARGET_TZ_INFO is not set
-+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_THINGINO_PATH)/overlay"
++# The vendor overlay comes after the shared one and before the camera's own
++# (Makefile.targets appends that). Its fw_env.config points fw_setenv at a
++# scratch file: the shared overlay's "/dev/mtd1 0x0" is the kernel's first
++# block on the OEM flash layouts, and the first fw_setenv after a flash once
++# erased a JL12D2's uImage header. A board needs nothing of its own to be safe.
++BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_THINGINO_PATH)/overlay $(BR2_EXTERNAL_THINGINO_PATH)/board/sigmastar/overlay"
 +BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_THINGINO_PATH)/scripts/rootfs_script.sh"
 +
 +# Kernel: a fork of OpenIPC's sigmastar-* trees, pinned by hash, one branch per
@@ -308,6 +329,29 @@ index 000000000..c18ce1c34
 +# defaults to NONE, so the camera baseline is what turns WireGuard on.
 +BR2_PACKAGE_THINGINO_VPN_WIREGUARD=y
 +
++# The SigmaStar half of the same rule: every board ships these, and what its
++# hardware has is config in the camera defconfig, not a different package set
++# (check-profile-consistency.sh compares the sets).
++#   - sigmastar-light: the PWM light tool; the defconfig names the channels
++#     (BR2_PACKAGE_SIGMASTAR_LIGHT_IR_PWM / _WHITE_PWM).
++#   - thingino-lensd: the lens/PTZ board daemon; the defconfig picks the mode
++#     (BR2_PACKAGE_THINGINO_LENSD_MODE_OFF / _AF / _PELCO). In mode off it does
++#     not run, and ONVIF and the web UI offer no PTZ.
++#   - thingino-ipud: IPU object detection, off until enabled in thingino.json
++#     with an IPU firmware and model in place (neither ships in the image).
++#   - the block-device automount: the mdev handler and boot scan, idle on a
++#     board without a slot. The microSD slot itself is the kernel fragment's
++#     MMC options plus overlay/etc/modules.d/sdcard.
++# The sensor-driver build belongs to the same set but cannot live here:
++# BR2_SIGMASTAR_SENSOR_SOURCE is read by soc/sigmastar/infinity6c.mk from the
++# camera defconfig included as a makefile, which never sees this fragment (the
++# trap soc-sigmastar.fragment describes for BR2_SOC_VENDOR_SIGMASTAR). Every
++# camera defconfig sets it, and the package-set check compares them.
++BR2_PACKAGE_SIGMASTAR_LIGHT=y
++BR2_PACKAGE_THINGINO_LENSD=y
++BR2_PACKAGE_THINGINO_IPUD=y
++BR2_PACKAGE_THINGINO_SYSTEM_AUTOMOUNT=y
++
 +# Omitted on purpose, unlike core.fragment:
 +#   BR2_PACKAGE_THINGINO_GPIO / _LEDD / _DAYNIGHT  - Ingenic GPIO register access
 +#   BR2_PACKAGE_THINGINO_KOPT_IPV6  - the family kernel configs have IPv6 off,
@@ -357,3 +401,6 @@ index 000000000..b8fbe37ac
 +++ b/configs/fragments/uclibc/gnu-hash.config
 @@ -0,0 +1 @@
 +LDSO_GNU_HASH_SUPPORT=y
+-- 
+2.43.0
+

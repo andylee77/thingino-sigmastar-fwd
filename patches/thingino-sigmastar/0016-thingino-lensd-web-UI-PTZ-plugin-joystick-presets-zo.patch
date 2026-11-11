@@ -1,9 +1,12 @@
-From e91f599047b7e92fc4ea264ad917b66c2f76843a Mon Sep 17 00:00:00 2001
+From 7c07114a2614d4fd6f24dccfa3bdd24f9f300bbf Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 4 Nov 2026 08:19:16 -0500
-Subject: [PATCH 16/21] thingino-lensd: web UI PTZ plugin (joystick, presets,
+Date: Wed, 11 Nov 2026 17:09:54 -0500
+Subject: [PATCH 16/22] thingino-lensd: web UI PTZ plugin (joystick, presets,
  zoom/focus)
 
+A web UI PTZ plugin in thingino-motors' layout: a joystick overlay, a PTZ
+Settings modal, zoom and focus buttons, presets and home, backed by
+/x/json-lensd.cgi. Its motors script turns PTZ on in the ONVIF server.
 ---
  package/thingino-lensd/files/lensd.webui.json |  18 +
  package/thingino-lensd/files/motors           |  13 +
@@ -684,3 +687,6 @@ index 000000000..91d44dca7
 +	json_error "unknown-action"
 +	;;
 +esac
+-- 
+2.43.0
+

@@ -1,7 +1,7 @@
-From d822d54c99c2f9432534674331240cad84f8a5c9 Mon Sep 17 00:00:00 2001
+From 45bc3a113803fbdc04167b85bcfb364e8581d833 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 00:40:00 -0400
-Subject: [PATCH 3/6] infinity6c: anti-flicker via FlickerEx manual lock
+Subject: [PATCH 05/13] infinity6c: anti-flicker via FlickerEx manual lock
 
 Upstream drives anti-flicker through the legacy MI_ISP_AE_SetFlicker, which
 this GC8613 tuning ignores (returns -22) because the AE runs the vendor newer
@@ -238,3 +238,6 @@ index 519acde..b87e220 100644
  void i6c_isp_forget_knobs(void);
  
  /*
+-- 
+2.43.0
+

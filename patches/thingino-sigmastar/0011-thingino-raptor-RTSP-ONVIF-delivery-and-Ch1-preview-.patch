@@ -1,9 +1,14 @@
-From c2ca764eb3dee1fd4bac7c9a7b9d0ddd58f232b0 Mon Sep 17 00:00:00 2001
+From 0e16ce192cbbe269ba87d5dbcb0e11c807918b62 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 4 Nov 2026 08:19:15 -0500
-Subject: [PATCH 11/21] thingino-raptor: RTSP/ONVIF delivery and Ch1 preview
+Date: Wed, 11 Nov 2026 17:09:54 -0500
+Subject: [PATCH 11/22] thingino-raptor: RTSP/ONVIF delivery and Ch1 preview
  fallback (rsd, onvif)
 
+raptor patches 0106-0108: S31raptor runs /etc/raptor.d hooks around the
+stack (a process outside it that calls the ISP must stop first); rsd sends
+each RTSP reply in one piece; DESCRIBE waits for the parameter sets. ONVIF
+profiles carry the streams' real sizes, and the Ch1 snapshot and MJPEG fall
+back to JPEG channel 0 when there is no JPEG channel 1.
 ---
  ...S31raptor-run-hooks-around-the-stack.patch |  64 +++++++++
  ...sd-send-each-RTSP-reply-in-one-piece.patch |  56 ++++++++
@@ -12,16 +17,16 @@ Subject: [PATCH 11/21] thingino-raptor: RTSP/ONVIF delivery and Ch1 preview
  package/thingino-raptor/files/www/x/ch1.mjpg  |   5 +
  package/thingino-raptor/files/www/x/dl1.jpg   |   8 +-
  6 files changed, 269 insertions(+), 1 deletion(-)
- create mode 100644 package/thingino-raptor/0006-S31raptor-run-hooks-around-the-stack.patch
- create mode 100644 package/thingino-raptor/0007-rsd-send-each-RTSP-reply-in-one-piece.patch
- create mode 100644 package/thingino-raptor/0008-rsd-answer-DESCRIBE-with-the-parameter-sets-not-befo.patch
+ create mode 100644 package/thingino-raptor/0106-S31raptor-run-hooks-around-the-stack.patch
+ create mode 100644 package/thingino-raptor/0107-rsd-send-each-RTSP-reply-in-one-piece.patch
+ create mode 100644 package/thingino-raptor/0108-rsd-answer-DESCRIBE-with-the-parameter-sets-not-befo.patch
  mode change 100644 => 100755 package/thingino-raptor/files/S96onvif_discovery
 
-diff --git a/package/thingino-raptor/0006-S31raptor-run-hooks-around-the-stack.patch b/package/thingino-raptor/0006-S31raptor-run-hooks-around-the-stack.patch
+diff --git a/package/thingino-raptor/0106-S31raptor-run-hooks-around-the-stack.patch b/package/thingino-raptor/0106-S31raptor-run-hooks-around-the-stack.patch
 new file mode 100644
-index 000000000..7effba1e9
+index 000000000..515dd0d5a
 --- /dev/null
-+++ b/package/thingino-raptor/0006-S31raptor-run-hooks-around-the-stack.patch
++++ b/package/thingino-raptor/0106-S31raptor-run-hooks-around-the-stack.patch
 @@ -0,0 +1,64 @@
 +From 7e576ef29f8a6cfbb0285f35a5da105122cfa8be Mon Sep 17 00:00:00 2001
 +From: Andy <andylee77@users.noreply.github.com>
@@ -44,12 +49,12 @@ index 000000000..7effba1e9
 + 1 file changed, 16 insertions(+)
 +
 +diff --git a/config/S31raptor b/config/S31raptor
-+index 77cbcde..f9bb27f 100755
++index 4499f6c..b9db9c4 100755
 +--- a/config/S31raptor
 ++++ b/config/S31raptor
-+@@ -5,6 +5,19 @@ CONF=/etc/raptor.conf
-+ RUNDIR=/var/run/rss
-+ SHMDIR=/dev/shm
++@@ -12,6 +12,19 @@ if [ -z "$S31RAPTOR_LOCKED" ] && command -v flock >/dev/null 2>&1; then
++ 	S31RAPTOR_LOCKED=1 exec flock "$RUNDIR/.lock" "$0" "$@"
++ fi
 + 
 ++# Executables here run with "stop" before any daemon goes down and with
 ++# "start" once the stack is up. They are for processes outside the stack that
@@ -67,7 +72,7 @@ index 000000000..7effba1e9
 + # Read a boolean from raptor.conf: config_bool <section> <key> <default>
 + config_bool() {
 + 	val=$(raptorctl config get "$1" "$2" 2>/dev/null | tr -d '\r\n')
-+@@ -116,6 +129,8 @@ start() {
++@@ -123,6 +136,8 @@ start() {
 + 	start_daemon rsp
 + 	start_daemon rsr
 + 
@@ -76,22 +81,22 @@ index 000000000..7effba1e9
 + 	echo "Done."
 + }
 + 
-+@@ -137,6 +152,7 @@ stop_daemon() {
++@@ -145,6 +160,7 @@ stop_daemon() {
 + 
 + stop() {
 + 	echo "Stopping Raptor Streaming System..."
 ++	run_hooks stop
 + 
 + 	# Stop consumers first, then producer (RVD) last
-+ 	for d in rsr rsp rwd rmd rmr ric rhd rsd rod rad rvd; do
++ 	for d in rsr rsp rwd rmd rmr ric rhd rsd rsd-555 rod rad rvd; do
 +-- 
 +2.43.0
 +
-diff --git a/package/thingino-raptor/0007-rsd-send-each-RTSP-reply-in-one-piece.patch b/package/thingino-raptor/0007-rsd-send-each-RTSP-reply-in-one-piece.patch
+diff --git a/package/thingino-raptor/0107-rsd-send-each-RTSP-reply-in-one-piece.patch b/package/thingino-raptor/0107-rsd-send-each-RTSP-reply-in-one-piece.patch
 new file mode 100644
-index 000000000..3d51730a4
+index 000000000..7e55c6935
 --- /dev/null
-+++ b/package/thingino-raptor/0007-rsd-send-each-RTSP-reply-in-one-piece.patch
++++ b/package/thingino-raptor/0107-rsd-send-each-RTSP-reply-in-one-piece.patch
 @@ -0,0 +1,56 @@
 +From e8ef47b68ef5ee2951c9e764c4db5f961a30cc7f Mon Sep 17 00:00:00 2001
 +From: Andy <andylee77@users.noreply.github.com>
@@ -149,11 +154,11 @@ index 000000000..3d51730a4
 +-- 
 +2.43.0
 +
-diff --git a/package/thingino-raptor/0008-rsd-answer-DESCRIBE-with-the-parameter-sets-not-befo.patch b/package/thingino-raptor/0008-rsd-answer-DESCRIBE-with-the-parameter-sets-not-befo.patch
+diff --git a/package/thingino-raptor/0108-rsd-answer-DESCRIBE-with-the-parameter-sets-not-befo.patch b/package/thingino-raptor/0108-rsd-answer-DESCRIBE-with-the-parameter-sets-not-befo.patch
 new file mode 100644
-index 000000000..36f89578c
+index 000000000..2524de17b
 --- /dev/null
-+++ b/package/thingino-raptor/0008-rsd-answer-DESCRIBE-with-the-parameter-sets-not-befo.patch
++++ b/package/thingino-raptor/0108-rsd-answer-DESCRIBE-with-the-parameter-sets-not-befo.patch
 @@ -0,0 +1,129 @@
 +From a75043e111c38226994fe17137f0d9e77a4981fe Mon Sep 17 00:00:00 2001
 +From: Andy <andylee77@users.noreply.github.com>
@@ -340,3 +345,6 @@ index 7c3c6c3f8..a0db45cf5 100755
  	printf 'Status: 503 Service Unavailable\r\n\r\n'
  	exit 0
  fi
+-- 
+2.43.0
+

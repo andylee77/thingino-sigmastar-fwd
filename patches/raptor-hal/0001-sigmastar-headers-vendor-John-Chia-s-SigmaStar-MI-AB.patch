@@ -1,0 +1,4676 @@
+From e034a6f3e5627cc401b09da0908636468609e1a9 Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 12:50:44 -0400
+Subject: [PATCH 01/13] sigmastar-headers: vendor John Chia's SigmaStar MI ABI
+ headers @ 6fb6eec
+
+Reconstructed MI 2.x (infinity6e) and MI 3.0 (infinity6c) declarations from
+johnchia/sigmastar-headers, the submodule his raptor-hal pins. Vendored as a
+plain directory so the build needs nothing online; provenance in VENDORED.md
+and each family's DERIVED.md.
+---
+ sigmastar-headers/README.md               | 149 +++++
+ sigmastar-headers/VENDORED.md             |  11 +
+ sigmastar-headers/infinity6c/DERIVED.md   | 702 ++++++++++++++++++++++
+ sigmastar-headers/infinity6c/i6c_aud.h    | 254 ++++++++
+ sigmastar-headers/infinity6c/i6c_common.h | 139 +++++
+ sigmastar-headers/infinity6c/i6c_isp.h    | 431 +++++++++++++
+ sigmastar-headers/infinity6c/i6c_rgn.h    | 150 +++++
+ sigmastar-headers/infinity6c/i6c_scl.h    |  95 +++
+ sigmastar-headers/infinity6c/i6c_snr.h    | 113 ++++
+ sigmastar-headers/infinity6c/i6c_sys.h    | 204 +++++++
+ sigmastar-headers/infinity6c/i6c_venc.h   | 410 +++++++++++++
+ sigmastar-headers/infinity6c/i6c_vif.h    | 126 ++++
+ sigmastar-headers/infinity6e/i6_aud.h     | 212 +++++++
+ sigmastar-headers/infinity6e/i6_common.h  | 152 +++++
+ sigmastar-headers/infinity6e/i6_isp.h     | 280 +++++++++
+ sigmastar-headers/infinity6e/i6_rgn.h     | 144 +++++
+ sigmastar-headers/infinity6e/i6_snr.h     |  91 +++
+ sigmastar-headers/infinity6e/i6_sys.h     | 198 ++++++
+ sigmastar-headers/infinity6e/i6_venc.h    | 322 ++++++++++
+ sigmastar-headers/infinity6e/i6_vif.h     |  85 +++
+ sigmastar-headers/infinity6e/i6_vpe.h     | 224 +++++++
+ 21 files changed, 4492 insertions(+)
+ create mode 100644 sigmastar-headers/README.md
+ create mode 100644 sigmastar-headers/VENDORED.md
+ create mode 100644 sigmastar-headers/infinity6c/DERIVED.md
+ create mode 100644 sigmastar-headers/infinity6c/i6c_aud.h
+ create mode 100644 sigmastar-headers/infinity6c/i6c_common.h
+ create mode 100644 sigmastar-headers/infinity6c/i6c_isp.h
+ create mode 100644 sigmastar-headers/infinity6c/i6c_rgn.h
+ create mode 100644 sigmastar-headers/infinity6c/i6c_scl.h
+ create mode 100644 sigmastar-headers/infinity6c/i6c_snr.h
+ create mode 100644 sigmastar-headers/infinity6c/i6c_sys.h
+ create mode 100644 sigmastar-headers/infinity6c/i6c_venc.h
+ create mode 100644 sigmastar-headers/infinity6c/i6c_vif.h
+ create mode 100644 sigmastar-headers/infinity6e/i6_aud.h
+ create mode 100644 sigmastar-headers/infinity6e/i6_common.h
+ create mode 100644 sigmastar-headers/infinity6e/i6_isp.h
+ create mode 100644 sigmastar-headers/infinity6e/i6_rgn.h
+ create mode 100644 sigmastar-headers/infinity6e/i6_snr.h
+ create mode 100644 sigmastar-headers/infinity6e/i6_sys.h
+ create mode 100644 sigmastar-headers/infinity6e/i6_venc.h
+ create mode 100644 sigmastar-headers/infinity6e/i6_vif.h
+ create mode 100644 sigmastar-headers/infinity6e/i6_vpe.h
+
+diff --git a/sigmastar-headers/README.md b/sigmastar-headers/README.md
+new file mode 100644
+index 0000000..a21628d
+--- /dev/null
++++ b/sigmastar-headers/README.md
+@@ -0,0 +1,149 @@
++# sigmastar-headers
++
++## Overview
++
++Programming headers for the SigmaStar MI (Multimedia Interface) libraries found
++on Infinity-series camera SoCs. Companion to
++[ingenic-headers](https://github.com/gtxaspec/ingenic-headers), same purpose and
++the same layout convention.
++
++## Families supported
++
++| directory | chips | MI series |
++| --- | --- | --- |
++| `infinity6e` | SSC30KQ, SSC336Q, SSC338Q, SSC339G | 0xF1 |
++| `infinity6c` | SSC377, SSC378, SSC379 | MI 3.0 |
++
++`infinity6b0` (SSC333/335/337) has no directory of its own: it is the same MI
++generation as `infinity6e` and consumers point it at that family.
++
++`infinity6c` is a different generation and shares no layout with either, even
++where a function signature is unchanged. Its whole module surface leads with
++arguments MI 2.x does not have — a SoC id on MI_SYS and MI_RGN, a device on
++MI_VENC — and `dlsym` resolves by name, so a consumer that reuses MI 2.x
++declarations here links cleanly and then calls with the wrong argument list.
++Nothing reports it.
++
++## These are reconstructions, not vendor headers
++
++SigmaStar ships no redistributable headers. What is here was reconstructed from
++the ABI of prebuilt vendor `.so` files, vendored from
++[OpenIPC divinus](https://github.com/OpenIPC/divinus) (`src/hal/star/i6_*.h`,
++MIT) and corroborated field by field against `waybeam_venc`'s independently
++maintained `sigmastar_types.h`, then validated struct by struct against a real
++SigmaStar Alkaid SDK's `mi_*_datatype.h`.
++
++That last step matters and is worth repeating for anything added here: a wrong
++layout does not fail to compile, it corrupts memory. Several structs that two
++transcriptions agreed on were still wrong, because both descend from
++multi-chip HALs that carry MI 3.0 fields into MI 2.x structs — agreement
++between them is a hypothesis, not evidence.
++
++Names and field order follow divinus so fixes stay diffable against upstream.
++
++### `infinity6c` is vendored the same way, and validated harder
++
++Same method as the family beside it: divinus's `src/hal/star/i6c_*.h` vendored
++under its MIT licence, reworked to stand alone, and then checked struct by struct
++against the binaries rather than assumed. There is no waybeam transcription for
++this generation to corroborate against, so the validation leans entirely on the
++shipped artifacts — which turns out to be a stronger check than a second
++reconstruction. Every layout checked so far has held.
++
++MI marshals through an ioctl, and that makes the artifacts unusually
++forthcoming. Each userspace wrapper writes the size of the payload it is about to
++hand over into its argument block as a literal, so a struct size can be read off
++the disassembly:
++
++```
++$ arm-linux-*-objdump -d --disassemble=MI_SYS_GetVersion libmi_sys.so
++  movs r3, #128        @ payload size
++  str  r3, [sp, #4]    @ into the size slot of the ioctl block
++```
++
++Better still, the per-module kernel objects are **unstripped**. `mi_vif.ko`
++exports 2574 symbols, and `MI_VIF_CHECK_*` validates fields one at a time — so
++its loads give offsets, the load instruction gives each field's width, and the
++immediate it compares against gives the valid range.
++
++Every struct these headers declare has now been through that. One of them, the SCL
++channel parameter, has no vendored *type* behind it: divinus reaches that entry
++point but passes a bare `int *`, so the struct wrapping that word is this
++repository's own, and the binaries are what say the word is a rotation.
++
++`infinity6c/DERIVED.md` records what has been through that, what it cost, and the
++ways the method misleads. Two worth knowing before trusting a number. The size
++slot describes the *marshalled block* rather than the struct, so the device and
++channel ids a call prepends have to be subtracted — `MI_VIF_SetDevAttr` reports 24
++and copies 20, and the module's own ioctl thunks show where that boundary falls
++rather than leaving the ids to be counted. And the slot is not at a fixed offset in
++the frame: it is at `[sp, #4]` for SYS, VIF, SNR and SCL but `[sp, #28]` for
++`MI_VENC_CreateChn`, so a script that pattern-matches the offset reports whatever
++else lives there. Read the size out of the ioctl command word's `_IOC` field
++instead, which needs no assumption about the frame.
++
++Not everything is marshalled, and those are not out of reach either. `MI_VENC`
++hands back an array of packets the caller owns, so nothing crosses the ioctl
++boundary — but the library indexes that array, and a stride is a size. The same
++trick fixes the packet-info entries nested inside it.
++
++Several layouts have had their field *order* checked and not merely their size, and
++they make the case for checking rather than trusting either source. The VIF group
++attribute's size and four field bounds came out of the binaries, divinus supplied
++the order, and divinus's ordering reproduced bounds it had no access to — where an
++earlier guess from the bounds alone had two of those fields the wrong way round.
++The VENC structs went further, because unions make order testable. The driver
++rewrites just the fields a running channel may change before re-comparing a
++channel attribute, and the offsets it rewrites land on the right fields in *both*
++arms — including the MJPG arm, where the absence of a profile field shifts width
++and height four bytes earlier. The stream-info union does the same from the other
++side: one reference-type value is written at two different offsets depending on
++codec, and the gap between them is exactly how much longer the H264 arm is. Sizes
++cannot show any of that, since permuting same-width members preserves a total.
++
++## The assertions are 32-bit facts
++
++Compile these headers with the cross compiler, including when all you want is to
++check them. The `_Static_assert`s pin the ABI of a 32-bit ARM target, so any struct
++containing a pointer or a `long` measures differently on an LP64 host: four of the
++nine `infinity6e` headers do not compile for x86-64, and neither does
++`infinity6c/i6c_venc.h`, whose channel attribute measures 80 there against 76 on
++the target.
++
++That last one is worth singling out, because a host `sizeof` once produced a
++four-byte disagreement with the libraries that did not exist, and nothing about
++the symptom suggests a cross-compilation question. It is the one trap in this
++repository that lives in the measuring rather than in the artifact being measured.
++
++## Layout, and why there is no SDK version in the path
++
++ingenic-headers keys on `<PLATFORM>/<VERSION>/<LANG>` because it archives real
++vendor drops and one checkout must serve several platforms at once, each wanting
++a different SDK. Neither applies here: these are reconstructions rather than
++drops, and a consumer pins this repository by commit, which is the version axis.
++
++That is not to say SDK skew does not exist. It does, and it bites — between the
++2021-09-02 and 2022-06-01 Alkaid releases `MI_VPE_SensorChannel_e` turned from a
++sequential enum into a bitmask, moving `SENSOR2` from 3 to 4 and `SENSOR3` from
++4 to 8. Everything else added between those releases was appended before the
++`_MAX`, so a header captured against the older drop is otherwise usable against
++the newer libraries, but not the reverse. If one family ever needs two
++incompatible generations side by side, that is the point to add a version
++segment under the family directory.
++
++## Fixes
++
++Headers here have been corrected where the reconstruction was wrong. The commit
++history is the record; each fix names the vendor struct it was checked against.
++
++## Contributing
++
++Corrections welcome, particularly for other Infinity families. Please say what a
++change was verified against — a vendor header, a disassembly, or hardware — since
++a plausible-looking layout is the failure mode this repository exists to avoid.
++
++## Disclaimer
++
++These declarations describe the interface of proprietary libraries so that
++independent software can call them. They contain no vendor code. Be mindful of
++any licensing restrictions that apply to the libraries themselves.
+diff --git a/sigmastar-headers/VENDORED.md b/sigmastar-headers/VENDORED.md
+new file mode 100644
+index 0000000..6f16647
+--- /dev/null
++++ b/sigmastar-headers/VENDORED.md
+@@ -0,0 +1,11 @@
++# Vendored: johnchia/sigmastar-headers @ 6fb6eec01b7f
++
++Copied verbatim from https://github.com/johnchia/sigmastar-headers at
++`6fb6eec01b7f773fc25496c5c33dfe41b324fc25` -- the commit johnchia/raptor-hal `672f8b3` pins as its
++submodule -- so this fork builds with nothing fetched. Local mirror:
++`~/src/mirrors/git/johnchia__sigmastar-headers.git`.
++
++How each family's layouts were derived is in `<family>/DERIVED.md`: Infinity6C
++mostly from disassembly of the shipped MI libraries (`i6c_aud.h` from vendor
++headers), cross-checked against OpenIPC Divinus; Infinity6E based on Divinus.
++Refresh by re-copying from a newer commit; do not edit in place.
+diff --git a/sigmastar-headers/infinity6c/DERIVED.md b/sigmastar-headers/infinity6c/DERIVED.md
+new file mode 100644
+index 0000000..626b296
+--- /dev/null
++++ b/sigmastar-headers/infinity6c/DERIVED.md
+@@ -0,0 +1,702 @@
++# infinity6c — what has been derived, and how
++
++Working notes for the family. Almost everything here came out of the prebuilt MI
++libraries and kernel objects the target ships, with no vendor source involved.
++Kept because each number cost a disassembly and the next pass should not repeat
++it.
++
++The exception is `i6c_aud.h`, which is transcribed from vendor headers that turned
++out to be available, and then checked against the shipped library by the methods
++below rather than taken on trust. Its section says so and shows the check. Where a
++vendor header and a shipped blob disagree, the blob wins — that has already cost
++this project an audio regression once.
++
++## The libraries are forthcoming about sizes
++
++MI marshals across an ioctl. Each userspace wrapper builds a small block on the
++stack, writes the payload size into it as a literal, and hands it to `ioctl`:
++
++```
++$ arm-linux-*-objdump -d --disassemble=MI_SYS_GetVersion libmi_sys.so
++  strh.w r0, [sp]        @ SoC id, stored as a halfword -> the parameter is 16-bit
++  movs   r3, #128        @ payload size
++  str    r3, [sp, #4]    @ into the size slot
++  strd   r2, r3, [sp, #8]@ caller's pointer, sign-extended to 64 bits
++```
++
++So a size can be read off the disassembly. Two things stop that being the whole
++answer.
++
++**The size slot describes the marshalled block, not the struct.** Most calls
++prepend their device, channel and port ids to the payload, so the struct is the
++remainder. Read the copy that follows — `ldmia`/`stmia` pairs, or a `memcpy`
++with a literal length — and subtract.
++
++**Read the ioctl command, not the stack frame.** The command word encodes the
++payload size in its `_IOC` size field — bits 16..29 — so the size falls out of the
++`movt` that builds it, with no frame to interpret:
++
++```
++MI_VENC_SetChnAttr:  movt r1, #0x4054   ->  0x4054 & 0x3fff = 84 bytes
++MI_VIF_SetDevAttr:   movt r1, #0x4018   ->  0x4018 & 0x3fff = 24 bytes
++```
++
++This is the method to use. It agrees with every size in the table below, it needs
++no assumption about where a function keeps its size slot, and it is what makes the
++next trap harmless.
++
++**The size slot is not always at `[sp, #4]`.** That offset holds for SYS, VIF,
++SNR and SCL, but VENC builds a larger frame and puts it at `[sp, #28]`. A script
++that assumes the offset reports whatever happens to live there — this is where
++the "295" in an earlier revision of these notes came from. It was never a size.
++Read the frame rather than pattern-matching it.
++
++## Sizes established this way
++
++| struct | payload | id words | struct |
++| --- | --- | --- | --- |
++| `MI_SYS_Version_t` | 128 | 0 | **128** |
++| `MI_VIF_GroupAttr_t` | 32 | 4 (group) | **28** |
++| `MI_VIF_DevAttr_t` | 24 | 4 (dev) | **20** |
++| `MI_SNR_PlaneInfo_t` | 80 | 8 (pad, plane) | **72** |
++| `MI_SCL_OutputPortParam_t` | 36 | 12 (dev, chn, port) | **24** |
++| `MI_VENC_ChnAttr_t` | 84 | 8 (dev, chn) | **76** |
++| `MI_VENC_InitParam_t` | 12 | 4 (dev) | **8** |
++| `MI_VENC_ParamJpeg_t` | 144 | 8 (dev, chn) | **136** |
++| `MI_VENC_ChnStat_t` | 48 | 8 (dev, chn) | **40** |
++| `MI_VENC_Stream_t` | 84 | 8 (dev, chn) + 4 (timeout) | **72** |
++| `MI_VIF_OutputPortAttr_t` | 32 | 8 (dev, port) | **24** |
++| `MI_SCL_ChnParam_t` | 12 | 8 (dev, chn) | **4** |
++| `MI_ISP_ChannelAttr_t` | 88 | 8 (dev, chn) | **80** |
++| `MI_ISP_ChnParam_t` | 28 | 8 (dev, chn) | **20** |
++| `MI_ISP_OutputPortParam_t` | 32 | 12 (dev, chn, port) | **20** |
++
++All twelve have been checked against divinus's vendored layouts, compiled for the
++32-bit ARM target, and **all twelve agree** — `i6c_sys_ver` 128, `i6c_vif_grp` 28,
++`i6c_vif_dev` 20, `i6c_vif_port` 24, `i6c_snr_plane` 72, `i6c_scl_port` 24,
++`i6c_venc_chn` 76, `i6c_venc_init` 8, `i6c_venc_jpg` 136, `i6c_venc_stat` 40,
++`i6c_venc_strm` 72, `i6c_scl_chn` 4. The last of those agrees in a form worth
++spelling out, since an earlier revision here recorded it as having no counterpart
++at all: divinus passes a bare `int *` rather than a struct, so it corroborates the
++one-word payload without naming a type. Two more that no payload reaches,
++`i6c_venc_pack` 184 and `i6c_venc_packinfo` 16, come from array strides instead,
++below. The three ISP layouts are in their own section further down. The assertions
++live in the headers themselves, so the check runs on every build rather than once.
++
++**The id-word column used to be an argument count, and is now a reading.** Every
++module's ioctl thunk splits the payload before calling the `IMPL` body, so the
++boundary is in the instructions rather than in an assumption about the signature.
++That retired two guesses: `MI_VIF_IOCTL_SetDevAttr` takes **one** id
++(`ldr.w r7, [r4], #4`), which is what makes `MI_VIF_DevAttr_t` 20 rather than 16,
++and `MI_SCL_IOCTL_SetOutputPortParam` takes **three** (`ldr [r4]`,
++`ldrd [r4, #4]`, struct at `+12`), which is what makes `MI_SCL_OutputPortParam_t`
++24 rather than 28. Both assertions predated the check and both survive it.
++
++Worth being exact about what that proves. A matching size says the field *set* is
++right and nothing is missing or spurious; it does not say the fields are in the
++right order, since permuting same-width members preserves the total. Most have had
++their order or their field widths checked as well, each from whatever in the
++modules reads them: `i6c_vif_grp` from `MI_VIF_CHECK_GroupAttr`'s bounds,
++`i6c_vif_dev` and `i6c_vif_port` from the validators and `MI_VIF_IMPL_SetDevAttr`,
++`i6c_venc_chn` from the fields `MI_VENC_IMPL_SetChnAttr` excludes from its
++comparison, and `i6c_venc_strm`, `i6c_venc_pack`, `i6c_venc_packinfo`,
++`i6c_venc_jpg` and `i6c_venc_stat` from the code that fills them. That leaves
++`i6c_sys_ver` (a byte array, so nothing to order), `i6c_snr_plane` and
++`i6c_scl_port` on size alone.
++
++Absent from the table because it is not one struct: `MI_SYS_BindChnPort2` reports
++56, which is two channel ports plus the source and destination rates.
++
++`MI_SCL_ChnParam_t` was recorded here as having "no matching size slot, so it is
++shaped differently". It is not shaped differently — it is four bytes, and a
++one-word struct is small enough that the number looked like something else.
++
++## VENC, and the one trap that is in the measuring rather than the binary
++
++`MI_VENC_CreateChn` marshals **84** bytes and `memcpy`s **76** of them; the
++difference is the device and channel ids it prepends. So `MI_VENC_ChnAttr_t` is
++**76 bytes**.
++
++    3a3c:  movs r2, #76      @ memcpy length -- the struct
++    3a44:  blx  memcpy
++    3a4a:  movs r1, #84      @ payload size ...
++    3a52:  str  r1, [sp, #28] @ ... into VENC's size slot
++
++Confirmed twice over: `MI_VENC_SetChnAttr` marshals the same 84 and copies the
++same 76 from a different frame layout, and both calls' `_IOC` size fields read
++0x4054, i.e. 84.
++
++**Measure the target ABI with the cross compiler.** divinus's `i6c_venc_chn`
++measures 80 on an x86-64 host and 76 on the 32-bit ARM target, because
++`i6c_venc_rate` ends in a `void *`: eight bytes on LP64, and the trailing padding
++that pointer's alignment adds. A host `sizeof` therefore reported a four-byte
++disagreement with the binaries that does not exist. This is the only trap here
++that lives in the method rather than in the artifact, and it is the easiest one to
++repeat, since nothing about it looks like a cross-compilation question. Four of
++the nine `infinity6e` headers already fail to compile for a 64-bit host for the
++same reason — their assertions are 32-bit facts.
++
++### The driver confirms both halves and the boundary between them
++
++`MI_VENC_IMPL_SetChnAttr` in `mi_venc.ko` compares the incoming attribute against
++the channel context's copy in two pieces, which pins each half's size and where
++the split falls:
++
++    1205a:  mov   ip, r8          @ r8 = the caller's ChnAttr
++    1206a:  movs  r2, #40         @ ... 40 bytes copied from offset 0 ...
++    12074:  add.w r5, r4, #252    @ ... compared against context + 252
++    1207c:  bl    memcmp
++
++    1215a:  add.w ip, r8, #40     @ second piece starts at offset 40
++    1216c:  add.w r1, r4, #292    @ ... against context + 292, i.e. 252 + 40
++    12176:  movs  r2, #36         @ ... and runs 36 bytes
++    1217a:  bl    memcmp
++
++40 then 36 is 76, and the context's two mirrors sit 40 apart, so the halves are
++adjacent and neither has slack. `_MI_VENC_IMPL_ConfigRcAttr` agrees from the other
++direction: handed the whole attribute, it reads the codec from offset 0 and then
++does `adds r5, #40` to reach the rate half before passing it to
++`_MI_VENC_IMPL_ConvertRc` (0xea60). Its `subs r2, r3, #2` / `cmp r2, #2` bounds
++that codec to 2..4, which is divinus's `i6c_venc_codec` exactly — H264 2, H265 3,
++MJPG 4.
++
++### The excluded fields give the interior offsets
++
++When the first comparison differs, the driver does not reject the change outright.
++It overwrites a few fields in its copy of the incoming attribute with the
++channel's current values and compares again, and only fails if something *else*
++moved. Those fields are the ones a running channel is allowed to change, and the
++offsets it writes are readable:
++
++| codec | offsets rewritten | divinus's fields at those offsets |
++| --- | --- | --- |
++| H264, H265 (0x120d4) | 16, 24, 28 | `profile`, `width`, `height` |
++| MJPG (0x12116) | 20, 24 | `width`, `height` |
++
++Both arms reproduce, and the MJPG arm is the stronger half of the result: it has
++no `profile` field, so its `width` and `height` sit four bytes earlier than
++H26x's, and the driver's offsets shift by exactly that. Size alone could not have
++shown this — permuting same-width members preserves a total, and these two arms
++have different shapes.
++
++Two consequences for a consumer. `MI_VENC_SetChnAttr` will refuse any change to
++the codec half outside resolution and profile, so a codec, buffer size or
++reference-frame change means destroying the channel and creating it again. And the
++rate half gets no such exemptions: any difference over its 36 bytes sets the
++rate-dirty flag at context offset 534 and provokes a rate reconfiguration. Since
++the test is a plain `memcmp`, the unused tail of the smaller union arms counts —
++clear an `i6c_venc_rate` before filling it, or a stale byte outside the arm in use
++reconfigures the encoder for no reason.
++
++`MI_VENC_SetRcParam` is not the way to isolate the rate half, incidentally: its
++payload is 64, so the struct it carries is 56, and that is `MI_VENC_RcParam_t` —
++a separate and larger thing than the rate attributes embedded in `ChnAttr`. No
++wrapper marshals either half of `ChnAttr` on its own.
++
++Two dead ends worth not repeating. `mi_vcodec.ko` is the driver and MHAL layer and
++contains zero `MI_VENC_*` symbols; the MI layer is `mi_venc.ko`, unstripped, 1816
++symbols. And `MI_VENC_CHECK_ChnAttr` does not exist — VENC does not follow VIF's
++`CHECK_`/`DEBUG_` naming, so that technique does not transfer. It has
++`MI_VENC_IOCTL_*` thunks over `MI_VENC_IMPL_*` bodies instead, and the comparison
++above is what stands in for a validator.
++
++### The ioctl thunks hand over the id-word count
++
++The subtraction in the table above stops being an argument count once the module
++object is open. Every `MI_VENC_IOCTL_*` thunk splits the marshalled payload itself
++before calling the `IMPL` body, so the boundary is in the instructions:
++
++    MI_VENC_IOCTL_InitDev:    ldr.w r7, [r4], #4   @ one id, struct at payload+4
++    MI_VENC_IOCTL_GetStream:  ldrd  r7, r8, [r1]   @ two ids ...
++                              add.w r2, r4, #8     @ ... struct at payload+8
++                              ldr.w r9, [r1, #80]  @ 4th argument past the struct
++
++`GetChnAttr`, `SetChnAttr` and `Query` take the same two-id shape. `GetStream` is
++the useful one: its `_IOC` size is 84 and it reads its timeout from offset 80, so
++`MI_VENC_Stream_t` is bracketed between 8 and 80 without any appeal to how many
++ids a call "should" have. `MI_VENC_ReleaseStream` marshals 80 — the same struct
++with no timeout — which is the difference showing up as a size.
++
++### Strides, where nothing is marshalled
++
++`MI_VENC_Pack_t` never crosses the boundary: the stream struct points at an array
++the caller owns, and the library fills it in place. Its size is therefore the
++stride the library steps that array by, which is stated outright:
++
++    2a96:  mov.w ip, #184        @ the stride
++    2aba:  mul.w r1, ip, fp      @ ... times the pack index
++    2ace:  add.w ip, r3, r0      @ ... off strm.packet
++
++**184**, and `i6c_venc_pack` measures 184. Its declared members reach 180, and the
++remaining four bytes are alignment rather than an omission — the two `u64` members
++align the struct to 8. The offsets come from the same loop, which writes `addr` and
++`data` as one `strd` at 0, `timestamp` as an 8-byte `vstr` at 16, `endFrame` as the
++prefix's only byte store at 24, `offset` and `packNum` at 32, `frameQual` at 40,
++and `picOrder` with `gradient` as a `strd` at 44.
++
++`MI_VENC_PackInfo_t`'s size is a stride too, from the H264 NAL scanner:
++
++    2d12:  lsls r0, r4, #4        @ index * 16
++    2d16:  add  r0, r2            @ ... off the pack base
++    2d1a:  strd r3, r1, [r0, #52] @ packType and offset, so the array starts at 52
++    2d28:  cmp  r5, #7            @ ... and holds 8
++
++`length` is back-filled one entry behind, as this entry's offset less the previous
++one's (`ldr r3, [r0, #40]` against `str r3, [r4, #44]`), which places it at 8 and
++leaves `sliceId` the remaining word at 12.
++
++### Confirmed a field at a time
++
++`MI_VENC_ChnStat_t` needs no size argument at all: `MI_VENC_IMPL_Query`'s debug
++path reads the struct in one descending sweep — offsets 36, 32, 28, 24, 20, 16, 12,
++8, 4, 0 and nothing above 36 — so it is exactly ten words, which is both the 40 the
++payload implies and divinus's field count.
++
++`MI_VENC_ParamJpeg_t`'s two 64-byte tables place themselves:
++
++    274a:  add.w r1, r5, #68      @ the second table
++    274e:  ldr.w r2, [r3], #4     @ quality, advancing to 4 ...
++    2756:  ldrb.w r0, [r3], #1    @ ... where the first table is read as bytes
++
++Quality at 0, `qtLuma` from 4, `qtChroma` from 68 — so `qtLuma` is 64 long — and
++with the total at 136 the trailing word at 132 is `mcuPerEcs`.
++
++The three stream-info union arms each confirm at one interior offset, and the
++offsets carry more weight than a size would. `MI_VENC_GetStream` extracts the same
++3-bit reference type and writes it to `strm+60` on the H264 path and `strm+52` on
++the H265 path; with the union at `strm+16` those are offsets 44 and 36, which is
++`refType` in each arm, and they differ by exactly the eight bytes the H264 arm is
++longer. MJPG's frame quality goes to `strm+24`, its arm's offset 8. Only the H264
++arm's *size* is pinned, since as the largest it is the union's own size — a shorter
++arm's size is unobservable, so 48 and 12 stay bounded rather than fixed.
++
++Still unchecked in `i6c_venc.h`: every enumeration except `i6c_venc_codec`, whose
++2..4 `ConfigRcAttr` bounds explicitly with `subs r2, r3, #2` / `cmp r2, #2`.
++
++## MI_AI, the one family member that is a transcription
++
++Audio input is the exception to everything above: the vendor's `mi_ai.h`,
++`mi_ai_datatype.h` and `mi_aio_datatype.h` are available, and all three ssc377
++drops (0602, 0712, 0907) ship them **byte-identical** at AI version 3.53. So
++`i6c_aud.h` is transcribed rather than reconstructed.
++
++It was checked against the shipped `libmi_ai.so` anyway, because a vendor header
++that disagrees with the blob it describes has already cost this project an audio
++regression. Both layouts agree, and both are pinned twice over.
++
++| struct | payload | id words | struct |
++| --- | --- | --- | --- |
++| `MI_AI_Attr_t` | 24 | 4 (dev halfword + pad) | **20** |
++| `MI_AI_Data_t` | — | — | **80** |
++
++`MI_AI_Open` gives the first one three ways at once:
++
++```
++1d8c:  lsrs   r7, r0, #16     @ SoC id: the high halfword of AiDevId
++1d90:  uxtb   r6, r0          @ device: its low byte
++1da4:  strh.w r6, [sp, #16]   @ payload+0, as a halfword
++1da8:  strh.w ip, [sp, #18]   @ payload+2, a zero halfword
++1d9c:  ldmia  r4!, {r0,r1,r2,r3}  @ 16 bytes of the caller's struct ...
++1db0:  ldr    r4, [r4, #0]        @ ... and a fifth word
++1db8:  movs   r1, #24         @ payload size
++1dce:  movt   r1, #0x4018     @ _IOC size field: 0x18 = 24
++```
++
++24 less the 4 id bytes is 20, and the five whole words the wrapper reads are the
++five members. Note the fifth: `bInterleaved` is `MI_BOOL`, i.e. one byte, and the
++library marshals it as a word — so the three padding bytes after it cross the
++ioctl boundary. **Clear the struct before filling it**, the same rule the ISP
++section ends on.
++
++`MI_AI_Data_t` never crosses the boundary at all. `MI_AI_Read`'s two ioctls carry
++4- and 12-byte payloads, and the library fills the caller's descriptor in
++userspace from a mapped buffer — the `MI_VENC_Pack_t` exception. That makes its
++interior readable rather than opaque, and it gives up a size and two offsets:
++
++```
++2ae2:  ldr  r3, [sp, #16]         @ the caller's pstData
++2aee:  movs r2, #80               @ ... memset 80 bytes of it
++2b04:  vstr d16, [r7, #64]        @ u64Pts  at +64
++2b08:  strd r0, r1, [r7, #72]     @ u64Seq  at +72
++```
++
++`void *apvBuffer[8]` then `MI_U32 u32Byte[8]` fills 0..63, which puts the two
++64-bit members exactly where the stores land. The second call site at 0x2bd8 does
++the same for the echo-reference descriptor, so both outputs share the layout.
++
++### What the exports say about the module
++
++Only 22 functions, and **four of them are `movs r0, #0; bx lr`** — stubs that
++report success and do nothing:
++
++    MI_AI_OpenWithCfgFile   MI_AI_DupChnGroup   MI_AI_SetIfMute   MI_AI_GetIfMute
++
++Worth more than a footnote, because a stub that returns `MI_SUCCESS` is worse than
++a missing symbol: `dlsym` finds it and the caller cannot tell. `i6c_aud_load.h`
++therefore binds neither mute-by-interface entry, and `hal_audio.c` mutes through
++`MI_AI_SetMute` (the DPGA's, which is real).
++
++Nothing in the export table matches `vqe`, `aenc`, `aed`, `iaa` or `src`. The
++sound-quality algorithms, the audio encoder and the resampler are not absent
++packs behind present entry points, as they are on MI 2.x — they are not in the
++module.
++
++## The SoC id is usually not a parameter
++
++Only MI_SYS and MI_RGN take it as a distinct leading argument. VIF, SNR and SCL
++**pack it into the high halfword of the device or pad argument** — the wrappers
++all do
++
++```
++  str    r6, [sp, #16]   @ full argument becomes the payload's first word
++  lsrs   r6, r6, #16     @ its high half ...
++  strh.w r6, [sp]        @ ... becomes the SoC id in the ioctl header
++```
++
++which is why a HAL written for a single-die part never appears to pass one, and
++why that works: the id is 0, so the packed argument is just the device index.
++`MI_VIF_CreateDevGroup` does not even read it from the argument — it stores a
++literal 0.
++
++## Where this method stops
++
++Field order and offsets are mostly **not** derivable from these libraries. Setters
++and getters copy the caller's struct wholesale — `ldmia`/`stmia` or `memcpy` — and
++never touch a field, because the decoding happens on the other side of the ioctl.
++For those the sizes are real and the interiors are opaque.
++
++The exception is worth knowing, because it is where the richest offsets in this
++document came from: a call that hands back an array the *caller* owns cannot
++delegate, since the array never crosses the boundary. `MI_VENC_GetStream` fills the
++pack array itself, field by field, and so gives up its stride and its whole
++interior in userspace. If a struct's offsets seem unreachable, check whether some
++call has to touch it on this side.
++
++The decoders are the per-module kernel objects, and they are not in
++sigmastar-lib, which ships userspace libraries only. They are in
++`johnchia/sigmastar-sdk` under
++
++    infinity6c/kmod-5.10.61-0907-uclibc-9.1.0/mi_{sys,vif,scl,sensor,vcodec}.ko
++
++matching this drop by the `0907` in the directory name. Use the uclibc set to
++match what the target runs, though kernel objects should not differ.
++
++## Those modules are unstripped, which is the real lever
++
++`mi_vif.ko` alone exports 2574 symbols, and they are named in a pattern that
++does the work for you:
++
++| symbol | what it gives |
++| --- | --- |
++| `MI_VIF_CHECK_DevAttr` | validates fields individually, so its loads are the offsets |
++| `MI_VIF_DEBUG_OnDumpDevAttr` | prints the struct through `MI_SYS_Proc_Print`, so format strings pair names with offsets |
++| `MI_VIF_IMPL_*` | the real implementation behind each entry point |
++
++Validation strings corroborate the field set independently — `IntfMode %d err`,
++`HdrType %d err`, `group %d, workmode %d invaild`, `Clkedge`, `Compress`,
++`incrop` — so a derived layout can be checked against what the module complains
++about rather than against a guess.
++
++Two practical notes. `objdump --disassemble=<sym>` misjudges function bounds on
++a relocatable object and dumps a section's worth of relocations; disassemble
++`.text` and cut the range instead. And read offsets from the `CHECK_` and
++`DEBUG_` functions rather than the `IMPL_` ones, which mostly pass structures
++onward.
++
++None of this needs hardware. What it needs is a careful pass per struct, which
++is the work the sizes above only set the boundary for.
++
++## VIF, from `MI_VIF_CHECK_*` in mi_vif.ko
++
++Offsets are the struct-relative loads; widths are the load instruction
++(`ldr`/`ldrh`/`ldrb`); bounds are the immediate each is compared against. Both
++maps close against the sizes derived from userspace, which is the useful check —
++the size and the offsets come from opposite sides of the ioctl and agree.
++
++`MI_VIF_GroupAttr_t`, 28 bytes, from `MI_VIF_CHECK_GroupAttr` (0x3490):
++
++| offset | width | bound |
++| --- | --- | --- |
++| 0 | 32 | < 5 |
++| 4 | 32 | < 2 |
++| 8 | 32 | < 4 |
++| 12 | 32 | < 2 |
++| 16, 20, 24 | — | not range-checked |
++
++The three unchecked tail words are consistent with a flag and a bitmask, which
++this function would have no bound to test.
++
++`MI_VIF_DevAttr_t`, 20 bytes. Two sources rather than one: the validator bounds
++some fields, and `MI_VIF_IMPL_SetDevAttr` reads all of them, which is what settles
++the widths.
++
++| offset | width | what reads it | name |
++| --- | --- | --- | --- |
++| 0 | 32 | `MI_VIF_PLATFORM_DevPixelSupport` | pixel format |
++| 4, 6 | 16, 16 | IMPL only | crop origin |
++| 8, 10 | 16, 16 | `_MI_VIF_CHECK_RectValid(w, h)` | crop width, height |
++| 12 | 32 | `_MI_VIF_CHECK_FieldValid`, bounded ≤ 3 | field |
++| 16 | 8 | read as a byte | half horizontal scan |
++| 17..19 | — | nothing reads past 16 | padding to 20 |
++
++Every name here comes from something that reads the field rather than from
++plausibility. The earlier revision of these notes hedged on whether 4 and 6
++existed as separate fields, because the validator does not touch them;
++`MI_VIF_IMPL_SetDevAttr` does, reading four consecutive halfwords at 4, 6, 8 and
++10, so the crop is a rect and only its width and height are range-checked.
++
++Two corrections to that earlier revision. Offset 0 was recorded as merely
++"non-zero" — it is handed to `MI_VIF_PLATFORM_DevPixelSupport`, which names it. And
++offset 12's bound was recorded as `< 3`; the instruction is `cmp r3, #3` with
++`bls`, so it is **≤ 3** and the field has four values. That matters, because
++divinus annotates its `field` member as "Values 0-3 correspond to No, Top, Bottom,
++Both" — four values, which the corrected bound matches and the wrong one
++contradicted. The module confirms the last of them in as many words, complaining
++that "Field is both, not support port1 out".
++
++`MI_VIF_OutputPortAttr_t`, 24 bytes, from `MI_VIF_CHECK_PortAttr` (0x3ca0): six
++halfwords at 0, 2, 4, 6, 8 and 10, then three words at 12, 16 and 20. That is an
++8-byte rect, a 4-byte dimension and three enums, and it sums to the 24 the payload
++gives — the two derivations meet from opposite sides of the ioctl. The validator
++names two of the three words by what it passes them to,
++`MI_VIF_PLATFORM_OutputPortPixelSupport` and `MI_VIF_PLATFORM_SupportCompress`,
++and its complaints distinguish the rect from the dimension: "check CapRect w/h
++%dx%d invalid" against "PortId %u, check dest rect invalid".
++
++
++### Naming, as far as the strings take it
++
++`.rodata.str1.1` holds the validator's complaints in source order, and the group
++block is contiguous:
++
++```
++intface %d not support
++group %d, IntfMode %d invaild
++eHDRType %d not support
++group %d, hdr %d invaild
++group %d, workmode %d invaild
++group %d, ClkEdge %d invaild
++```
++
++So `GroupAttr` carries an interface mode, an HDR type, a work mode and a clock
++edge, and the four bounds-checked words are those four. **Only the first is
++placed.** Offset 0 is the interface mode: it is checked first and its bound of 5
++is the only one that fits an interface enum.
++
++The other three are open, and the uncertainty is wider than a first look
++suggests:
++
++| offset | bound | field |
++| --- | --- | --- |
++| 0 | < 5 | interface mode |
++| 4 | < 2 | one of: HDR type, work mode, clock edge |
++| 8 | < 4 | one of the same three |
++| 12 | < 2 | one of the same three |
++
++### Resolved, by three lines that agree
++
++The bounds alone were misleading. A multiplex work mode *looks* like the field
++with more values, which put it at offset 8 — and that was wrong. Two other lines
++say otherwise and agree with each other:
++
++- The validator checks in the order 0, 8, 4, 12, while its complaints sit in the
++  string table as IntfMode, hdr, workmode, ClkEdge. Corresponding those one to
++  one puts hdr at 8 and the work mode at 4.
++- divinus's `i6c_vif_grp` — a reconstruction, so a hypothesis rather than
++  evidence — reads `intf, work, hdr, edge, clock, interlaceOn, grpStitch`, which
++  is **28 bytes**, the size derived independently from the userspace wrapper, and
++  which puts work at 4 and hdr at 8.
++
++So:
++
++| offset | width | bound | field |
++| --- | --- | --- | --- |
++| 0 | 32 | < 5 | interface mode |
++| 4 | 32 | < 2 | work mode |
++| 8 | 32 | < 4 | HDR type |
++| 12 | 32 | < 2 | clock edge |
++| 16 | 32 | not checked here | clock |
++| 20 | 32 | — | interlace flag |
++| 24 | 32 | — | group stitch mask |
++
++Worth being clear about what carried the weight. The offsets, widths, bounds and
++the 28 came from the binaries. divinus supplied an ordering to test, and the test
++is that its layout reproduces a size and four bounds it had no access to. It
++broke a tie rather than serving as the source — but it did inform the result, so
++the family's provenance is honestly "derived from the binaries, with a
++third-party reconstruction used to choose between orderings the binaries had
++narrowed to two."
++
++An enum bounded at 4 and one bounded at 2 are both ordinary, so nothing here was
++decidable by plausibility, and the original guess from plausibility was the wrong
++one. That is the lesson worth keeping.
++
++One trap costs an attempt if you do not know it. These are ARM **REL**
++relocations, not RELA, so the addend is stored *in place* rather than in the
++relocation entry. `objdump -r` therefore shows only
++`R_ARM_ABS32  .rodata.str1.1` with no offset, and grepping for an addend finds
++nothing. The string offset is the four-byte word sitting at the literal-pool
++address the relocation points at, so the sequence is: find the pool entry the
++`ldr rN, [pc, #...]` resolves to, read the word stored there, and use it as a
++byte offset into `.rodata.str1.1`
++(`objdump -s -j .rodata.str1.1`). Only then does a branch get a name.
++
++## SCL, from `MI_SCL_CHECK_ChnParam` in mi_scl.ko
++
++`MI_SCL_ChnParam_t` is four bytes — one word, which the validator (0x3488) accepts
++at zero and rejects above 3:
++
++    34c4:  ldr r3, [r6, #0]
++    34c6:  cmp r3, #0
++    34c8:  beq 34c0        @ zero returns immediately
++    34ca:  cmp r3, #3
++    34cc:  bls 34fa        @ 1..3 continue to the source-mask check
++
++So four values, the first meaning "off". The module calls the field `rot`: its
++second check complains "SclSrcMask 0x%x, not support rot", and elsewhere it carries
++`_HalSclSetRotationCfg` and `MI_SCL_CHECK_MirrorFlipVaild` as separate things — so
++this word is the rotation, not the mirror and flip pair that `i6c_scl_port` already
++holds.
++
++**The angles are not derived.** Nothing in the module prints 90, 180 or 270, so
++mapping 1, 2 and 3 onto them is convention, and `i6c_scl_chn` says so at the
++declaration. It is the one place in this family where a label rests on convention
++rather than on a read, and it is tolerable only because the failure is visible:
++a turned picture, not corrupted memory.
++
++divinus does reach this entry point, which an earlier revision of these notes
++denied. It binds it as `fnAdjustChannelRotation` and declares the payload not as a
++struct but as a bare `int *rotate`, which is why a search for a `i6c_scl_chn`
++equivalent found nothing. Read for what it is, it corroborates the derivation
++exactly: one word, and that word is the rotation. Wrapping it in a struct is this
++repository's choice, made so the family reads uniformly and so a later member can
++be appended without changing the call.
++
++## ISP, from `mi_isp.ko` — the most forthcoming module of the set
++
++The ISP is where this generation diverges hardest from MI 2.x: a stage with its own
++device, channel and output ports, sitting between VIF and SCL, where MI 2.x folds
++the same work into VPE as tuning calls. So none of these three layouts has an MI 2.x
++counterpart to be sanity-checked against, and all three were derived rather than
++adapted.
++
++They also turned out to be the easiest in the family, because the module names its
++own fields. Every member below is anchored to a string or a platform predicate in
++`mi_isp.ko`, not inferred from a gap.
++
++**`MI_ISP_ChannelAttr_t`, 80 bytes.** `MI_ISP_IMPL_CreateChannel` prints
++
++    Dev%d, chn%d, sensorbindid %d, sync3a %d, ispinit version %d, size %d
++
++and marshals those four struct arguments, in that order, from offsets **0, 76, 4
++and 8**. That settles more than the field names. The version block starts at 4 as a
++revision followed by a length, and `sync3a` sitting at 76 is what fixes the block's
++payload at 64 bytes — 4 + 4 + 4 + 64 lands exactly on 76, with the 80 the ioctl
++reports leaving room for nothing else. A nested array's length is normally the
++hardest thing to reach from outside; here a neighbour's offset gives it away.
++
++**`MI_ISP_ChnParam_t`, 20 bytes.** `MI_ISP_CHECK_ChnParamValid` is the pattern this
++document keeps hoping for: it bounds each field and then hands it to the platform
++predicate that names it.
++
++| offset | width | bound | predicate |
++| --- | --- | --- | --- |
++| 0 | word | ≤ 4 | `MI_ISP_PLATFORM_SupportHdr` |
++| 4 | word | ≤ 7 | `MI_ISP_PLATFORM_Support3DNR` |
++| 8 | byte | ≤ 1 | `MI_ISP_PLATFORM_SupportMirror` |
++| 9 | byte | ≤ 1 | `MI_ISP_PLATFORM_SupportFlip` |
++| 12 | word | ≤ 3 | `MI_ISP_PLATFORM_SupportRot` |
++
++Two of those bounds are independent confirmations rather than new facts. The ≤ 4 at
++offset 0 is exactly the five values `i6c_common_hdr` declares, and the ≤ 7 at offset
++4 reproduces upstream's bare comment "Accepts values from 0-7" — which divinus states
++with no derivation behind it, and which the module now backs. A final call passes
++offsets 4, 9 and 12 together into `RotFlipRelyOn3Dnr`, naming three at once, and
++offset 16 is the only member left in a 20-byte struct.
++
++**`MI_ISP_OutputPortParam_t`, 20 bytes.** `MI_ISP_IMPL_SetOutputPortParam` prints
++
++    dev %d, chn %d, port%d, croprect(%d,%d,%d,%d), pixel %d Compress %d, layout %d
++
++from four halfwords at 0, 2, 4 and 6 and words at 8, 12 and **16**.
++
++That last one is the one loose end in the family. It is read with `ldr`, a full
++word, against upstream's `char multiPlanes` — and the print is the only read of
++offset 16 anywhere in the module, so there is nothing to break the tie. It does not
++move the size: a `char` there carries three bytes of tail padding either way. The
++name is kept as upstream and the ambiguity is recorded at the declaration.
++
++The practical consequence is a rule rather than a question. **Clear these structs
++before filling them.** If the driver reads a word where a caller wrote a byte, the
++upper three bytes are whatever the stack held — and unlike a size error, that
++misbehaves intermittently. divinus `memset`s this struct before use, which is
++probably why the ambiguity never surfaced there.
++
++### Where the ISP entry points hide the SoC id
++
++Worth recording next to the layouts, because it is an arity trap of the kind this
++family specialises in. `MI_ISP_EnableOutputPort` opens with
++
++    mov.w ip, r0, lsr #16
++    strh.w ip, [sp, #16]
++
++so the SoC id is not a separate argument here as it is on MI_SYS and MI_RGN — it
++rides in the **high halfword of the device argument** and the wrapper shifts it out.
++On a single-die part both halves are zero and the distinction is invisible, which is
++exactly what makes it worth writing down.
++
++### The tuning API declares its own payload sizes
++
++`MI_ISP_IQ_*` and `MI_ISP_AE_*` are not typed ioctls like the three layouts above.
++Every one of them is the same wrapper: stack a 24-byte descriptor, fill in a payload
++length and an api id, and call `MI_ISP_GENERAL_SetIspApiData` with the caller's
++buffer. `MI_ISP_IQ_SetContrast` in full —
++
++    push    {r4, lr}
++    sub     sp, #24
++    vldr    d16, [pc, #40]      @ the pair {0x18, 0x4c}
++    str     r3, [sp, #12]       @ channel
++    movw    r2, #0x1005         @ api id
++    str     r4, [sp, #16]       @ device
++    vstr    d16, [sp]           @ descriptor length, payload length
++    str     r2, [sp, #8]
++    blx     MI_ISP_GENERAL_SetIspApiData
++
++The literal pool is the whole point. The first word is always `0x18`, the
++descriptor's own length; the second is the **payload length** — what the library
++copies into and out of the caller's buffer. So a module's size is stated outright by
++the binary that will do the copying, with no measuring involved, and the `*Call`
++variant states it a second time as the argument to its `calloc`.
++
++That makes this the one corner of the family where the header and the blob can be
++checked against each other cheaply, and for the modules `hal_isp.c` drives they
++agree:
++
++| module | api id | payload | vendor struct | manual offset |
++| --- | --- | --- | --- | --- |
++| ColorToGray | 0x1004 | 4 | 4 | — |
++| Contrast | 0x1005 | 76 | 8 + 16×4 + 4 | 72 |
++| Brightness | 0x1006 | 76 | 8 + 16×4 + 4 | 72 |
++| Saturation | 0x100a | 416 | 8 + 16×24 + 24 | 392 |
++| Defog | 0x100b | 28 | 8 + 16×1 + 1, padded | 24 |
++| AE EvComp | 0x1403 | 8 | `{ MI_S32, MI_U32 }` | — |
++| AE Flicker | 0x140e | 4 | bare enum | — |
++
++Saturation is the row worth dwelling on, because the two derivations are genuinely
++independent and land on the same number. From the headers, `SAT_LUT_X_NUM` is 5 and
++`SAT_LUT_Y_NUM` is 6, so `MI_ISP_IQ_SaturationParam_t` is 1 + 5 + 6 + 5 + 6 + 1 = 24
++bytes; with `MI_ISP_AUTO_NUM` at 16 that puts `stManual` at 8 + 384 = 392 and the
++whole struct at 416. The wrapper says 416 without being asked.
++
++**Eight of the ten modules carry Infinity6E's layout unchanged**, which is worth
++stating precisely because nothing else in this directory does. The exceptions are the
++two with large per-frequency tables: sharpness is 6264 bytes here against Infinity6E's
++1268, and 3DNR 1912 against 1776. Both are excluded from the table rather than
++extrapolated — their manual blocks are per-band arrays rather than a level, so there
++is no single offset a scalar belongs at. Infinity6C reaches 3DNR through
++`i6c_isp_para.level3DNR` instead, which the driver bounds at 7 and names itself.
++
++Defog differs in kind rather than in size. On Infinity6E it is a bare 4-byte enable
++with no auto/manual split; on maruko it is a full module carrying a strength byte, so
++it has a manual offset here where Infinity6E's table needs none. The payload is 28
++either way, which is how the difference stayed invisible until the interior mattered.
+diff --git a/sigmastar-headers/infinity6c/i6c_aud.h b/sigmastar-headers/infinity6c/i6c_aud.h
+new file mode 100644
+index 0000000..4555087
+--- /dev/null
++++ b/sigmastar-headers/infinity6c/i6c_aud.h
+@@ -0,0 +1,254 @@
++/*
++ * i6c_aud.h -- MI_AI (audio input) ABI for Infinity6C (MI 3.0)
++ *
++ * Counterpart to infinity6e/i6_aud.h, and the one header in this family that is
++ * a transcription rather than a reconstruction: the vendor's mi_ai.h,
++ * mi_ai_datatype.h and mi_aio_datatype.h are available, and all three ssc377
++ * SDK drops (0602, 0712, 0907) ship them byte-identical at AI version 3.53. So
++ * the layouts below are the vendor's own, and both were then checked against the
++ * shipped libmi_ai.so anyway -- see DERIVED.md's MI_AI section, and
++ * shipped-blob-outranks-vendor-header for why that check is not optional here.
++ *
++ * MI 3.0 AUDIO IS NOT MI 2.x AUDIO WITH A SoC ID ADDED.
++ *
++ * The whole shape of the module changed, so nothing here is a near-copy of
++ * i6_aud.h and a reader coming from that file should expect no correspondence:
++ *
++ * 1. Device attributes lost the interface. MI 2.x's MI_AI_SetPubAttr carried the
++ *    input interface, the I2S mode, the DMA ring depth and the channel count in
++ *    one struct. MI 3.0's MI_AI_Open takes the *data* shape only -- format,
++ *    sound mode, rate, period size, interleaving -- and the physical input is
++ *    chosen separately by MI_AI_AttachIf. That separation is the module's
++ *    organising idea, not a detail: a device is a DMA writer, and attaching is
++ *    what points its multiplexer at ADC or DMIC pins.
++ *
++ * 2. Channels became channel groups. A group is a set of physical channels held
++ *    together so their samples stay aligned, and how many groups a device has is
++ *    derived rather than configured:
++ *
++ *        groups = (physical channels attached - echo channels) / sound mode
++ *
++ *    One interface attaches two physical channels, so one ADC interface in MONO
++ *    is two groups and in STEREO is one. Every per-channel entry point takes a
++ *    group index, so `chn` on this generation is a group and not a track.
++ *
++ * 3. There is no device-side ring depth. MI 2.x's frmNum is gone and the
++ *    MI_SYS output-port queue is the only queue there is, which makes
++ *    MI_SYS_SetChnOutputPortDepth load-bearing rather than tuning. hal_audio.c
++ *    sets it right after the group is enabled.
++ *
++ * 4. The algorithms are gone, not merely absent. MI 2.x's libmi_ai.so exported
++ *    the VQE entry points over weak-undefined algorithm packs, so calling one
++ *    without the packs jumped to address 0. This generation's library exports
++ *    22 symbols and not one of them matches vqe, aenc, aed or src -- noise
++ *    reduction, AGC, HPF, echo cancellation and resampling are simply not in
++ *    the module. That is a cleaner contract: the ops are unimplementable rather
++ *    than dangerous, and hal_audio.c leaves them NULL for a stated reason.
++ *
++ * 5. There are two gain stages and they are separate calls. MI_AI_SetIfGain is
++ *    the interface's own analog gain (the mic preamp) and MI_AI_SetGain is the
++ *    DPGA's digital gain. MI 2.x had one reachable knob, which is why
++ *    star/hal_audio.c wires volume and gain to the same op and documents the
++ *    collision; here they are genuinely independent and both are implemented.
++ *
++ * THE SoC ID RIDES IN THE DEVICE ARGUMENT.
++ *
++ * MI_AI follows VIF, SNR, ISP and SCL rather than MI_SYS and MI_RGN: there is no
++ * separate SoC id parameter, and the wrapper takes it from the high halfword of
++ * the device index. MI_AI_Open opens with
++ *
++ *     lsrs r7, r0, #16     @ SoC id
++ *     uxtb r6, r0          @ device
++ *
++ * so the device is the low *byte* and the id the high halfword. Compose the
++ * argument with I6C_DEV_ID() as the rest of the backend does.
++ *
++ * Copyright (C) 2026 Thingino Project
++ * SPDX-License-Identifier: GPL-3.0-or-later
++ */
++
++#ifndef SIGMASTAR_I6C_AUD_H
++#define SIGMASTAR_I6C_AUD_H
++
++#include "i6c_common.h"
++
++/*
++ * Physical channels a device can carry, and therefore the length of the
++ * per-channel arrays in a frame descriptor. Eight is the vendor's
++ * MI_AI_MAX_CHN_NUM, annotated "depend on multi-channel hardware ability" --
++ * Maruko reaches it only through DMIC (6 channels) or TDM, never through the
++ * two-channel ADC path this backend uses.
++ */
++#define I6C_AUD_MAX_CHN 8
++
++/*
++ * Sample format. Only S16_LE exists: the vendor header carries ten more arms
++ * commented out, and the doc states outright that "currently, only S16_LE format
++ * (PCM Linear 16bit (Little Endian)) is supported". INVALID is -1, which is what
++ * makes this enum signed and keeps it 4 bytes wide.
++ */
++typedef enum {
++    I6C_AUD_FMT_INVALID = -1,
++    I6C_AUD_FMT_PCM_S16_LE = 0,
++    I6C_AUD_FMT_END
++} i6c_aud_fmt;
++
++/*
++ * How many physical channels one channel group holds. The value *is* the count,
++ * so this doubles as the divisor in the group-count formula above. 4CH, 6CH and
++ * 8CH are annotated "AI only" by the vendor -- capture can group more channels
++ * than playback can.
++ */
++typedef enum {
++    I6C_AUD_SND_MONO = 1,
++    I6C_AUD_SND_STEREO = 2,
++    I6C_AUD_SND_4CH = 4,
++    I6C_AUD_SND_6CH = 6,
++    I6C_AUD_SND_8CH = 8
++} i6c_aud_snd;
++
++/*
++ * Sample rates, where the enumerator value is the rate in Hz rather than an
++ * index -- so a rate from configuration can be assigned straight in, and an
++ * unsupported one is caught by comparing against this list rather than by a
++ * bounds check.
++ *
++ * Five of these are annotated "AO only" in the vendor header: 11025, 12000,
++ * 22050, 24000 and 192000 play but do not capture. They are kept here so the
++ * ordering stays checkable against the vendor header, and hal_audio.c refuses
++ * them by name.
++ */
++typedef enum {
++    I6C_AUD_RATE_8000 = 8000,
++    I6C_AUD_RATE_11025 = 11025, /* AO only */
++    I6C_AUD_RATE_12000 = 12000, /* AO only */
++    I6C_AUD_RATE_16000 = 16000,
++    I6C_AUD_RATE_22050 = 22050, /* AO only */
++    I6C_AUD_RATE_24000 = 24000, /* AO only */
++    I6C_AUD_RATE_32000 = 32000,
++    I6C_AUD_RATE_44100 = 44100, /* AO only */
++    I6C_AUD_RATE_48000 = 48000,
++    I6C_AUD_RATE_96000 = 96000,
++    I6C_AUD_RATE_192000 = 192000 /* AO only */
++} i6c_aud_rate;
++
++/*
++ * Audio input interfaces -- the peripherals a device's multiplexer can select.
++ * One enumerator is a *pair* of adjacent physical channels, which is why
++ * MI_AI_AttachIf's array is bounded by MI_AI_MAX_CHN_NUM/2 and why attaching one
++ * interface yields two physical channels.
++ *
++ * Spelled out in full because the values are positional and an attach with the
++ * wrong one silently records silence from pins nothing is wired to. The vendor
++ * header's own warning applies: "the order above is not allowed to change".
++ *
++ * What Maruko actually has (doc section 1.2.3): one DMIC interface carrying up
++ * to 6 channels, two 2-channel ADCs, two 2-slot I2S RX -- and the two I2S RX
++ * cannot be used at the same time. Everything else below exists in the enum
++ * because the enum is shared across the Muffin and Mochi families.
++ */
++typedef enum {
++    I6C_AUD_IF_NONE = 0,
++    I6C_AUD_IF_ADC_AB = 1, /* ADC A + B, channel 0 of each -- the analog mic path */
++    I6C_AUD_IF_ADC_CD = 2,
++    I6C_AUD_IF_DMIC_A_01 = 3, /* DMIC channels 0 and 1 */
++    I6C_AUD_IF_DMIC_A_23 = 4,
++    I6C_AUD_IF_I2S_A_01 = 5,
++    I6C_AUD_IF_I2S_A_23 = 6,
++    I6C_AUD_IF_I2S_A_45 = 7,
++    I6C_AUD_IF_I2S_A_67 = 8,
++    I6C_AUD_IF_I2S_A_89 = 9,
++    I6C_AUD_IF_I2S_A_AB = 10,
++    I6C_AUD_IF_I2S_A_CD = 11,
++    I6C_AUD_IF_I2S_A_EF = 12,
++    I6C_AUD_IF_I2S_B_01 = 13,
++    I6C_AUD_IF_I2S_B_23 = 14,
++    I6C_AUD_IF_I2S_B_45 = 15,
++    I6C_AUD_IF_I2S_B_67 = 16,
++    I6C_AUD_IF_I2S_B_89 = 17,
++    I6C_AUD_IF_I2S_B_AB = 18,
++    I6C_AUD_IF_I2S_B_CD = 19,
++    I6C_AUD_IF_I2S_B_EF = 20,
++    I6C_AUD_IF_I2S_C_01 = 21,
++    I6C_AUD_IF_I2S_C_23 = 22,
++    I6C_AUD_IF_I2S_C_45 = 23,
++    I6C_AUD_IF_I2S_C_67 = 24,
++    I6C_AUD_IF_I2S_C_89 = 25,
++    I6C_AUD_IF_I2S_C_AB = 26,
++    I6C_AUD_IF_I2S_C_CD = 27,
++    I6C_AUD_IF_I2S_C_EF = 28,
++    I6C_AUD_IF_I2S_D_01 = 29,
++    I6C_AUD_IF_I2S_D_23 = 30,
++    I6C_AUD_IF_I2S_D_45 = 31,
++    I6C_AUD_IF_I2S_D_67 = 32,
++    I6C_AUD_IF_I2S_D_89 = 33,
++    I6C_AUD_IF_I2S_D_AB = 34,
++    I6C_AUD_IF_I2S_D_CD = 35,
++    I6C_AUD_IF_I2S_D_EF = 36,
++    /*
++     * AEC reference: the resampled copy of what AO is playing. Must be attached
++     * *after* at least one non-echo interface, and its channels do not count
++     * toward the group total.
++     */
++    I6C_AUD_IF_ECHO_A = 37,
++    I6C_AUD_IF_HDMI_A = 38,
++    I6C_AUD_IF_DMIC_A_45 = 39,
++    I6C_AUD_IF_END
++} i6c_aud_if;
++
++/*
++ * MI_AI_Attr_t -- what MI_AI_Open takes. The data shape only; the input
++ * interface is MI_AI_AttachIf's business.
++ *
++ * `interleaved` decides how a group's channels are laid out in the buffer. On
++ * with a stereo group gives L R L R in one buffer; off gives each channel its
++ * own buffer, which is what the per-channel arrays in i6c_aud_frm are for.
++ *
++ * MI_BOOL is `unsigned char`, so `interleaved` is one byte followed by three of
++ * padding -- and MI_AI_Open reads the struct as five whole words
++ * (`ldmia {r0,r1,r2,r3}` plus one `ldr`). Those three bytes therefore cross the
++ * ioctl boundary. Clear this struct before filling it; the same trap as
++ * MI_ISP_OutputPortParam_t in DERIVED.md, and the reason that section ends in a
++ * rule rather than a question.
++ */
++typedef struct {
++    i6c_aud_fmt format;
++    i6c_aud_snd sound;
++    i6c_aud_rate rate;
++    unsigned int periodSize; /* samples per period, per physical channel */
++    unsigned char interleaved;
++} i6c_aud_cnf;
++
++_Static_assert(sizeof(i6c_aud_cnf) == 20, "MI_AI_Open marshals 24 less a halfword dev and its pad");
++_Static_assert(offsetof(i6c_aud_cnf, periodSize) == 12, "periodSize is the fourth word");
++
++/*
++ * MI_AI_Data_t -- one captured period, handed back by MI_AI_Read.
++ *
++ * Never crosses the ioctl boundary: MI_AI_Read's two commands carry 12- and
++ * 4-byte payloads, and the library fills this struct in userspace from a mapped
++ * buffer. That makes its interior observable in the shipped library rather than
++ * opaque -- the same exception DERIVED.md describes for MI_VENC_Pack_t -- so
++ * unusually for this family the size *and* two interior offsets are pinned:
++ *
++ *     memset(pstData, 0, 80)          @ the size
++ *     vstr d16, [r7, #64]             @ u64Pts
++ *     strd r0, r1, [r7, #72]          @ u64Seq
++ *
++ * With interleaved on, only addr[0] and length[0] are used.
++ *
++ * `length` is in *bytes*, not samples -- the vendor calls it u32Byte -- so a
++ * 20 ms mono period at 16 kHz is 320 samples and 640 bytes.
++ */
++typedef struct {
++    void *addr[I6C_AUD_MAX_CHN];
++    unsigned int length[I6C_AUD_MAX_CHN];
++    unsigned long long timestamp; /* microseconds */
++    unsigned long long sequence;
++} i6c_aud_frm;
++
++_Static_assert(sizeof(i6c_aud_frm) == 80, "MI_AI_Read memsets 80 bytes of the caller's struct");
++_Static_assert(offsetof(i6c_aud_frm, timestamp) == 64, "MI_AI_Read stores Pts at +64");
++_Static_assert(offsetof(i6c_aud_frm, sequence) == 72, "MI_AI_Read stores Seq at +72");
++
++#endif /* SIGMASTAR_I6C_AUD_H */
+diff --git a/sigmastar-headers/infinity6c/i6c_common.h b/sigmastar-headers/infinity6c/i6c_common.h
+new file mode 100644
+index 0000000..c2c0544
+--- /dev/null
++++ b/sigmastar-headers/infinity6c/i6c_common.h
+@@ -0,0 +1,139 @@
++/*
++ * i6c_common.h -- MI common types bindings, Infinity6C
++ *
++ * Vendored from OpenIPC divinus, src/hal/star/i6c_common.h (MIT), which is why this
++ * file carries divinus's licence. Reworked to stand alone: divinus's internal
++ * includes are dropped, an include guard replaces #pragma once, and the
++ * dlopen/dlsym function table stays with the consumer, since anything naming a
++ * logger or an error-code set belongs on that side of the boundary.
++ *
++ * These layouts describe the ABI of prebuilt vendor .so files. divinus's are
++ * exercised on this silicon, which is worth more than freshly derived ones --
++ * but it is a reconstruction from a multi-chip HAL, so treat it as a hypothesis
++ * and check it. DERIVED.md carries the sizes and field bounds read out of the
++ * shipped libraries and kernel objects for exactly that, and records which
++ * structs have been through it.
++ *
++ * Keep the i6c_* names and field order as upstream so fixes stay diffable
++ * against divinus.
++ *
++ * Copyright (c) 2024 OpenIPC
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef SIGMASTAR_I6C_COMMON_H
++#define SIGMASTAR_I6C_COMMON_H
++
++/* offsetof, for the _Static_asserts that pin struct layouts */
++#include <stddef.h>
++
++typedef enum {
++    I6C_BAYER_RG,
++    I6C_BAYER_GR,
++    I6C_BAYER_BG,
++    I6C_BAYER_GB,
++    I6C_BAYER_R0,
++    I6C_BAYER_G0,
++    I6C_BAYER_B0,
++    I6C_BAYER_G1,
++    I6C_BAYER_G2,
++    I6C_BAYER_I0,
++    I6C_BAYER_G3,
++    I6C_BAYER_I1,
++    I6C_BAYER_END
++} i6c_common_bayer;
++
++typedef enum {
++    I6C_COMPR_NONE,
++    I6C_COMPR_SEG,
++    I6C_COMPR_LINE,
++    I6C_COMPR_FRAME,
++    I6C_COMPR_8BIT,
++    I6C_COMPR_6BIT,
++    I6C_COMPR_IFC,
++    I6C_COMPR_SFBC0,
++    I6C_COMPR_SFBC1,
++    I6C_COMPR_SFBC2,
++    I6C_COMPR_END
++} i6c_common_compr;
++
++typedef enum {
++    I6C_EDGE_SINGLE_UP,
++    I6C_EDGE_SINGLE_DOWN,
++    I6C_EDGE_DOUBLE,
++    I6C_EDGE_END 
++} i6c_common_edge;
++
++typedef enum {
++    I6C_HDR_OFF,
++    I6C_HDR_VC,
++    I6C_HDR_DOL,
++    I6C_HDR_EMBED,
++    I6C_HDR_LI,
++    I6C_HDR_END
++} i6c_common_hdr;
++
++typedef enum {
++    I6C_INTF_BT656,
++    I6C_INTF_DIGITAL_CAMERA,
++    I6C_INTF_BT1120_STANDARD,
++    I6C_INTF_BT1120_INTERLEAVED,
++    I6C_INTF_MIPI,
++    I6C_INTF_LVDS,
++    I6C_INTF_END
++} i6c_common_intf;
++
++typedef enum {
++    I6C_PREC_8BPP,
++    I6C_PREC_10BPP,
++    I6C_PREC_12BPP,
++    I6C_PREC_14BPP,
++    I6C_PREC_16BPP,
++    I6C_PREC_END
++} i6c_common_prec;
++
++typedef enum {
++    I6C_PIXFMT_YUV422_YUYV,
++    I6C_PIXFMT_ARGB8888,
++    I6C_PIXFMT_ABGR8888,
++    I6C_PIXFMT_BGRA8888,
++    I6C_PIXFMT_RGB565,
++    I6C_PIXFMT_ARGB1555,
++    I6C_PIXFMT_ARGB4444,
++    I6C_PIXFMT_I2,
++    I6C_PIXFMT_I4,
++    I6C_PIXFMT_I8,
++    I6C_PIXFMT_YUV422SP,
++    I6C_PIXFMT_YUV420SP,
++    I6C_PIXFMT_YUV420SP_NV21,
++    I6C_PIXFMT_YUV420_TILE,
++    I6C_PIXFMT_YUV422_UYVY,
++    I6C_PIXFMT_YUV422_YVYU,
++    I6C_PIXFMT_YUV422_VYUY,
++    I6C_PIXFMT_YUV422P,
++    I6C_PIXFMT_YUV420P,
++    I6C_PIXFMT_YUV420_FBC,
++    I6C_PIXFMT_RGB_BAYER,
++    I6C_PIXFMT_RGB_BAYER_END = 
++        I6C_PIXFMT_RGB_BAYER + I6C_PREC_END * I6C_BAYER_END - 1,
++    I6C_PIXFMT_RGB888,
++    I6C_PIXFMT_BGR888,
++    I6C_PIXFMT_GRAY8,
++    I6C_PIXFMT_RGB101010,
++    I6C_PIXFMT_RGB888P,
++    I6C_PIXFMT_END
++} i6c_common_pixfmt;
++
++typedef struct {
++    unsigned short width;
++    unsigned short height;
++} i6c_common_dim;
++
++typedef struct {
++    unsigned short x;
++    unsigned short y;
++    unsigned short width;
++    unsigned short height;
++} i6c_common_rect;
++
++#endif /* SIGMASTAR_I6C_COMMON_H */
+diff --git a/sigmastar-headers/infinity6c/i6c_isp.h b/sigmastar-headers/infinity6c/i6c_isp.h
+new file mode 100644
+index 0000000..74cb1bb
+--- /dev/null
++++ b/sigmastar-headers/infinity6c/i6c_isp.h
+@@ -0,0 +1,431 @@
++/*
++ * i6c_isp.h -- MI_ISP bindings, Infinity6C
++ *
++ * Vendored from OpenIPC divinus, src/hal/star/i6c_isp.h (MIT), which is why this
++ * file carries divinus's licence. Reworked to stand alone: divinus's internal
++ * includes are dropped, an include guard replaces #pragma once, and the
++ * dlopen/dlsym function table stays with the consumer, since anything naming a
++ * logger or an error-code set belongs on that side of the boundary.
++ *
++ * These layouts describe the ABI of prebuilt vendor .so files. divinus's are
++ * exercised on this silicon, which is worth more than freshly derived ones --
++ * but it is a reconstruction from a multi-chip HAL, so treat it as a hypothesis
++ * and check it. DERIVED.md carries the sizes and field bounds read out of the
++ * shipped libraries and kernel objects for exactly that, and records which
++ * structs have been through it.
++ *
++ * On this generation the ISP is a pipeline stage of its own -- device, channel
++ * and output ports, sitting between VIF and SCL -- rather than the set of tuning
++ * calls folded into VPE that MI 2.x has. That is why this file has no MI 2.x
++ * counterpart to be diffed against.
++ *
++ * Keep the i6c_* names and field order as upstream so fixes stay diffable
++ * against divinus.
++ *
++ * Copyright (c) 2024 OpenIPC
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef SIGMASTAR_I6C_ISP_H
++#define SIGMASTAR_I6C_ISP_H
++
++#include "i6c_common.h"
++
++typedef struct {
++    unsigned int rev;
++    unsigned int size;
++    unsigned char data[64];
++} i6c_isp_iqver;
++
++typedef struct {
++    unsigned int sensorId;
++    i6c_isp_iqver iqVer;
++    unsigned int sync3A;
++} i6c_isp_chn;
++
++typedef struct {
++    i6c_common_hdr hdr;
++    /* Accepts values from 0-7 */
++    int level3DNR;
++    char mirror;
++    char flip;
++    /* Represents 90-degree arcs */
++    int rotate;
++    char yuv2BayerOn;
++} i6c_isp_para;
++
++typedef struct {
++    i6c_common_rect crop;
++    i6c_common_pixfmt pixFmt;
++    i6c_common_compr compress;
++    char multiPlanes;
++} i6c_isp_port;
++
++/*
++ * Sizes read off the ioctl payloads, with the id words taken from the module's
++ * own thunks rather than counted:
++ *
++ *   i6c_isp_chn   CreateChannel        88, two ids   (ldrd [r4], struct at +8)
++ *   i6c_isp_para  SetChnParam          28, two ids   (ldrd [r4], struct at +8)
++ *   i6c_isp_port  SetOutputPortParam   32, three ids (ldr [r4], ldrd [r4, #4],
++ *                                                    struct at +12)
++ *
++ * All three had their field order checked as well, which a size cannot do, and
++ * every member below is named by something in mi_isp.ko rather than inferred.
++ *
++ * i6c_isp_chn: MI_ISP_IMPL_CreateChannel prints "sensorbindid %d, sync3a %d,
++ * ispinit version %d, size %d" from offsets 0, 76, 4 and 8 in that argument
++ * order. So the sensor id leads, the version block follows at 4 as a revision
++ * then a length, and sync3A is the last word -- which is what fixes the version
++ * block's payload at 64 bytes, since 4 + 8 + 64 lands exactly on 76.
++ *
++ * i6c_isp_para: MI_ISP_CHECK_ChnParamValid bounds each field and then hands it
++ * to the platform predicate that names it. Offset 0 is a word bounded at or
++ * below 4 and goes to MI_ISP_PLATFORM_SupportHdr, which matches the five values
++ * i6c_common_hdr has; offset 4 is a word bounded at or below 7 and goes to
++ * Support3DNR, matching upstream's "values from 0-7" exactly; offsets 8 and 9
++ * are read with ldrb and bounded at or below 1, going to SupportMirror and
++ * SupportFlip; offset 12 is a word bounded at or below 3 and goes to SupportRot,
++ * which is the four quadrants. A last call passes offsets 4, 9 and 12 together
++ * to RotFlipRelyOn3Dnr, naming three of them at once.
++ *
++ * i6c_isp_port: MI_ISP_IMPL_SetOutputPortParam prints "croprect(%d,%d,%d,%d),
++ * pixel %d Compress %d, layout %d" from four halfwords at 0, 2, 4 and 6 and
++ * words at 8, 12 and 16.
++ *
++ * One caveat on that last member. The only read of offset 16 found anywhere is
++ * that print, and it is a full word (ldr) against upstream's char -- so whether
++ * the field is one byte or four is unresolved. It does not move the size either
++ * way, since a char there is followed by three bytes of tail padding, and the
++ * name is kept as upstream. It does mean a caller must clear the struct before
++ * filling it: write only the low byte and the driver may read three bytes of
++ * whatever was on the stack.
++ *
++ * See DERIVED.md.
++ */
++_Static_assert(sizeof(i6c_isp_chn) == 80, "MI_ISP_CreateChannel marshals 88 less two ids");
++_Static_assert(sizeof(i6c_isp_para) == 20, "MI_ISP_SetChnParam marshals 28 less two ids");
++_Static_assert(sizeof(i6c_isp_port) == 20, "MI_ISP_SetOutputPortParam marshals 32 less three ids");
++
++_Static_assert(sizeof(i6c_isp_iqver) == 72, "sync3A at 76 leaves exactly this much from offset 4");
++_Static_assert(offsetof(i6c_isp_chn, iqVer) == 4, "printed as the version, after the sensor id");
++_Static_assert(offsetof(i6c_isp_chn, sync3A) == 76, "the last word, printed second of the four");
++_Static_assert(offsetof(i6c_isp_iqver, size) == 4, "printed as the size, one word past the revision");
++
++_Static_assert(offsetof(i6c_isp_para, level3DNR) == 4, "the word Support3DNR bounds at 7");
++_Static_assert(offsetof(i6c_isp_para, mirror) == 8, "read with ldrb, handed to SupportMirror");
++_Static_assert(offsetof(i6c_isp_para, flip) == 9, "read with ldrb, handed to SupportFlip");
++_Static_assert(offsetof(i6c_isp_para, rotate) == 12, "the word SupportRot bounds at 3");
++_Static_assert(offsetof(i6c_isp_para, yuv2BayerOn) == 16, "the only member left, and the struct is 20");
++
++_Static_assert(offsetof(i6c_isp_port, pixFmt) == 8, "printed as the pixel format, after the crop");
++_Static_assert(offsetof(i6c_isp_port, compress) == 12, "printed as Compress");
++_Static_assert(offsetof(i6c_isp_port, multiPlanes) == 16, "printed as the layout");
++
++/*
++ * ================================================================
++ * THE TUNING API: PAYLOAD SIZES AND MANUAL-BLOCK OFFSETS
++ *
++ * MI_ISP_IQ_* and MI_ISP_AE_* are not typed ioctls the way the pipeline
++ * calls above are. Each is a thin wrapper that stacks a 24-byte descriptor
++ * of {descriptor length, payload length, api id, channel, device, 0} and
++ * hands it to MI_ISP_GENERAL_{Set,Get}IspApiData with the caller's buffer.
++ * So one function pointer shape serves every module and the only per-module
++ * facts are the two numbers below -- which is why hal_isp.c drives them from
++ * a table rather than from a struct apiece.
++ *
++ * PAYLOAD is the length in that descriptor: what the library copies, so what
++ * the staging buffer must be able to hold. Read out of each wrapper's own
++ * literal pool, where it sits as the second word of the pair loaded into
++ * d16 (the first is always 0x18, the descriptor's own length).
++ *
++ * MANUAL is offsetof(stManual) for a module whose payload is
++ * { bEnable, enOpType, stAuto[16], stManual }. Writing a level anywhere else
++ * lands in the per-ISO auto array: it does not take effect, and it corrupts
++ * one auto entry on the way past.
++ *
++ * Every number here is derived twice and the two agree. The maruko headers
++ * give the struct layout (MI_ISP_AUTO_NUM is 16; SaturationParam is 24 bytes
++ * from SAT_LUT_X_NUM 5 and SAT_LUT_Y_NUM 6; DefogParam is one byte), and
++ * the shipped blob's descriptor gives the length independently. Where the
++ * derivations could disagree they do not: 8 + 16*24 + 24 lands exactly on
++ * the 416 the wrapper declares.
++ *
++ * Eight of the ten modules hal_isp drives on Infinity6E carry the same
++ * layout here, which is worth stating because MI 3.0 shares no layout with
++ * MI 2.x anywhere else in this directory. The ones that differ are those
++ * with the large per-band tables -- sharpness is 6264 bytes against
++ * Infinity6E's 1268, 3DNR 1912 against 1776 -- so a level cannot simply be
++ * poked at Infinity6E's offset.
++ *
++ * Two of those three now have a STRENGTH offset below as well, because a
++ * per-band table does have an honest scalar in it: not one field, but one
++ * contiguous run of same-width fields that all mean strength, which a knob
++ * scales together about whatever the tuning left there. hal_isp.c calls that
++ * shape IQ_VECTOR, and STRENGTH_NUM/STRENGTH_MAX are the run's length and
++ * the vendor's per-field bound. Everything else in the module -- the
++ * thresholds, the kernels, the by-luma and by-motion curves -- stays as the
++ * tuning wrote it.
++ *
++ * 3DNR still has none. Its interior is thresholds and per-band weights with
++ * no run that means "how much", and Infinity6C reaches it through
++ * i6c_isp_para.level3DNR instead, which is one field the driver itself
++ * bounds at 7.
++ *
++ * DEFOG is the one module whose vendor struct differs from Infinity6E's in
++ * kind rather than size. There it is a bare 4-byte enable; on maruko it is
++ * a full auto/manual module carrying a strength byte, so it has a manual
++ * offset here where Infinity6E's table needs none.
++ *
++ * tests/abi_iq_i6c.c asserts all of this against the vendor headers.
++ * ================================================================
++ */
++typedef int (*i6c_isp_cmd_fn)(unsigned int device, unsigned int channel, void *payload);
++
++#define I6C_ISP_IQ_BRIGHTNESS_PAYLOAD 76
++#define I6C_ISP_IQ_BRIGHTNESS_MANUAL  72
++#define I6C_ISP_IQ_CONTRAST_PAYLOAD   76
++#define I6C_ISP_IQ_CONTRAST_MANUAL    72
++#define I6C_ISP_IQ_SATURATION_PAYLOAD 416
++#define I6C_ISP_IQ_SATURATION_MANUAL  392
++/*
++ * WDR -- raptor's DRC knob. The level is one byte inside the manual block
++ * rather than the whole of it, so it takes a third number: MANUAL is
++ * offsetof(stManual) and STRENGTH is offsetof(u8Strength) within an entry.
++ *
++ * Derived three ways here and all three agree. The schema in
++ * sensor/firmware/isp_api.xml gives a 112-byte entry with Strength at +34,
++ * so 8 + 16*112 = 1800 and the level lands at 1834. The wrapper's own
++ * literal pool declares 0x778 = 1912. And majestic, which has driven this
++ * module on this SoC for years, memsets 1912 and writes its byte at
++ * 0x72a = 1834 (/usr/bin/majestic, the store at 0x2a812).
++ */
++#define I6C_ISP_IQ_WDR_PAYLOAD        1912
++#define I6C_ISP_IQ_WDR_MANUAL         1800
++#define I6C_ISP_IQ_WDR_STRENGTH       34
++
++#define I6C_ISP_IQ_DEFOG_PAYLOAD      28
++#define I6C_ISP_IQ_DEFOG_MANUAL       24
++
++/*
++ * Colour transform. MI_ISP_IQ_{Get,Set}ColorTrans, payload 28 --
++ * MI_ISP_IQ_ColorTransType_t is bEnable followed directly by a single manual
++ * block of three u16 offsets and a 3x3 u16 matrix. It carries no enOpType and
++ * no stAuto: the module has one set of values for every gain, so nothing about
++ * it is interpolated and there is no per-gain curve for a write to displace.
++ *
++ * The matrix is the RGB-to-YUV conversion, held over 256 in YUV row order with
++ * negative coefficients in 10-bit two's complement, so the field's stated
++ * 0..1023 spans -512..511. A shipped tuning reads 77 150 29 / -43 -85 128 /
++ * 128 -107 -21, which is BT.601 at full swing to within half a count -- and is
++ * *not* what the ISP puts out while the module is disabled, which is measurably
++ * the limited-range form of the same conversion. See i6c_ct_capture.
++ *
++ * The offsets are 11-bit two's complement over the same 0..2047, and they are
++ * in a quarter-count luma domain: Y_OFST 64 raises 8-bit luma by 16. Only Y's
++ * is used. Chroma needs none, because the hardware adds the 128 pedestal after
++ * the matrix rather than through this field -- which is what makes scaling the
++ * two chroma rows a saturation control that pivots on neutral grey by itself.
++ */
++#define I6C_ISP_IQ_COLORTRANS_PAYLOAD 28
++#define I6C_ISP_IQ_COLORTRANS_MANUAL  4
++#define I6C_ISP_IQ_COLORTRANS_YOFST   4
++#define I6C_ISP_IQ_COLORTRANS_UOFST   6
++#define I6C_ISP_IQ_COLORTRANS_VOFST   8
++#define I6C_ISP_IQ_COLORTRANS_MATRIX  10
++#define I6C_ISP_IQ_COLORTRANS_MAT_NUM 9
++/*
++ * The two fields' widths, as the modulus a negative value wraps at rather than
++ * as a bit count: both are written back through an unsigned field, so this is
++ * what the arithmetic actually needs.
++ */
++#define I6C_ISP_IQ_COLORTRANS_MAT_WRAP  1024
++#define I6C_ISP_IQ_COLORTRANS_OFST_WRAP 2048
++
++/*
++ * The EX block beside it: an enable and a one-byte type selector. It is the
++ * other half of the same question, because a preset chosen here decides the
++ * conversion whatever the custom matrix says -- so a tuning that enables EX
++ * silently takes the matrix out of the path.
++ */
++#define I6C_ISP_IQ_COLORTRANSEX_PAYLOAD 8
++#define I6C_ISP_IQ_COLORTRANSEX_TYPE    4
++
++/*
++ * R2Y, the other RGB-to-YUV matrix, and the same manual-only shape. Unity is
++ * 1024 here against Colortrans' 256, the field runs 0..8191 in VYU row order,
++ * and the only offset is a flag for whether to add 16 to Y after the multiply.
++ *
++ * Recorded rather than driven. It is the finer of the two and has no offsets to
++ * pivot a contrast or brightness term on, which makes it the one to reach for
++ * when a calibration wants to change the conversion itself and the wrong one
++ * for a knob a user turns.
++ */
++#define I6C_ISP_IQ_R2Y_PAYLOAD        24
++#define I6C_ISP_IQ_R2Y_MANUAL         4
++#define I6C_ISP_IQ_R2Y_MATRIX         4
++#define I6C_ISP_IQ_R2Y_ADDY16         22
++#define I6C_ISP_IQ_R2Y_MAT_NUM        9
++
++/*
++ * Sharpness. MI_ISP_IQ_{Get,Set}Sharpness, api id 0x1012, payload 6264 --
++ * 8 + 16 * 368 + 368, from MI_ISP_IQ_SharpnessParam_t at 368 bytes.
++ *
++ * The run is u8SharpnessUD[3] immediately followed by u8SharpnessD[3], both
++ * at the front of the parameter block: the per-frequency gains for the
++ * undirectional and directional sharpeners, three bands each, every one of
++ * them 0..127. They are one six-byte run only because the vendor happens to
++ * declare them adjacent, which abi_iq_i6c.c asserts rather than assumes --
++ * a header drop that separates them would otherwise have a knob writing
++ * u8PreCorUD as if it were sharpening strength.
++ */
++#define I6C_ISP_IQ_SHARPNESS_PAYLOAD      6264
++#define I6C_ISP_IQ_SHARPNESS_MANUAL       5896
++#define I6C_ISP_IQ_SHARPNESS_STRENGTH     0
++#define I6C_ISP_IQ_SHARPNESS_STRENGTH_NUM 6
++#define I6C_ISP_IQ_SHARPNESS_STRENGTH_MAX 127
++
++/*
++ * Advanced spatial luma denoise, which is what raptor calls sinter.
++ * MI_ISP_IQ_{Get,Set}NrLumaAdv, api id 0x102d, payload 3544 --
++ * 8 + 16 * 208 + 208, from MI_ISP_IQ_NrLumaAdvParam_t at 208 bytes.
++ *
++ * The run is u16Strength[2], which the vendor header itself labels
++ * "blending (global strength)": how much of the filtered luma is mixed back
++ * over the original, per level. 0..256 and not 0..255 -- 256 is unity, a
++ * full swap for the filtered plane, so the bound is one past what a byte
++ * would hold and the field is sixteen bits for that reason.
++ *
++ * Note there is a plain MI_ISP_IQ_NrLuma module as well. It is the older,
++ * emptier one; NrLumaAdv is what the maruko tuning binaries carry.
++ */
++#define I6C_ISP_IQ_NRLUMAADV_PAYLOAD      3544
++#define I6C_ISP_IQ_NRLUMAADV_MANUAL       3336
++#define I6C_ISP_IQ_NRLUMAADV_STRENGTH     180
++#define I6C_ISP_IQ_NRLUMAADV_STRENGTH_NUM 2
++#define I6C_ISP_IQ_NRLUMAADV_STRENGTH_MAX 256
++
++#define I6C_ISP_IQ_GRAY_PAYLOAD       4
++#define I6C_ISP_AE_EVCOMP_PAYLOAD     8
++#define I6C_ISP_AE_FLICKER_PAYLOAD    4
++#define I6C_ISP_AE_EXPOLIMIT_PAYLOAD  32
++
++/*
++ * AE exposure and gain limits. MI_ISP_AE_{Get,Set}ExposureLimit, api id 0x1409,
++ * payload 32 -- and byte-for-byte the Infinity6E i6_isp_exp, which is worth
++ * stating because MI 3.0 shares no layout with MI 2.x anywhere else here.
++ *
++ * Both wrappers declare 32 and both carry that api id, read off their own
++ * literal pools by the method above --
++ *
++ *   MI_ISP_AE_SetExposureLimit:  18000000 20000000  ->  0x20 = 32
++ *   MI_ISP_AE_GetExposureLimit:  18000000 20000000
++ *
++ * cross-checked on the same library against two sizes already in the table
++ * (brightness 0x4c = 76, saturation 0x1a0 = 416).
++ *
++ * The field order is the vendor's, from MI_ISP_AE_ExpoLimitType_t in
++ * isp/mi_isp_ae_datatype.h: the two gain minima sit together ahead of the two
++ * maxima, which is not the min/max pairing the shutter and aperture fields use.
++ * tests/abi_iq_i6c.c asserts every offset against that header, because eight
++ * same-width words in the wrong order are still 32 bytes.
++ */
++typedef struct {
++    unsigned int minShutterUs;
++    unsigned int maxShutterUs;
++    unsigned int minApertX10;
++    unsigned int maxApertX10;
++    unsigned int minSensorGain;
++    unsigned int minIspGain;
++    unsigned int maxSensorGain;
++    unsigned int maxIspGain;
++} i6c_isp_exp;
++
++_Static_assert(sizeof(i6c_isp_exp) == I6C_ISP_AE_EXPOLIMIT_PAYLOAD,
++               "MI_ISP_AE_ExpoLimitType_t, and the wrapper declares 32");
++
++/*
++ * NR3D -- raptor's temper knob, and the one row whose value is written into
++ * stAuto rather than stManual.
++ *
++ * u8TfStrY is the temporal denoise strength for luma. SigmaStar's MARUKO
++ * tuning SOP section 3.3.1 gives it as "值域 0 ~ 127，值越大 denoise 强度越强"
++ * and warns that above 64 moving objects smear; sensor/firmware/isp_api.xml
++ * annotates the same field "64 is x1 gain". So it is a unity-referenced
++ * multiplier on the temporal filter, which is what makes it a temper knob and
++ * MdGain -- a motion *scale*, and the field that ramps with gain -- not one.
++ *
++ * ENTRY is sizeof(MI_ISP_IQ_Nr3dParam_t) and AUTO is offsetof(stAuto): together
++ * the stride and the base of the sixteen-entry run. 8 + 16 * 112 = 1800 puts
++ * stManual there and the payload at 1912, which are the same two numbers WDR
++ * has -- a coincidence of two 112-byte parameter blocks, not a shared layout.
++ *
++ * TFSTRY is zero because u8TfStrY is the first field of the block. Named anyway:
++ * a field that moves is exactly what tests/abi_iq_i6c.c exists to catch, and an
++ * offset that is right by accident is not checked by anything.
++ *
++ * The 1912 is measured as well as derived -- api id 4110 carries a 1912-byte
++ * block in every shipped Infinity6C tuning to hand (imx335 and gc4653).
++ */
++#define I6C_ISP_IQ_NR3D_PAYLOAD  1912
++#define I6C_ISP_IQ_NR3D_AUTO     8
++#define I6C_ISP_IQ_NR3D_ENTRY    112
++#define I6C_ISP_IQ_NR3D_TFSTRY   0
++#define I6C_ISP_IQ_NR3D_AUTO_NUM 16
++
++/* X(row, vendor type) -- payload is { bEnable, enOpType, stAuto[16], stManual }. */
++#define I6C_ISP_IQ_AUTOMAN_ROWS(X)                \
++    X(IQ_BRIGHTNESS, MI_ISP_IQ_BrightnessType_t)  \
++    X(IQ_CONTRAST,   MI_ISP_IQ_ContrastType_t)    \
++    X(IQ_SATURATION, MI_ISP_IQ_SaturationType_t)  \
++    X(IQ_DEFOG,      MI_ISP_IQ_DefogType_t)
++
++/* X(row, vendor type) -- no auto/manual split; the field written is at offset 0. */
++#define I6C_ISP_IQ_FLAT_ROWS(X)                   \
++    X(IQ_GRAY,    MI_ISP_IQ_ColorToGrayType_t)    \
++    X(AE_EVCOMP,  MI_ISP_AE_EvCompType_t)         \
++    X(AE_FLICKER, MI_ISP_AE_FlickerType_e)
++
++/*
++ * X(row, vendor type, vendor param type, first field of the strength run,
++ * field width) -- the same { bEnable, enOpType, stAuto[16], stManual } payload
++ * as the auto/manual rows, but the value is a run of STRENGTH_NUM fields
++ * starting at STRENGTH inside stManual rather than a single level.
++ */
++#define I6C_ISP_IQ_VECTOR_ROWS(X)                                                \
++    X(IQ_SHARPNESS,  MI_ISP_IQ_SharpnessType_t,  MI_ISP_IQ_SharpnessParam_t,     \
++      u8SharpnessUD, MI_U8)                                                      \
++    X(IQ_NRLUMAADV,  MI_ISP_IQ_NrLumaAdvType_t,  MI_ISP_IQ_NrLumaAdvParam_t,     \
++      u16Strength,   MI_U16)
++
++/*
++ * X(row, vendor type, vendor param type, field, field width, field offset) -- a run
++ * of one
++ * field taken across the sixteen gain-indexed stAuto entries, rather than a run
++ * of adjacent fields inside stManual.
++ *
++ * The point of the shape is what it does *not* do: enOpType stays M_AUTO, so
++ * MI keeps interpolating the entries by gain and every other field in the
++ * module keeps the curve the tuner gave it. Writing stManual instead would cost
++ * all of it -- 672 of NR3D's 1488 tuned values vary by gain on the shipped
++ * imx335 bin, and its manual entry is an unpopulated block with MdGain 0 and a
++ * TfLut whose last element breaks the vendor's own "must be 0" rule.
++ */
++#define I6C_ISP_IQ_GAINRUN_ROWS(X)                                               \
++    X(IQ_NR3D,       MI_ISP_IQ_Nr3dType_t,       MI_ISP_IQ_Nr3dParam_t,          \
++      u8TfStrY,      MI_U8,                      I6C_ISP_IQ_NR3D_TFSTRY)
++
++/*
++ * X(row, vendor type) -- bEnable followed directly by stManual, with no
++ * enOpType and no auto array between them.
++ *
++ * Worth its own list rather than folding into the auto/manual one, because the
++ * shapes differ in the thing that matters: MANUAL at 4 here is the field
++ * itself, where MANUAL at 4 on an auto/manual row would be enOpType and a
++ * write there would swap the module's mode instead of setting its value.
++ */
++#define I6C_ISP_IQ_MANUALONLY_ROWS(X)                 \
++    X(IQ_COLORTRANS, MI_ISP_IQ_ColorTransType_t)      \
++    X(IQ_R2Y,        MI_ISP_IQ_R2YType_t)
++
++#endif /* SIGMASTAR_I6C_ISP_H */
+diff --git a/sigmastar-headers/infinity6c/i6c_rgn.h b/sigmastar-headers/infinity6c/i6c_rgn.h
+new file mode 100644
+index 0000000..94c912d
+--- /dev/null
++++ b/sigmastar-headers/infinity6c/i6c_rgn.h
+@@ -0,0 +1,150 @@
++/*
++ * i6c_rgn.h -- MI_RGN (region/overlay) ABI for Infinity6C (MI 3.0)
++ *
++ * Counterpart to infinity6e/i6_rgn.h. Transcribed from the vendor
++ * mi_rgn.h/mi_rgn_datatype.h (RGN major version 3) rather than adapted from the
++ * MI 2.x header, because the display-attr struct is not the same shape and a
++ * near-copy would have been wrong in a way that composites nothing rather than
++ * failing a call.
++ *
++ * TWO DIFFERENCES FROM MI 2.x THAT MATTER.
++ *
++ * 1. Every entry point leads with a SoC id (MI_U16). MI_RGN and MI_SYS are the
++ *    two modules that take it as a distinct argument rather than folding it into
++ *    the high halfword of a device index; see infinity6c_state.h. So the loader's
++ *    function pointers all gain a leading `unsigned short soc`.
++ *
++ * 2. The attach target is the standard MI module enum, not a private RGN one.
++ *    MI 2.x's MI_RGN_AttachToChn took an id from RGN's own enum (VPE 0, VENC 2),
++ *    which is i6_rgn.h's TRAP 1. MI 3.0's MI_RGN_ChnPort_t.eModId is a plain
++ *    MI_ModuleId_e, and i6c_sys_mod is transcribed to those same values
++ *    (VENC 2, RGN 3, SCL 34...), so an i6c_sys_bind IS an MI_RGN_ChnPort_t field
++ *    for field and is reused as the attach target. hal_osd.c attaches to the
++ *    VENC channel (I6C_SYS_MOD_VENC), which is what the working i6c reference
++ *    does and what gives a main and its cascaded sub independent overlays --
++ *    attaching at the shared SCL port would give them one.
++ *
++ * 3. The OSD display attr dropped i6_rgn.h's `invert` block and expresses the
++ *    alpha choice as an enum + union rather than a bool + two overlaid arrays.
++ *    Pixel-alpha (per-pixel, what antialiased text needs) is mode 0; the bg/fg
++ *    pair lives in the union's ARGB1555 arm. See i6_rgn.h's ALPHA note in
++ *    hal_osd.c for why const-alpha is the wrong mapping of a "global alpha".
++ *
++ * The pixel-format and region-type enum orderings are unchanged from MI 2.x, so
++ * they read the same here; kept spelled out so the ordering stays checkable
++ * against the vendor header.
++ *
++ * Copyright (C) 2026 Thingino Project
++ * SPDX-License-Identifier: GPL-3.0-or-later
++ */
++
++#ifndef SIGMASTAR_I6C_RGN_H
++#define SIGMASTAR_I6C_RGN_H
++
++#include "i6c_common.h"
++#include "i6c_sys.h"
++
++/* MI_RGN_HANDLE is MI_U32; a region is addressed by a bare handle, not a
++ * device/channel pair. */
++
++typedef enum {
++    I6C_RGN_PIXFMT_ARGB1555,
++    I6C_RGN_PIXFMT_ARGB4444,
++    I6C_RGN_PIXFMT_I2,
++    I6C_RGN_PIXFMT_I4,
++    I6C_RGN_PIXFMT_I8,
++    I6C_RGN_PIXFMT_RGB565,
++    I6C_RGN_PIXFMT_ARGB8888,
++    I6C_RGN_PIXFMT_END
++} i6c_rgn_pixfmt;
++
++typedef enum {
++    I6C_RGN_TYPE_OSD,
++    I6C_RGN_TYPE_COVER,
++    I6C_RGN_TYPE_END
++} i6c_rgn_type;
++
++typedef struct {
++    unsigned int width;
++    unsigned int height;
++} i6c_rgn_size;
++
++/* MI_RGN_Attr_t = { type, { pixFmt, size } }. The nested OSD-init pair is
++ * flattened here as it was in i6_rgn.h -- the layout is identical either way. */
++typedef struct {
++    i6c_rgn_type type;
++    i6c_rgn_pixfmt pixFmt;
++    i6c_rgn_size size;
++} i6c_rgn_cnf;
++
++typedef struct {
++    i6c_rgn_pixfmt pixFmt;
++    i6c_rgn_size size;
++    void *data;
++} i6c_rgn_bmp;
++
++typedef struct {
++    unsigned int x;
++    unsigned int y;
++} i6c_rgn_pnt;
++
++/* MI_RGN_AlphaMode_e: 0 keeps the bitmap's per-pixel alpha, 1 replaces it with
++ * one constant. Text wants 0. */
++typedef enum {
++    I6C_RGN_ALPHA_PIXEL = 0,
++    I6C_RGN_ALPHA_CONST,
++} i6c_rgn_alphamode;
++
++typedef struct {
++    unsigned char bgAlpha;
++    unsigned char fgAlpha;
++} i6c_rgn_bgfg;
++
++typedef union {
++    i6c_rgn_bgfg bgFgAlpha;
++    unsigned char constAlpha;
++} i6c_rgn_alphapara;
++
++typedef struct {
++    i6c_rgn_alphamode alphaMode;
++    i6c_rgn_alphapara alphaPara;
++} i6c_rgn_osdalpha;
++
++typedef struct {
++    unsigned int layer;
++    i6c_rgn_osdalpha alpha;
++} i6c_rgn_osd;
++
++typedef struct {
++    unsigned int layer;
++    i6c_rgn_size size;
++    unsigned int color;
++} i6c_rgn_cov;
++
++typedef struct {
++    int show;
++    i6c_rgn_pnt point;
++    union {
++        i6c_rgn_cov cover;
++        i6c_rgn_osd osd;
++    };
++} i6c_rgn_chn;
++
++typedef struct {
++    unsigned char alpha;
++    unsigned char red;
++    unsigned char green;
++    unsigned char blue;
++} i6c_rgn_pale;
++
++typedef struct {
++    i6c_rgn_pale element[256];
++} i6c_rgn_pal;
++
++_Static_assert(sizeof(i6c_rgn_cnf) == 16, "i6c_rgn_cnf must be type + pixFmt + 2x u32 size");
++_Static_assert(sizeof(i6c_rgn_bmp) == 16, "i6c_rgn_bmp must be pixFmt + 2x u32 size + pointer");
++_Static_assert(sizeof(i6c_rgn_chn) == 28,
++               "i6c_rgn_chn must match MI_RGN_ChnPortParam_t: show + point + 16-byte union");
++_Static_assert(sizeof(i6c_rgn_pal) == 1024, "i6c_rgn_pal is 256 x 4-byte entries");
++
++#endif /* SIGMASTAR_I6C_RGN_H */
+diff --git a/sigmastar-headers/infinity6c/i6c_scl.h b/sigmastar-headers/infinity6c/i6c_scl.h
+new file mode 100644
+index 0000000..4910ddf
+--- /dev/null
++++ b/sigmastar-headers/infinity6c/i6c_scl.h
+@@ -0,0 +1,95 @@
++/*
++ * i6c_scl.h -- MI_SCL bindings, Infinity6C
++ *
++ * Vendored from OpenIPC divinus, src/hal/star/i6c_scl.h (MIT), which is why this
++ * file carries divinus's licence. Reworked to stand alone: divinus's internal
++ * includes are dropped, an include guard replaces #pragma once, and the
++ * dlopen/dlsym function table stays with the consumer, since anything naming a
++ * logger or an error-code set belongs on that side of the boundary.
++ *
++ * These layouts describe the ABI of prebuilt vendor .so files. divinus's are
++ * exercised on this silicon, which is worth more than freshly derived ones --
++ * but it is a reconstruction from a multi-chip HAL, so treat it as a hypothesis
++ * and check it. DERIVED.md carries the sizes and field bounds read out of the
++ * shipped libraries and kernel objects for exactly that, and records which
++ * structs have been through it.
++ *
++ * Keep the i6c_* names and field order as upstream so fixes stay diffable
++ * against divinus.
++ *
++ * Copyright (c) 2024 OpenIPC
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef SIGMASTAR_I6C_SCL_H
++#define SIGMASTAR_I6C_SCL_H
++
++#include "i6c_common.h"
++
++typedef enum {
++    I6C_SCL_BIND_INVALID,
++    I6C_SCL_BIND_ID0 = 0x1,
++    I6C_SCL_BIND_ID1 = 0x2,
++    I6C_SCL_BIND_ID2 = 0x4,
++    I6C_SCL_BIND_ID3 = 0x8,
++    I6C_SCL_BIND_ID4 = 0x10,
++    I6C_SCL_BIND_ID5 = 0x20,
++    I6C_SCL_BIND_ID6 = 0x40,
++    I6C_SCL_BIND_ID7 = 0x80,
++    I6C_SCL_BIND_ID8 = 0x100,
++    I6C_SCL_BIND_END = 0xffff,
++} i6c_scl_bind;
++
++typedef struct {
++    i6c_common_rect crop;
++    i6c_common_dim output;
++    char mirror;
++    char flip;
++    i6c_common_pixfmt pixFmt;
++    i6c_common_compr compress;
++} i6c_scl_port;
++
++/*
++ * Rotation. divinus reaches this entry point too, but declares the payload as a
++ * bare int * rather than as a struct, so there was no type to vendor -- only a
++ * corroboration that the payload is a single word, and that the word is the
++ * rotation. The struct is this repository's own, for uniformity with the rest of
++ * the family.
++ *
++ * What the binaries fix is the count and the zero case, not the angles.
++ * MI_SCL_CHECK_ChnParam accepts zero immediately and rejects anything above 3, so
++ * there are four values and the first is "no rotation"; the module calls the field
++ * rot. The order of the remaining three is the vendor's usual ascending one and is
++ * *not* derived -- getting it wrong turns a picture, which is visible and
++ * harmless, unlike a layout error.
++ */
++typedef enum {
++    I6C_SCL_ROTATE_NONE,
++    I6C_SCL_ROTATE_90,
++    I6C_SCL_ROTATE_180,
++    I6C_SCL_ROTATE_270,
++    I6C_SCL_ROTATE_END
++} i6c_scl_rotate;
++
++typedef struct {
++    i6c_scl_rotate rotate;
++} i6c_scl_chn;
++
++/*
++ * Sizes read off the ioctl payloads, with the id words taken from the module's own
++ * thunks rather than counted:
++ *
++ *   i6c_scl_port  SetOutputPortParam  36, three ids (ldr [r4], ldrd [r4, #4],
++ *                                                   struct at +12)
++ *   i6c_scl_chn   SetChnParam         12, two ids   (ldrd [r4], struct at +8)
++ *
++ * Neither struct's field order is checked. The port's four bytes of scalars
++ * between two shaped members make it the more likely of the two to be wrong, and
++ * the channel param is a single word, so there is nothing to permute.
++ *
++ * See DERIVED.md.
++ */
++_Static_assert(sizeof(i6c_scl_port) == 24, "MI_SCL_SetOutputPortParam marshals 36 less three ids");
++_Static_assert(sizeof(i6c_scl_chn) == 4, "MI_SCL_SetChnParam marshals 12 less two ids");
++
++#endif /* SIGMASTAR_I6C_SCL_H */
+diff --git a/sigmastar-headers/infinity6c/i6c_snr.h b/sigmastar-headers/infinity6c/i6c_snr.h
+new file mode 100644
+index 0000000..d382ae5
+--- /dev/null
++++ b/sigmastar-headers/infinity6c/i6c_snr.h
+@@ -0,0 +1,113 @@
++/*
++ * i6c_snr.h -- MI_SNR bindings, Infinity6C
++ *
++ * Vendored from OpenIPC divinus, src/hal/star/i6c_snr.h (MIT), which is why this
++ * file carries divinus's licence. Reworked to stand alone: divinus's internal
++ * includes are dropped, an include guard replaces #pragma once, and the
++ * dlopen/dlsym function table stays with the consumer, since anything naming a
++ * logger or an error-code set belongs on that side of the boundary.
++ *
++ * These layouts describe the ABI of prebuilt vendor .so files. divinus's are
++ * exercised on this silicon, which is worth more than freshly derived ones --
++ * but it is a reconstruction from a multi-chip HAL, so treat it as a hypothesis
++ * and check it. DERIVED.md carries the sizes and field bounds read out of the
++ * shipped libraries and kernel objects for exactly that, and records which
++ * structs have been through it.
++ *
++ * Keep the i6c_* names and field order as upstream so fixes stay diffable
++ * against divinus.
++ *
++ * Copyright (c) 2024 OpenIPC
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef SIGMASTAR_I6C_SNR_H
++#define SIGMASTAR_I6C_SNR_H
++
++#include "i6c_common.h"
++
++typedef enum {
++    I6C_SNR_HWHDR_NONE,
++    I6C_SNR_HWHDR_SONY_DOL,
++    I6C_SNR_HWHDR_DCG,
++    I6C_SNR_HWHDR_EMBED_RAW8,
++    I6C_SNR_HWHDR_EMBED_RAW10,
++    I6C_SNR_HWHDR_EMBED_RAW12,
++    I6C_SNR_HWHDR_EMBED_RAW14,
++    I6C_SNR_HWHDR_EMBED_RAW16
++} i6c_snr_hwhdr;
++
++typedef struct {
++    unsigned int laneCnt;
++    unsigned int rgbFmtOn;
++    unsigned int hsyncMode;
++    unsigned int sampDelay;
++    i6c_snr_hwhdr hwHdr;
++    unsigned int virtChn;
++    unsigned int packType[2];
++} i6c_snr_mipi;
++
++typedef struct {
++    int vsyncInv;
++    int hsyncInv;
++    int pixclkInv;
++    unsigned int vsyncDelay;
++    unsigned int hsyncDelay;
++    unsigned int pixclkDelay;
++} i6c_snr_sync;
++
++typedef struct {
++    unsigned int multplxNum;
++    i6c_snr_sync sync;
++    i6c_common_edge edge;
++    int bitswap;
++} i6c_snr_bt656;
++
++typedef struct {
++    i6c_snr_sync sync;
++} i6c_snr_par;
++
++typedef union {
++    i6c_snr_par parallel;
++    i6c_snr_mipi mipi;
++    i6c_snr_bt656 bt656;
++} i6c_snr_intfattr;
++
++typedef struct {
++    unsigned int planeCnt;
++    i6c_common_intf intf;
++    i6c_common_hdr hdr;
++    i6c_snr_intfattr intfAttr;
++    char earlyInit;
++} i6c_snr_pad;
++
++typedef struct {
++    unsigned int planeId;
++    char sensName[32];
++    i6c_common_rect capt;
++    i6c_common_bayer bayer;
++    i6c_common_prec precision;
++    int hdrSrc;
++    // Value in microseconds
++    unsigned int shutter;
++    // Value multiplied by 1024
++    unsigned int sensGain;
++    unsigned int compGain;
++    i6c_common_pixfmt pixFmt;
++} i6c_snr_plane;
++
++typedef struct {
++    i6c_common_rect crop;
++    i6c_common_dim output;
++    unsigned int maxFps;
++    unsigned int minFps;
++    char desc[32];
++} __attribute__((packed, aligned(4))) i6c_snr_res;
++
++/*
++ * MI_SNR_GetPlaneInfo marshals 80 bytes, less two 4-byte ids for the pad and the
++ * plane. Size only -- nothing has checked this one's field order. See DERIVED.md.
++ */
++_Static_assert(sizeof(i6c_snr_plane) == 72, "MI_SNR_GetPlaneInfo marshals 80 less pad and plane ids");
++
++#endif /* SIGMASTAR_I6C_SNR_H */
+diff --git a/sigmastar-headers/infinity6c/i6c_sys.h b/sigmastar-headers/infinity6c/i6c_sys.h
+new file mode 100644
+index 0000000..2ce44b8
+--- /dev/null
++++ b/sigmastar-headers/infinity6c/i6c_sys.h
+@@ -0,0 +1,204 @@
++/*
++ * i6c_sys.h -- MI_SYS bindings, Infinity6C
++ *
++ * Vendored from OpenIPC divinus, src/hal/star/i6c_sys.h (MIT), which is why this
++ * file carries divinus's licence. Reworked to stand alone: divinus's internal
++ * includes are dropped, an include guard replaces #pragma once, and the
++ * dlopen/dlsym function table stays with the consumer, since anything naming a
++ * logger or an error-code set belongs on that side of the boundary.
++ *
++ * These layouts describe the ABI of prebuilt vendor .so files. divinus's are
++ * exercised on this silicon, which is worth more than freshly derived ones --
++ * but it is a reconstruction from a multi-chip HAL, so treat it as a hypothesis
++ * and check it. DERIVED.md carries the sizes and field bounds read out of the
++ * shipped libraries and kernel objects for exactly that, and records which
++ * structs have been through it.
++ *
++ * Keep the i6c_* names and field order as upstream so fixes stay diffable
++ * against divinus.
++ *
++ * Copyright (c) 2024 OpenIPC
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef SIGMASTAR_I6C_SYS_H
++#define SIGMASTAR_I6C_SYS_H
++
++#include "i6c_common.h"
++
++#define I6C_SYS_API "1.0"
++
++typedef enum {
++    I6C_SYS_LINK_FRAMEBASE = 0x1,
++    I6C_SYS_LINK_LOWLATENCY = 0x2,
++    I6C_SYS_LINK_REALTIME = 0x4,
++    I6C_SYS_LINK_AUTOSYNC = 0x8,
++    I6C_SYS_LINK_RING = 0x10
++} i6c_sys_link;
++
++typedef enum {
++    I6C_SYS_MOD_IVE,
++    I6C_SYS_MOD_VDF,
++    I6C_SYS_MOD_VENC,
++    I6C_SYS_MOD_RGN,
++    I6C_SYS_MOD_AI,
++    I6C_SYS_MOD_AO,
++    I6C_SYS_MOD_VIF,
++    I6C_SYS_MOD_VPE,
++    I6C_SYS_MOD_VDEC,
++    I6C_SYS_MOD_SYS,
++    I6C_SYS_MOD_FB,
++    I6C_SYS_MOD_HDMI,
++    I6C_SYS_MOD_DIVP,
++    I6C_SYS_MOD_GFX,
++    I6C_SYS_MOD_VDISP,
++    I6C_SYS_MOD_DISP,
++    I6C_SYS_MOD_OS,
++    I6C_SYS_MOD_IAE,
++    I6C_SYS_MOD_MD,
++    I6C_SYS_MOD_OD,
++    I6C_SYS_MOD_SHADOW,
++    I6C_SYS_MOD_WARP,
++    I6C_SYS_MOD_UAC,
++    I6C_SYS_MOD_LDC,
++    I6C_SYS_MOD_SD,
++    I6C_SYS_MOD_PANEL,
++    I6C_SYS_MOD_CIPHER,
++    I6C_SYS_MOD_SNR,
++    I6C_SYS_MOD_WLAN,
++    I6C_SYS_MOD_IPU,
++    I6C_SYS_MOD_MIPITX,
++    I6C_SYS_MOD_GYRO,
++    I6C_SYS_MOD_JPD,
++    I6C_SYS_MOD_ISP,
++    I6C_SYS_MOD_SCL,
++    I6C_SYS_MOD_WBC,
++    I6C_SYS_MOD_DSP,
++    I6C_SYS_MOD_PCIE,
++    I6C_SYS_MOD_DUMMY,
++    I6C_SYS_MOD_NIR,
++    I6C_SYS_MOD_DPU,
++    I6C_SYS_MOD_END,
++} i6c_sys_mod;
++
++typedef enum {
++    I6C_SYS_POOL_ENCODER_RING,
++    I6C_SYS_POOL_CHANNEL,
++    I6C_SYS_POOL_DEVICE,
++    I6C_SYS_POOL_OUTPUT,
++    I6C_SYS_POOL_DEVICE_RING
++} i6c_sys_pooltype;
++
++typedef struct {
++    i6c_sys_mod module;
++    unsigned int device;
++    unsigned int channel;
++    unsigned int port;
++} i6c_sys_bind;
++
++typedef struct {
++    i6c_sys_mod module;
++    unsigned int device;
++    unsigned int channel;
++    unsigned char heapName[32];
++    unsigned int heapSize;
++} i6c_sys_poolchn;
++
++typedef struct {
++    i6c_sys_mod module;
++    unsigned int device;
++    unsigned int reserved;
++    unsigned char heapName[32];
++    unsigned int heapSize;
++} i6c_sys_pooldev;
++
++typedef struct {
++    unsigned int ringSize;
++    unsigned char heapName[32];
++} i6c_sys_poolenc;
++
++typedef struct {
++    i6c_sys_mod module;
++    unsigned int device;
++    unsigned int channel;
++    unsigned int port;
++    unsigned char heapName[32];
++    unsigned int heapSize;
++} i6c_sys_poolout;
++
++typedef struct {
++    i6c_sys_mod module;
++    unsigned int device;
++    unsigned short maxWidth;
++    unsigned short maxHeight;
++    unsigned short ringLine;
++    unsigned char heapName[32];
++} i6c_sys_poolring;
++
++typedef struct {
++    i6c_sys_pooltype type;
++    char create;
++    union {
++        i6c_sys_poolchn channel;
++        i6c_sys_pooldev device;
++        i6c_sys_poolenc encode;
++        i6c_sys_poolout output;
++        i6c_sys_poolring ring;
++    } config;
++} i6c_sys_pool;
++
++typedef struct {
++    unsigned char version[128];
++} i6c_sys_ver;
++
++/*
++ * Checked against the shipped libraries rather than taken on trust, per
++ * DERIVED.md:
++ *
++ *   i6c_sys_ver     MI_SYS_GetVersion loads #128 into the size slot of the
++ *                   block it hands to ioctl, so the buffer is 128 bytes.
++ *   i6c_sys_bind    MI_SYS_BindChnPort2 marshals 56 bytes, which is two of
++ *                   these plus the source and destination rates.
++ *   i6c_sys_mod     ISP at 33 and SCL at 34 match the module ids the
++ *                   libraries use.
++ *
++ * The SoC id every MI_SYS entry point leads with is 16 bits, and that is not an
++ * assumption either: MI_SYS_GetVersion stores its first argument with strh.w, a
++ * halfword store. MI 2.x has no equivalent argument, and dlsym resolves by name,
++ * so a table built for that generation binds against these libraries and then
++ * calls with a stray value where the id belongs, reporting nothing.
++ */
++_Static_assert(sizeof(i6c_sys_ver) == 128, "MI_SYS_GetVersion fills 128 bytes");
++_Static_assert(sizeof(i6c_sys_bind) == 16, "two of these plus two rates is the 56 BindChnPort2 marshals");
++
++/*
++ * The pool descriptors are pinned by offset rather than by size, because
++ * MI_SYS_ConfigPrivateMMAPool does not marshal this struct wholesale. It reads
++ * named fields out of it and composes a differently shaped 68-byte block, so the
++ * payload size says nothing about sizeof() here -- only the reads do:
++ *
++ *   ldr  r2, [r1]        the type, a word at 0
++ *   ldrb r1, [r1, #4]    the create flag, a byte at 4
++ *   ldrd r0, r1, [r4, #8]    the union at 8: module, then device
++ *   ldr  r2, [r4, #16]       union + 8
++ *   ldrh r3, [r4, #20]       union + 12, a halfword
++ *   add.w r6, r4, #22 ; strlen   union + 14, the heap name
++ *
++ * That last offset is what settles the ring descriptor's shape. A name starting
++ * at 14 leaves exactly three halfwords between the device and it, which is the
++ * only arrangement that fits -- and the halfword load at union + 12 confirms one
++ * of the three directly. Which of the two at union + 8 is the width and which the
++ * height is not derived: a single word load covers both, and only the pair's
++ * position is observable.
++ *
++ * The union's own size is not reachable this way either, since nothing copies it
++ * whole. The arms are upstream's.
++ */
++_Static_assert(offsetof(i6c_sys_pool, create) == 4, "read with ldrb, one word past the type");
++_Static_assert(offsetof(i6c_sys_pool, config) == 8, "every arm is read relative to here");
++_Static_assert(offsetof(i6c_sys_poolring, device) == 4, "the second word of the ldrd at union + 8");
++_Static_assert(offsetof(i6c_sys_poolring, maxWidth) == 8, "the word read at union + 8");
++_Static_assert(offsetof(i6c_sys_poolring, ringLine) == 12, "the halfword read at union + 12");
++_Static_assert(offsetof(i6c_sys_poolring, heapName) == 14, "where strlen is pointed, at union + 14");
++
++#endif /* SIGMASTAR_I6C_SYS_H */
+diff --git a/sigmastar-headers/infinity6c/i6c_venc.h b/sigmastar-headers/infinity6c/i6c_venc.h
+new file mode 100644
+index 0000000..3e050b1
+--- /dev/null
++++ b/sigmastar-headers/infinity6c/i6c_venc.h
+@@ -0,0 +1,410 @@
++/*
++ * i6c_venc.h -- MI_VENC bindings, Infinity6C
++ *
++ * Vendored from OpenIPC divinus, src/hal/star/i6c_venc.h (MIT), which is why this
++ * file carries divinus's licence. Reworked to stand alone: divinus's internal
++ * includes are dropped, an include guard replaces #pragma once, and the
++ * dlopen/dlsym function table stays with the consumer, since anything naming a
++ * logger or an error-code set belongs on that side of the boundary.
++ *
++ * These layouts describe the ABI of prebuilt vendor .so files. divinus's are
++ * exercised on this silicon, which is worth more than freshly derived ones --
++ * but it is a reconstruction from a multi-chip HAL, so treat it as a hypothesis
++ * and check it. DERIVED.md carries the sizes and field bounds read out of the
++ * shipped libraries and kernel objects for exactly that, and records which
++ * structs have been through it.
++ *
++ * Keep the i6c_* names and field order as upstream so fixes stay diffable
++ * against divinus.
++ *
++ * Copyright (c) 2024 OpenIPC
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef SIGMASTAR_I6C_VENC_H
++#define SIGMASTAR_I6C_VENC_H
++
++#include "i6c_common.h"
++
++#define I6C_VENC_CHN_NUM 12
++#define I6C_VENC_DEV_H26X_0 0
++#define I6C_VENC_DEV_MJPG_0 8
++
++typedef enum {
++    I6C_VENC_CODEC_H264 = 2,
++    I6C_VENC_CODEC_H265,
++    I6C_VENC_CODEC_MJPG,
++    I6C_VENC_CODEC_END
++} i6c_venc_codec;
++
++typedef enum {
++    I6C_VENC_NALU_H264_PSLICE = 1,
++    I6C_VENC_NALU_H264_ISLICE = 5,
++    I6C_VENC_NALU_H264_SEI,
++    I6C_VENC_NALU_H264_SPS,
++    I6C_VENC_NALU_H264_PPS,
++    I6C_VENC_NALU_H264_IPSLICE,
++    I6C_VENC_NALU_H264_PREFIX = 14,
++    I6C_VENC_NALU_H264_END
++} i6c_venc_nalu_h264;
++
++typedef enum {
++    I6C_VENC_NALU_H265_PSLICE = 1,
++    I6C_VENC_NALU_H265_ISLICE = 19,
++    I6C_VENC_NALU_H265_VPS = 32,
++    I6C_VENC_NALU_H265_SPS,
++    I6C_VENC_NALU_H265_PPS,
++    I6C_VENC_NALU_H265_SEI = 39,
++    I6C_VENC_NALU_H265_END
++} i6c_venc_nalu_h265;
++
++typedef enum {
++    I6C_VENC_NALU_MJPG_ECS = 5,
++    I6C_VENC_NALU_MJPG_APP,
++    I6C_VENC_NALU_MJPG_VDO,
++    I6C_VENC_NALU_MJPG_PIC,
++    I6C_VENC_NALU_MJPG_END
++} i6c_venc_nalu_mjpg;
++
++typedef enum {
++    I6C_VENC_SRC_CONF_NORMAL,
++    I6C_VENC_SRC_CONF_RING_ONE,
++    I6C_VENC_SRC_CONF_RING_HALF,
++    I6C_VENC_SRC_CONF_HW_SYNC,
++    I6C_VENC_SRC_CONF_RING_DMA,
++    I6C_VENC_SRC_CONF_END
++} i6c_venc_src_conf;
++
++typedef enum {
++    I6C_VENC_RATEMODE_H264CBR = 1,
++    I6C_VENC_RATEMODE_H264VBR,
++    I6C_VENC_RATEMODE_H264ABR,
++    I6C_VENC_RATEMODE_H264QP,
++    I6C_VENC_RATEMODE_H264AVBR,
++    I6C_VENC_RATEMODE_MJPGCBR,
++    I6C_VENC_RATEMODE_MJPGVBR,
++    I6C_VENC_RATEMODE_MJPGQP,
++    I6C_VENC_RATEMODE_H265CBR,
++    I6C_VENC_RATEMODE_H265VBR,
++    I6C_VENC_RATEMODE_H265QP,
++    I6C_VENC_RATEMODE_H265AVBR,
++    I6C_VENC_RATEMODE_END
++} i6c_venc_ratemode;
++
++typedef enum {
++    I6C_VENC_RATEMODE_UBR_H264CBR = 1,
++    I6C_VENC_RATEMODE_UBR_H264VBR,
++    I6C_VENC_RATEMODE_UBR_H264UBR,
++    I6C_VENC_RATEMODE_UBR_H264ABR,
++    I6C_VENC_RATEMODE_UBR_H264QP,
++    I6C_VENC_RATEMODE_UBR_H264AVBR,
++    I6C_VENC_RATEMODE_UBR_MJPGCBR,
++    I6C_VENC_RATEMODE_UBR_MJPGVBR,
++    I6C_VENC_RATEMODE_UBR_MJPGQP,
++    I6C_VENC_RATEMODE_UBR_H265CBR,
++    I6C_VENC_RATEMODE_UBR_H265VBR,
++    I6C_VENC_RATEMODE_UBR_H265UBR,
++    I6C_VENC_RATEMODE_UBR_H265QP,
++    I6C_VENC_RATEMODE_UBR_H265AVBR,
++    I6C_VENC_RATEMODE_UBR_END
++} i6c_venc_ratemode_ubr;
++
++typedef struct {
++    unsigned int maxWidth;
++    unsigned int maxHeight;
++    unsigned int bufSize;
++    unsigned int profile;
++    char byFrame;
++    unsigned int width;
++    unsigned int height;
++    unsigned int bFrameNum;
++    unsigned int refNum;
++} i6c_venc_attr_h26x;
++
++typedef struct {
++    unsigned int maxWidth;
++    unsigned int maxHeight;
++    unsigned int bufSize;
++    char byFrame;
++    unsigned int width;
++    unsigned int height;
++    char dcfThumbs;
++    unsigned int markPerRow;
++} i6c_venc_attr_mjpg;
++
++typedef struct {
++    i6c_venc_codec codec;
++    union {
++        i6c_venc_attr_h26x h264;
++        i6c_venc_attr_mjpg mjpg;
++        i6c_venc_attr_h26x h265;
++    };
++} i6c_venc_attrib;
++
++typedef struct {
++    unsigned int gop;
++    unsigned int statTime;
++    unsigned int fpsNum;
++    unsigned int fpsDen;
++    unsigned int bitrate;
++    unsigned int avgLvl;
++} i6c_venc_rate_h26xcbr;
++
++typedef struct {
++    unsigned int gop;
++    unsigned int statTime;
++    unsigned int fpsNum;
++    unsigned int fpsDen;
++    unsigned int maxBitrate;
++    unsigned int maxQual;
++    unsigned int minQual;
++} i6c_venc_rate_h26xvbr;
++
++typedef struct {
++    unsigned int gop;
++    unsigned int fpsNum;
++    unsigned int fpsDen;
++    unsigned int interQual;
++    unsigned int predQual;
++} i6c_venc_rate_h26xqp;
++
++typedef struct {
++    unsigned int gop;
++    unsigned int statTime;
++    unsigned int fpsNum;
++    unsigned int fpsDen;
++    unsigned int avgBitrate;
++    unsigned int maxBitrate;
++} i6c_venc_rate_h26xabr;
++
++typedef struct {
++    unsigned int bitrate;
++    unsigned int fpsNum;
++    unsigned int fpsDen;
++} i6c_venc_rate_mjpgbr;
++
++typedef struct {
++    unsigned int fpsNum;
++    unsigned int fpsDen;
++    unsigned int quality;
++} i6c_venc_rate_mjpgqp;
++
++typedef struct {
++    int mode;
++    union {
++        i6c_venc_rate_h26xcbr h264Cbr;
++        i6c_venc_rate_h26xvbr h264Vbr;
++        i6c_venc_rate_h26xqp h264Qp;
++        i6c_venc_rate_h26xabr h264Abr;
++        i6c_venc_rate_h26xvbr h264Avbr;
++        i6c_venc_rate_mjpgbr mjpgCbr;
++        i6c_venc_rate_mjpgbr mjpgVbr;
++        i6c_venc_rate_mjpgqp mjpgQp;
++        i6c_venc_rate_h26xcbr h265Cbr;
++        i6c_venc_rate_h26xvbr h265Vbr;
++        i6c_venc_rate_h26xqp h265Qp;
++        i6c_venc_rate_h26xvbr h265Avbr;
++    };
++    void *extend;
++} i6c_venc_rate;
++
++typedef struct {
++    i6c_venc_attrib attrib;
++    i6c_venc_rate rate;
++} i6c_venc_chn;
++
++typedef struct {
++    unsigned int maxWidth;
++    unsigned int maxHeight;
++} i6c_venc_init;
++
++typedef struct {
++    unsigned int quality;
++    unsigned char qtLuma[64];
++    unsigned char qtChroma[64];
++    unsigned int mcuPerEcs;
++} i6c_venc_jpg;
++
++typedef union {
++    i6c_venc_nalu_h264 h264Nalu;
++    i6c_venc_nalu_mjpg mjpgNalu;
++    i6c_venc_nalu_h265 h265Nalu;
++} i6c_venc_nalu;
++
++typedef struct {
++    i6c_venc_nalu packType;
++    unsigned int offset;
++    unsigned int length;
++    unsigned int sliceId;
++} i6c_venc_packinfo;
++
++typedef struct {
++    unsigned long long addr;
++    unsigned char *data;
++    unsigned int length;
++    unsigned long long timestamp;
++    char endFrame;
++    i6c_venc_nalu naluType;
++    unsigned int offset;
++    unsigned int packNum;
++    unsigned char frameQual;
++    int picOrder;
++    unsigned int gradient;
++    i6c_venc_packinfo packetInfo[8];
++} i6c_venc_pack;
++
++typedef struct {
++    unsigned int leftPics;
++    unsigned int leftBytes;
++    unsigned int leftFrames;
++    unsigned int leftMillis;
++    unsigned int curPacks;
++    unsigned int leftRecvPics;
++    unsigned int leftEncPics;
++    unsigned int fpsNum;
++    unsigned int fpsDen;
++    unsigned int bitrate;
++} i6c_venc_stat;
++
++typedef struct {
++    unsigned int size;
++    unsigned int skipMb;
++    unsigned int ipcmMb;
++    unsigned int iMb16x8;
++    unsigned int iMb16x16;
++    unsigned int iMb8x16;
++    unsigned int iMb8x8;
++    unsigned int pMb16;
++    unsigned int pMb8;
++    unsigned int pMb4;
++    unsigned int refSliceType;
++    unsigned int refType;
++    unsigned int updAttrCnt;
++    unsigned int startQual;
++} i6c_venc_strminfo_h264;
++
++typedef struct {
++    unsigned int size;
++    unsigned int iCu64x64;
++    unsigned int iCu32x32;
++    unsigned int iCu16x16;
++    unsigned int iCu8x8;
++    unsigned int pCu32x32;
++    unsigned int pCu16x16;
++    unsigned int pCu8x8;
++    unsigned int pCu4x4;
++    unsigned int refType;
++    unsigned int updAttrCnt;
++    unsigned int startQual;  
++} i6c_venc_strminfo_h265;
++
++typedef struct {
++    unsigned int size;
++    unsigned int updAttrCnt;
++    unsigned int quality;
++} i6c_venc_strminfo_mjpg;
++
++typedef struct {
++    i6c_venc_pack *packet;
++    unsigned int count;
++    unsigned int sequence;
++    unsigned long handle;
++    union
++    {
++        i6c_venc_strminfo_h264 h264Info;
++        i6c_venc_strminfo_mjpg mjpgInfo;
++        i6c_venc_strminfo_h265 h265Info;
++    };
++} i6c_venc_strm;
++
++/*
++ * MI_VENC_ChnAttr_t is checked against mi_venc.ko rather than taken on trust,
++ * per DERIVED.md, and both halves come out as divinus has them.
++ *
++ * MI_VENC_IMPL_SetChnAttr copies the incoming attribute in two pieces and
++ * memcmps each against the channel context's own copy, which fixes both halves'
++ * sizes and the boundary between them: 40 bytes from offset 0, then 36 from
++ * offset 40. _MI_VENC_IMPL_ConfigRcAttr agrees, reaching the rate half by adding
++ * 40 to the whole attribute it is handed. The 76 that makes is what
++ * MI_VENC_CreateChn marshals.
++ *
++ * The interior offsets fall out of the same comparison. A change to the codec
++ * half is refused unless it is confined to resolution and profile, which the
++ * driver overwrites with the channel's current values before comparing -- at
++ * offsets 16, 24 and 28 for H264 and H265, and at 20 and 24 for MJPG. That
++ * reproduces both union arms, MJPG included: it has no profile field, so its
++ * width and height sit four bytes earlier than H26x's.
++ *
++ * The rest of the module is checked the same way, and also comes out as divinus
++ * has it. The ioctl thunks in mi_venc.ko are the shortcut: each one splits the
++ * marshalled payload itself, so the id words a call prepends can be read off
++ * rather than counted. MI_VENC_IOCTL_InitDev takes one id and puts the struct at
++ * payload+4 of 12; the GetStream, GetChnAttr, SetChnAttr and Query thunks take
++ * two and put it at payload+8; and MI_VENC_IOCTL_GetStream fetches its timeout
++ * from payload+80, which brackets MI_VENC_Stream_t between 8 and 80.
++ *
++ * MI_VENC_Pack_t is never marshalled -- the stream struct points at an array the
++ * caller owns -- so its size comes from the stride the library indexes that array
++ * with, 184, and the offsets from the fields it writes. i6c_venc_pack measuring
++ * 180 of payload in a 184-byte footprint is not slack: the u64 members align it
++ * to 8, and 184 is what the stride confirms.
++ *
++ * The three stream-info arms are each confirmed at one interior offset, and the
++ * offsets are the load-bearing part. The same 3-bit reference type is written to
++ * strm+60 for H264 and strm+52 for H265, which is refType's slot in each arm and
++ * differs by exactly the eight bytes the H264 arm is longer; MJPG's quality lands
++ * at strm+24, its arm's offset 8. Only the H264 arm's *size* is pinned, as the
++ * largest and therefore the union's own size -- a shorter arm's size is not
++ * observable, so h265 at 48 and mjpg at 12 remain bounded rather than fixed.
++ *
++ * Unchecked: every enumeration except i6c_venc_codec, whose 2..4 the driver
++ * bounds explicitly.
++ *
++ * These sizes are the 32-bit target ABI, and i6c_venc_rate and i6c_venc_pack
++ * contain pointers, so a host compiler measures them over and none of the totals
++ * here hold. Compile the asserts with the cross compiler; see the README.
++ */
++_Static_assert(sizeof(i6c_venc_attrib) == 40, "MI_VENC_Attr_t is the 40 bytes SetChnAttr compares");
++_Static_assert(sizeof(i6c_venc_rate) == 36, "MI_VENC_RcAttr_t is the 36 bytes SetChnAttr compares");
++_Static_assert(sizeof(i6c_venc_chn) == 76, "MI_VENC_ChnAttr_t is 76 bytes");
++_Static_assert(offsetof(i6c_venc_chn, rate) == 40, "the rate half starts where ConfigRcAttr looks for it");
++_Static_assert(offsetof(i6c_venc_attrib, h264.profile) == 16, "H26x profile is one of the masked fields");
++_Static_assert(offsetof(i6c_venc_attrib, h264.width) == 24, "H26x width is one of the masked fields");
++_Static_assert(offsetof(i6c_venc_attrib, h264.height) == 28, "H26x height is one of the masked fields");
++_Static_assert(offsetof(i6c_venc_attrib, mjpg.width) == 20, "MJPG width is one of the masked fields");
++_Static_assert(offsetof(i6c_venc_attrib, mjpg.height) == 24, "MJPG height is one of the masked fields");
++
++_Static_assert(sizeof(i6c_venc_init) == 8, "MI_VENC_InitParam_t is InitDev's payload less one id");
++_Static_assert(sizeof(i6c_venc_jpg) == 136, "MI_VENC_ParamJpeg_t is what Set/GetJpegParam memcpy");
++_Static_assert(offsetof(i6c_venc_jpg, qtLuma) == 4, "SetJpegParam reads quality, then bytes from 4");
++_Static_assert(offsetof(i6c_venc_jpg, qtChroma) == 68, "SetJpegParam takes the second table from +68");
++_Static_assert(offsetof(i6c_venc_jpg, mcuPerEcs) == 132, "the tables leave one word at the end");
++
++_Static_assert(sizeof(i6c_venc_stat) == 40, "MI_VENC_ChnStat_t is Query's payload less two ids");
++_Static_assert(offsetof(i6c_venc_stat, bitrate) == 36, "IMPL_Query sweeps all ten words, 36 down to 0");
++
++_Static_assert(sizeof(i6c_venc_strm) == 72, "MI_VENC_Stream_t spans payload 8 to 80 in GetStream");
++_Static_assert(offsetof(i6c_venc_strm, count) == 4, "GetStream's pack loop bounds on this");
++_Static_assert(offsetof(i6c_venc_strm, h264Info) == 16, "the stream-info union starts here");
++_Static_assert(sizeof(i6c_venc_strminfo_h264) == 56, "the largest arm, so the union's own size");
++_Static_assert(offsetof(i6c_venc_strminfo_h264, refType) == 44, "written as strm+60");
++_Static_assert(offsetof(i6c_venc_strminfo_h265, refType) == 36, "written as strm+52");
++_Static_assert(offsetof(i6c_venc_strminfo_mjpg, quality) == 8, "written as strm+24");
++
++/*
++ * i6c_venc_pack's stride is what the library steps the caller's array by, so an
++ * error here walks off the array rather than corrupting one field.
++ */
++_Static_assert(sizeof(i6c_venc_pack) == 184, "GetStream indexes the pack array with mul #184");
++_Static_assert(offsetof(i6c_venc_pack, data) == 8, "GetStream writes addr and data as one strd");
++_Static_assert(offsetof(i6c_venc_pack, timestamp) == 16, "written as an 8-byte vstr");
++_Static_assert(offsetof(i6c_venc_pack, endFrame) == 24, "the only byte store in the prefix");
++_Static_assert(offsetof(i6c_venc_pack, packNum) == 36, "the NAL scanner's final count");
++_Static_assert(offsetof(i6c_venc_pack, frameQual) == 40, "byte-stored from the same source as mjpg quality");
++_Static_assert(offsetof(i6c_venc_pack, picOrder) == 44, "written with gradient as one strd");
++_Static_assert(offsetof(i6c_venc_pack, packetInfo) == 52, "the NAL scanner's base, indexed by lsl #4");
++_Static_assert(sizeof(i6c_venc_packinfo) == 16, "that lsl #4 is the stride");
++_Static_assert(offsetof(i6c_venc_packinfo, length) == 8, "back-filled as this offset less the previous");
++_Static_assert(offsetof(i6c_venc_packinfo, sliceId) == 12, "the remaining word the scanner writes");
++
++#endif /* SIGMASTAR_I6C_VENC_H */
+diff --git a/sigmastar-headers/infinity6c/i6c_vif.h b/sigmastar-headers/infinity6c/i6c_vif.h
+new file mode 100644
+index 0000000..803fd7f
+--- /dev/null
++++ b/sigmastar-headers/infinity6c/i6c_vif.h
+@@ -0,0 +1,126 @@
++/*
++ * i6c_vif.h -- MI_VIF bindings, Infinity6C
++ *
++ * Vendored from OpenIPC divinus, src/hal/star/i6c_vif.h (MIT), which is why this
++ * file carries divinus's licence. Reworked to stand alone: divinus's internal
++ * includes are dropped, an include guard replaces #pragma once, and the
++ * dlopen/dlsym function table stays with the consumer, since anything naming a
++ * logger or an error-code set belongs on that side of the boundary.
++ *
++ * These layouts describe the ABI of prebuilt vendor .so files. divinus's are
++ * exercised on this silicon, which is worth more than freshly derived ones --
++ * but it is a reconstruction from a multi-chip HAL, so treat it as a hypothesis
++ * and check it. DERIVED.md carries the sizes and field bounds read out of the
++ * shipped libraries and kernel objects for exactly that, and records which
++ * structs have been through it.
++ *
++ * Keep the i6c_* names and field order as upstream so fixes stay diffable
++ * against divinus.
++ *
++ * Copyright (c) 2024 OpenIPC
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef SIGMASTAR_I6C_VIF_H
++#define SIGMASTAR_I6C_VIF_H
++
++#include "i6c_common.h"
++
++typedef enum {
++    I6C_VIF_FRATE_FULL,
++    I6C_VIF_FRATE_HALF,
++    I6C_VIF_FRATE_QUART,
++    I6C_VIF_FRATE_OCTANT,
++    I6C_VIF_FRATE_3QUARTS,
++    I6C_VIF_FRATE_END
++} i6c_vif_frate;
++
++typedef enum {
++    I6C_VIF_CLK_12MHZ,
++    I6C_VIF_CLK_18MHZ,
++    I6C_VIF_CLK_27MHZ,
++    I6C_VIF_CLK_36MHZ,
++    I6C_VIF_CLK_54MHZ,
++    I6C_VIF_CLK_108MHZ,
++    I6C_VIF_CLK_END
++} i6c_vif_clk;
++
++typedef enum {
++    I6C_VIF_WORK_1MULTIPLEX,
++    I6C_VIF_WORK_2MULTIPLEX,
++    I6C_VIF_WORK_4MULTIPLEX,
++    I6C_VIF_WORK_END
++} i6c_vif_work;
++
++typedef struct {
++    i6c_common_pixfmt pixFmt;
++    i6c_common_rect crop;
++    // Values 0-3 correspond to No, Top, Bottom, Both
++    int field;
++    char halfHScan;
++} i6c_vif_dev;
++
++typedef struct {
++    i6c_common_intf intf;
++    i6c_vif_work work;
++    i6c_common_hdr hdr;
++    i6c_common_edge edge;
++    i6c_vif_clk clock;
++    int interlaceOn;
++    unsigned int grpStitch;
++} i6c_vif_grp;
++
++typedef struct {
++    i6c_common_rect capt;
++    i6c_common_dim dest;
++    i6c_common_pixfmt pixFmt;
++    i6c_vif_frate frate;
++    i6c_common_compr compress;
++} i6c_vif_port;
++
++/*
++ * Sizes checked against the shipped libraries, not taken on trust. Each
++ * userspace wrapper writes its marshalled payload size into the ioctl block as a
++ * literal, and the module's ioctl thunk splits that payload itself -- so the ids
++ * a call prepends are read off rather than counted:
++ *
++ *   i6c_vif_grp    CreateDevGroup     32, one id  (thunk: ldr [r4], #4)
++ *   i6c_vif_dev    SetDevAttr         24, one id  (thunk: ldr [r4], #4)
++ *   i6c_vif_port   SetOutputPortAttr  32, two ids (thunk: ldrd [r1], add #8)
++ *
++ * Field order is checked too, which size alone cannot do, since permuting
++ * same-width members preserves a total.
++ *
++ * i6c_vif_grp: MI_VIF_CHECK_GroupAttr bounds offset 0 below 5, 4 below 2, 8
++ * below 4 and 12 below 2, which is the interface mode, work mode, HDR type and
++ * clock edge in that order.
++ *
++ * i6c_vif_dev: every member is named by what reads it. Offset 0 goes to
++ * MI_VIF_PLATFORM_DevPixelSupport; MI_VIF_IMPL_SetDevAttr reads four halfwords
++ * at 4, 6, 8 and 10, of which the validator passes 8 and 10 to
++ * _MI_VIF_CHECK_RectValid, so the crop is a rect whose width and height are
++ * checked and whose origin is not; offset 12 is bounded at or below 3 and
++ * belongs to _MI_VIF_CHECK_FieldValid, whose four values the module names when it
++ * complains that "Field is both"; and offset 16 is read as a single byte.
++ * Nothing reads past 16, which is what makes the last three bytes padding.
++ *
++ * i6c_vif_port: MI_VIF_CHECK_PortAttr reads six halfwords at 0, 2, 4, 6, 8, 10
++ * and three words at 12, 16 and 20 -- an 8-byte rect, a 4-byte dimension and
++ * three enums, totalling the 24 derived above. It hands offset 12 to
++ * MI_VIF_PLATFORM_OutputPortPixelSupport and offset 20 to
++ * MI_VIF_PLATFORM_SupportCompress, naming those two.
++ *
++ * See DERIVED.md.
++ */
++_Static_assert(sizeof(i6c_vif_grp) == 28, "MI_VIF_CreateDevGroup marshals 32 less a group id");
++_Static_assert(sizeof(i6c_vif_dev) == 20, "MI_VIF_SetDevAttr marshals 24 less a device id");
++_Static_assert(sizeof(i6c_vif_port) == 24, "MI_VIF_SetOutputPortAttr marshals 32 less two ids");
++
++_Static_assert(offsetof(i6c_vif_dev, crop) == 4, "IMPL_SetDevAttr reads the crop as halfwords from 4");
++_Static_assert(offsetof(i6c_vif_dev, field) == 12, "the word _MI_VIF_CHECK_FieldValid bounds at 3");
++_Static_assert(offsetof(i6c_vif_dev, halfHScan) == 16, "the last thing read, and read as a byte");
++_Static_assert(offsetof(i6c_vif_port, dest) == 8, "the rect ends here and the dimension begins");
++_Static_assert(offsetof(i6c_vif_port, pixFmt) == 12, "handed to PLATFORM_OutputPortPixelSupport");
++_Static_assert(offsetof(i6c_vif_port, compress) == 20, "handed to PLATFORM_SupportCompress");
++
++#endif /* SIGMASTAR_I6C_VIF_H */
+diff --git a/sigmastar-headers/infinity6e/i6_aud.h b/sigmastar-headers/infinity6e/i6_aud.h
+new file mode 100644
+index 0000000..7cf18e3
+--- /dev/null
++++ b/sigmastar-headers/infinity6e/i6_aud.h
+@@ -0,0 +1,212 @@
++/*
++ * i6_aud.h -- MI_AI (audio input) ABI for SigmaStar Infinity6E
++ *
++ * Layouts and symbol names come from divinus's src/hal/star/i6_aud.h
++ * (MIT), independently corroborated by waybeam's star6e_audio.c, which
++ * declares the same device-config and frame structs field for field.
++ *
++ * That corroboration matters because the vendored SigmaStar MI_AI
++ * reference (ref/sigmastar-docs, MI AI API 2.19) documents
++ * MI_AUDIO_Attr_t with a *different field order* -- eBitwidth first,
++ * then eSamplerate, eSoundmode, eWorkmode, u32PtNumPerFrm, u32ChnCnt.
++ * Those docs are for SSD20X, a different chip generation, so the doc is
++ * the authority on **semantics** (what the fields mean, what values are
++ * legal, what the calls guarantee) and the two references are the
++ * authority on **layout** for this SoC. Do not "fix" the field order to
++ * match the documentation.
++ *
++ * CAPTURE ONLY. There is deliberately no MI_AO here and no AI encoder:
++ *
++ *   - Nothing in scope plays audio out, so libmi_ao is never loaded.
++ *   - MI's own encoder (MI_AI_SetAencAttr / EnableAenc / DisableAenc) is
++ *     unused. divinus dlsym's all three and has zero call sites for any
++ *     of them; waybeam does not load them at all. Both capture raw PCM
++ *     and encode in userspace, and so does raptor -- rad has its own
++ *     G.711/L16/Opus/AAC encoders. Omitting them keeps the symbol set to
++ *     what is actually called.
++ *   - The VQE / AEC / ANR / AGC / EQ / AED / SSL / BF entry points exist
++ *     in libmi_ai.so but their implementations do not: the algorithm
++ *     packs (IaaXxx_*, MI_AED_*, the SDK-side G711 and G726 helpers) are
++ *     declared **weak undefined**, so they resolve to NULL rather than
++ *     failing the link.
++ *     Calling into them would jump to address 0. See hal_audio.c's OP
++ *     COVERAGE comment.
++ *
++ * Copyright (C) 2026 Thingino Project
++ * SPDX-License-Identifier: GPL-3.0-or-later
++ */
++
++#ifndef SIGMASTAR_I6_AUD_H
++#define SIGMASTAR_I6_AUD_H
++
++#include "i6_common.h"
++
++/* Tracks per AI channel. divinus's I6_AUD_CHN_NUM; the frame struct
++ * carries one address per track, so the array bound is part of the ABI
++ * and must not be trimmed even though this backend uses one or two. */
++#define I6_AUD_CHN_NUM 16
++
++typedef enum {
++    I6_AUD_CLK_OFF,
++    I6_AUD_CLK_12_288M,
++    I6_AUD_CLK_16_384M,
++    I6_AUD_CLK_18_432M,
++    I6_AUD_CLK_24_576M,
++    I6_AUD_CLK_24M,
++    I6_AUD_CLK_48M
++} i6_aud_clk;
++
++typedef enum {
++    I6_AUD_INTF_I2S_MASTER,
++    I6_AUD_INTF_I2S_SLAVE,
++    I6_AUD_INTF_TDM_MASTER,
++    I6_AUD_INTF_TDM_SLAVE,
++    I6_AUD_INTF_END
++} i6_aud_intf;
++
++typedef enum {
++    I6_AUD_SND_MONO,
++    I6_AUD_SND_STEREO,
++    /* Several physical channels carried in one AI channel. Unused here:
++     * per the MI docs every channel then shares one set of algorithm
++     * parameters, and it only makes sense for a mic array. */
++    I6_AUD_SND_QUEUE,
++    I6_AUD_SND_END
++} i6_aud_snd;
++
++/*
++ * MI_AUDIO_I2sConfig_t. 20 bytes here against the 0601 header's 12, and
++ * the extra two fields are REQUIRED -- do not trim them to match the
++ * header.
++ *
++ * They were trimmed once, on the reasoning that the header is the vendor's
++ * own word and that the union is the last member of MI_AUDIO_Attr_t so the
++ * fields ahead of it stay put. Both halves of that are true and the
++ * conclusion is still wrong: MI_AI_SetPubAttr then fails with illegal
++ * parameter and audio capture does not start at all. Measured by A/B on the
++ * board, two builds seconds apart against the same device state.
++ *
++ * That A/B has since been confirmed by disassembly, which is the account to
++ * trust. An earlier revision of this comment quoted the failure as
++ * 0xa0058003, which is not an MI_AI code at all: MI_DEF_ERR packs MOD_ID
++ * into bits 16-23, so that value is module 5 (AO) at an undefined level 8,
++ * whereas AI/ERROR/ILLEGAL_PARAM is 0xA0042003. The disassembly does not
++ * depend on remembering a code correctly -- MI_AI_SetPubAttr is a
++ * validating wrapper around a single ioctl, and the length it copies into
++ * the ioctl buffer IS the ABI:
++ *
++ *     board  /usr/lib/libmi_ai.so     memset 56, memcpy 52  -> union is 20
++ *     SDK    release_0601 i6e build   memset 48, memcpy 44  -> union is 12
++ *
++ * Both builds validate the same field offsets (+0 rate, +4 bitwidth, +8
++ * workmode, +12 soundmode, +20 packNumPerFrm), so the extra eight bytes are
++ * genuinely on the end and every field ahead of the union is unmoved. The
++ * SDK drop is simply older than the firmware, and the ioctl request number
++ * encodes the size change too: 0x40306900 -> 0x40386900.
++ *
++ * So the board's libmi_ai.so reads 20 bytes where the SDK drop's header
++ * declares 12, exactly as libmi_isp.so declares 28 for a 4-byte defog
++ * struct. The rule both cases establish: where the shipped library and the
++ * header disagree about a *size*, the library wins, because the library is
++ * what does the reading. The header is still the better witness for field
++ * order and enumerator values.
++ *
++ * tdmSlotNum and bit24On are SSC377-shaped names for whatever the extra
++ * eight bytes are here; hal_audio.c leaves them zero and only sets the
++ * three fields the header does declare.
++ */
++typedef struct {
++    int leftJustOn;
++    i6_aud_clk clock;
++    char syncRxClkOn;
++    unsigned int tdmSlotNum;
++    int bit24On;
++} i6_aud_i2s;
++
++_Static_assert(sizeof(i6_aud_i2s) == 20,
++               "MI_AI_SetPubAttr rejects a 12-byte I2S config -- see the comment above");
++
++typedef struct {
++    /* MI accepts 8/16/32/48 kHz only -- the docs say so explicitly, and
++     * the resampler that would cover anything else (IaaSrc_*) is one of
++     * the weak-undefined algorithm entry points. hal_audio.c rejects
++     * other rates rather than letting MI resample into a NULL call. */
++    int rate;
++    int bit24On;
++    i6_aud_intf intf;
++    i6_aud_snd sound;
++    /* DMA ring depth in frames, and samples per frame per channel. */
++    unsigned int frmNum;
++    unsigned int packNumPerFrm;
++    /* Zero: no SDK codec channel. Both references set this to 0. */
++    unsigned int codecChnNum;
++    unsigned int chnNum;
++    i6_aud_i2s i2s;
++} i6_aud_cnf;
++
++/*
++ * MI_AI_ChnParam_t, and the two gain stages it reaches.
++ *
++ * Unlike everything VQE, this one is real: MI_AI_SetChnParam is exported by
++ * the board's libmi_ai.so and is not a stub -- it validates, then does
++ * memcpy(buf + 8, param, 12) into a 20-byte ioctl block (4 device + 4
++ * channel + 12 payload). 12 is exactly what the SDK header declares for
++ * MI_AI_ChnParam_t, so here the header and the library agree and the layout
++ * below is simply the header's.
++ *
++ * The two gains are *different stages*, which is the whole reason this
++ * struct is worth binding:
++ *
++ *   front  the analog front-end step, and the SAME table MI_AI_SetVqeVolume
++ *          indexes. The library's range check is per device and matches the
++ *          MI_AI reference's published table exactly -- dev 0 (Amic) and
++ *          dev 4 accept [0,21], dev 3 (Line in) [0,7], dev 2 is refused.
++ *          So writing this field fights MI_AI_SetVqeVolume; hal_audio.c
++ *          preserves whatever is already there rather than setting it.
++ *
++ *   rear   a digital trim in whole dB, range [-60,+30], reachable ONLY
++ *          through this call. That range is not a guess: it is what the
++ *          library compares against, and it is the same span the Infinity6C
++ *          backend documents for its DPGA.
++ *
++ * bEnableGainSet gates both -- the library skips the range checks entirely
++ * when it is zero, so a cleared struct is "leave the gains alone".
++ */
++typedef struct {
++    unsigned char gainOn;
++    short front;
++    short rear;
++} i6_aud_chn_gain;
++
++typedef struct {
++    i6_aud_chn_gain gain;
++    unsigned int reserved;
++} i6_aud_chn_para;
++
++_Static_assert(sizeof(i6_aud_chn_para) == 12, "MI_AI_SetChnParam copies 12");
++_Static_assert(offsetof(i6_aud_chn_para, gain.front) == 2, "s16FrontGain sits at +2");
++_Static_assert(offsetof(i6_aud_chn_para, gain.rear) == 4, "s16RearGain sits at +4");
++_Static_assert(offsetof(i6_aud_chn_para, reserved) == 8, "u32Reserved sits at +8");
++
++typedef struct {
++    int bit24On;
++    i6_aud_snd sound;
++    unsigned char *addr[I6_AUD_CHN_NUM];
++    unsigned long long timestamp;
++    unsigned int sequence;
++    unsigned int length;
++    unsigned int poolId[2];
++    unsigned char *pcmAddr[I6_AUD_CHN_NUM];
++    unsigned int pcmLength;
++} i6_aud_frm;
++
++/* The AEC reference frame. Passed as NULL by both references and by this
++ * backend -- echo cancellation is one of the absent algorithms -- but it
++ * is part of the GetFrame/ReleaseFrame signatures, so the type has to
++ * exist. */
++typedef struct {
++    i6_aud_frm frame;
++    char isValid;
++} i6_aud_efrm;
++
++#endif /* SIGMASTAR_I6_AUD_H */
+diff --git a/sigmastar-headers/infinity6e/i6_common.h b/sigmastar-headers/infinity6e/i6_common.h
+new file mode 100644
+index 0000000..22f8935
+--- /dev/null
++++ b/sigmastar-headers/infinity6e/i6_common.h
+@@ -0,0 +1,152 @@
++/*
++ * i6_common.h -- SigmaStar MI common types, Infinity6E
++ *
++ * Vendored from OpenIPC divinus, src/hal/star/i6_common.h (MIT), which is why
++ * this file carries divinus's licence. The layouts here describe the ABI of
++ * prebuilt vendor .so files: SigmaStar publishes no redistributable headers,
++ * and a wrong layout corrupts memory rather than failing to compile, so
++ * validated declarations are worth far more than freshly derived ones.
++ * divinus's are exercised on this silicon, and waybeam_venc's independently
++ * maintained sigmastar_types.h agrees with them field for field.
++ *
++ * Keep the i6_* names and field order as upstream so fixes stay diffable
++ * against divinus.
++ *
++ * Declarations only. MI is reached by dlopen rather than by linking -lmi_*,
++ * and the loaders that do so are the consumer's business -- nothing here
++ * includes dlfcn.h or depends on a logger or error-code set.
++ *
++ * Copyright (c) 2024 OpenIPC
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef SIGMASTAR_I6_COMMON_H
++#define SIGMASTAR_I6_COMMON_H
++
++/* offsetof, for the _Static_asserts that pin struct layouts */
++#include <stddef.h>
++
++
++typedef enum {
++    I6_BAYER_RG,
++    I6_BAYER_GR,
++    I6_BAYER_BG,
++    I6_BAYER_GB,
++    I6_BAYER_R0,
++    I6_BAYER_G0,
++    I6_BAYER_B0,
++    I6_BAYER_G1,
++    I6_BAYER_G2,
++    I6_BAYER_I0,
++    I6_BAYER_G3,
++    I6_BAYER_I1,
++    I6_BAYER_END
++} i6_common_bayer;
++
++typedef enum {
++    I6_COMPR_NONE,
++    I6_COMPR_SEG,
++    I6_COMPR_LINE,
++    I6_COMPR_FRAME,
++    // Valid on infinity6e only
++    I6_COMPR_8BIT,
++    I6_COMPR_END
++} i6_common_compr;
++
++typedef enum {
++    I6_EDGE_SINGLE_UP,
++    I6_EDGE_SINGLE_DOWN,
++    I6_EDGE_DOUBLE,
++    I6_EDGE_END
++} i6_common_edge;
++
++typedef enum {
++    I6_HDR_OFF,
++    I6_HDR_VC,
++    I6_HDR_DOL,
++    I6_HDR_EMBED,
++    I6_HDR_LI,
++    I6_HDR_END
++} i6_common_hdr;
++
++typedef enum {
++    I6_INPUT_VUVU = 0,
++    I6_INPUT_UVUV,
++    I6_INPUT_UYVY = 0,
++    I6_INPUT_VYUY,
++    I6_INPUT_YUYV,
++    I6_INPUT_YVYU,
++    I6_INPUT_END
++} i6_common_input;
++
++typedef enum {
++    I6_INTF_BT656,
++    I6_INTF_DIGITAL_CAMERA,
++    I6_INTF_BT1120_STANDARD,
++    I6_INTF_BT1120_INTERLEAVED,
++    I6_INTF_MIPI,
++    I6_INTF_END
++} i6_common_intf;
++
++typedef enum {
++    I6_PREC_8BPP,
++    I6_PREC_10BPP,
++    I6_PREC_12BPP,
++    I6_PREC_14BPP,
++    I6_PREC_16BPP,
++    I6_PREC_END
++} i6_common_prec;
++
++typedef enum {
++    I6_PIXFMT_YUV422_YUYV,
++    I6_PIXFMT_ARGB8888,
++    I6_PIXFMT_ABGR8888,
++    I6_PIXFMT_BGRA8888,
++    I6_PIXFMT_RGB565,
++    I6_PIXFMT_ARGB1555,
++    I6_PIXFMT_ARGB4444,
++    I6_PIXFMT_I2,
++    I6_PIXFMT_I4,
++    I6_PIXFMT_I8,
++    I6_PIXFMT_YUV422SP,
++    I6_PIXFMT_YUV420SP,
++    I6_PIXFMT_YUV420SP_NV21,
++    I6_PIXFMT_YUV420_MST,
++    I6_PIXFMT_YUV422_UYVY,
++    I6_PIXFMT_YUV422_YVYU,
++    I6_PIXFMT_YUV422_VYUY,
++    I6_PIXFMT_YC420_MSTITLE1_H264,
++    I6_PIXFMT_YC420_MSTITLE2_H265,
++    I6_PIXFMT_YC420_MSTITLE3_H265,
++    I6_PIXFMT_RGB_BAYER,
++    I6_PIXFMT_RGB_BAYER_END =
++        I6_PIXFMT_RGB_BAYER + I6_PREC_END * I6_BAYER_END - 1,
++    I6_PIXFMT_RGB888,
++    I6_PIXFMT_BGR888,
++    I6_PIXFMT_GRAY8,
++    I6_PIXFMT_RGB101010,
++    I6_PIXFMT_RGB888P,
++    I6_PIXFMT_END
++} i6_common_pixfmt;
++
++typedef struct {
++    unsigned short width;
++    unsigned short height;
++} i6_common_dim;
++
++typedef struct {
++    unsigned short x;
++    unsigned short y;
++    unsigned short width;
++    unsigned short height;
++} i6_common_rect;
++
++typedef struct {
++    int vsyncInv;
++    int hsyncInv;
++    int pixclkInv;
++    unsigned int vsyncDelay;
++    unsigned int hsyncDelay;
++    unsigned int pixclkDelay;
++} i6_common_sync;
++#endif /* SIGMASTAR_I6_COMMON_H */
+diff --git a/sigmastar-headers/infinity6e/i6_isp.h b/sigmastar-headers/infinity6e/i6_isp.h
+new file mode 100644
+index 0000000..0f5e977
+--- /dev/null
++++ b/sigmastar-headers/infinity6e/i6_isp.h
+@@ -0,0 +1,280 @@
++/*
++ * i6_isp.h -- MI_ISP bindings, Infinity6E
++ *
++ * Based on OpenIPC divinus, src/hal/star/i6_isp.h (MIT).
++ * See i6_common.h for why these declarations are vendored rather than derived.
++ *
++ * ================================================================
++ * TWO SHAPES OF MI_ISP CALL
++ *
++ * MI_ISP splits into a handful of *typed* lifecycle calls -- load an IQ
++ * binary, enable CUS3A, read the AE exposure limits -- and roughly 340
++ * MI_ISP_{IQ,AE,AWB,AF}_{Get,Set}<Module> calls that are all the same
++ * shape: (int channel, void *payload), with a per-module payload whose
++ * size the userspace wrapper hardcodes.
++ *
++ * The typed calls get real prototypes here. The per-module ones do not,
++ * because writing 340 structs to poke one field each is not a sensible
++ * trade -- hal_isp.c drives them from a descriptor table instead, and
++ * only needs `handle` plus the i6_isp_cmd_fn signature below. The
++ * layout convention that makes that possible is documented in hal_isp.c.
++ * ================================================================
++ *
++ * Copyright (c) 2024 OpenIPC
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef SIGMASTAR_I6_ISP_H
++#define SIGMASTAR_I6_ISP_H
++
++#include "i6_common.h"
++
++/*
++ * AE exposure limits. MI_ISP_AE_{Get,Set}ExposureLimit, command 0x1409,
++ * payload 32 -- MI_ISP_AE_EXPO_LIMIT_TYPE_t field for field.
++ *
++ * Note the field order: the two gain minima precede the two maxima, which
++ * is not the min/max pairing the shutter and aperture fields above them
++ * use. It is the vendor's, not a transcription slip.
++ */
++typedef struct {
++    unsigned int minShutterUs;
++    unsigned int maxShutterUs;
++    unsigned int minApertX10;
++    unsigned int maxApertX10;
++    unsigned int minSensorGain;
++    unsigned int minIspGain;
++    unsigned int maxSensorGain;
++    unsigned int maxIspGain;
++} i6_isp_exp;
++
++/*
++ * AE status. MI_ISP_CUS3A_GetAeStatus, command 0x2e05 -- the vendor's
++ * CusAEInfo_t, which is `packed` and exactly 65 bytes.
++ *
++ * The one MI call that answers "what did the AE converge on" -- shutter
++ * and the two gains -- which is what day/night detection needs and what
++ * MI_ISP_AE_GetManualExpo (the manual *setting*) and GetExposureLimit (the
++ * bounds) cannot give. Shutter is microseconds despite the vendor comment
++ * saying ns; see hal_isp.c.
++ *
++ * The size is the reason not to copy waybeam's struct as it stands: it
++ * declares the first twelve words and stops at 48 bytes, so the library
++ * writes 17 bytes past it on every call. Everything from preAvgY on exists
++ * to hold that, and the assert is what keeps it holding it.
++ *
++ * The tail is bytes rather than fields because CusAEInfo_t is packed and
++ * its remaining members are not aligned: HDRCtlMode is a u8 at 52, so
++ * FNx10 lands at 53, CurFPS at 57 and PreWeightY -- ROI-weighted frame
++ * brightness -- at 61. preAvgY at 48 is the one that is 4-aligned and can
++ * be read directly.
++ */
++typedef struct {
++    unsigned int reserved0[3]; /* Size, hist1, hist2 */
++    unsigned int avgBlkX;
++    unsigned int avgBlkY;
++    unsigned int reserved1; /* avgs */
++    unsigned int shutterUs;
++    unsigned int sensorGain;
++    unsigned int ispGain;
++    unsigned int shutterHdrShortUs;
++    unsigned int sensorGainHdrShort;
++    unsigned int ispGainHdrShort;
++    unsigned int preAvgY; /* previous frame's brightness, CUS3A V1.1 */
++    unsigned char tail[16];
++} i6_isp_ae_status;
++
++_Static_assert(sizeof(i6_isp_ae_status) >= 65,
++               "AE status must hold the 65 bytes the wrapper copies into it");
++_Static_assert(offsetof(i6_isp_ae_status, shutterUs) == 24, "AE status shutter offset");
++_Static_assert(offsetof(i6_isp_ae_status, sensorGain) == 28, "AE status sensor gain offset");
++_Static_assert(offsetof(i6_isp_ae_status, preAvgY) == 48, "AE status PreAvgY offset");
++
++/*
++ * Hardware AE average statistics. MI_ISP_AE_GetAeHwAvgStats, command
++ * 0x2e01, payload 46088 -- MI_ISP_AE_HW_STATISTICS_t, which is
++ * { nBlkX, nBlkY, nAvg[128*90] } over MI_ISP_AE_AVGS cells of
++ * { uAvgR, uAvgG, uAvgB, uAvgY }. So the dimensions lead and luma is lane
++ * 3.
++ *
++ * Both of those were measured before the vendor headers were available,
++ * and the headers agree, so waybeam's `short r, g, b, y` -- 8 bytes a
++ * cell, a 92160-byte struct against a 46088-byte payload -- is not the
++ * layout, and its avgY log line is averaging two cells per sample.
++ *
++ * 128x90 is the payload's maximum, not the live grid -- an SSC30KQ +
++ * GC4653 reports 32x32. The buffer stays sized for the declared 46088
++ * regardless, and the grid actually averaged is whatever AE status
++ * reports.
++ */
++#define I6_ISP_AE_BLK_X 128
++#define I6_ISP_AE_BLK_Y 90
++#define I6_ISP_AE_BLK_MAX (I6_ISP_AE_BLK_X * I6_ISP_AE_BLK_Y)
++#define I6_ISP_AE_CELL_SZ 4
++
++/* Byte lane within a cell. The order is r, g, b, y -- see above. */
++#define I6_ISP_AE_CELL_Y 3
++
++typedef struct {
++    unsigned int blkX;
++    unsigned int blkY;
++    unsigned char cell[I6_ISP_AE_BLK_MAX * I6_ISP_AE_CELL_SZ];
++} i6_isp_ae_hw_stats;
++
++_Static_assert(sizeof(i6_isp_ae_hw_stats) == 46088,
++               "AE HW stats must match the 46088-byte payload the wrapper declares");
++_Static_assert(offsetof(i6_isp_ae_hw_stats, cell) == 8, "AE HW stats cells follow the dimensions");
++
++/*
++ * IQ parameter-init status. MI_ISP_IQ_GetParaInitStatus, command 0x1002,
++ * payload 4 bytes -- a single flag, which is why the nested-struct form
++ * the vendor headers use collapses to this.
++ *
++ * This is the one binding neither divinus nor an ISP tuning guide would
++ * suggest is necessary, and it is the difference between a reliable IQ
++ * load and an intermittent one. The ISP channel initialises
++ * asynchronously *after* MI_VPE_CreateChannel returns, so a bin load
++ * issued immediately gets "IspApiGet channel not created" from the
++ * kernel driver. divinus papers over this with sleep(1) before its load
++ * (media.c:827); polling this flag is the same wait without the guess.
++ */
++typedef struct {
++    int ready;
++} i6_isp_parainit;
++
++/*
++ * Generic per-module IQ/AE/AWB command. Every
++ * MI_ISP_{IQ,AE,AWB}_{Get,Set}<Module> entry point has this signature;
++ * the payload is module-specific and its size is fixed in the wrapper.
++ */
++typedef int (*i6_isp_cmd_fn)(int channel, void *payload);
++
++/*
++ * ================================================================
++ * PAYLOAD SIZES AND MANUAL-BLOCK OFFSETS FOR THE MODULES HAL_ISP DRIVES
++ *
++ * PAYLOAD is the size the board's libmi_isp.so wrapper puts in the
++ * descriptor it hands to _MI_ISP_{Get,Set}IspApiData, which is the length
++ * that gets copied into the caller's buffer -- so it sizes the staging
++ * buffer, and under-declaring it means the library writes past the end.
++ * Read out of the wrapper's own `mov r3, #<size>`, the same way as the
++ * typed calls above.
++ *
++ * That is deliberately not "sizeof the vendor struct". The two agree for
++ * every module here except DEFOG, where the blob declares 28 against a
++ * 4-byte MI_ISP_IQ_DEFOG_TYPE_t -- so the blob wins, because it is what
++ * does the copying.
++ *
++ * MANUAL is offsetof(stManual) for the modules whose payload is
++ * { bEnable, enOpType, stAuto[16], stManual }: writing a level anywhere
++ * else lands in the per-ISO auto array, which both fails to take effect
++ * and corrupts one auto entry.
++ *
++ * The two ROWS lists name the vendor type each row addresses so
++ * tests/abi_iq.c can assert all of this against mi_isp_iq_datatype.h and
++ * mi_isp_3a_datatype.h at once. hal_isp.c expands only the numbers.
++ * ================================================================
++ */
++#define I6_ISP_IQ_BRIGHTNESS_PAYLOAD 76
++#define I6_ISP_IQ_BRIGHTNESS_MANUAL  72
++#define I6_ISP_IQ_CONTRAST_PAYLOAD   76
++#define I6_ISP_IQ_CONTRAST_MANUAL    72
++#define I6_ISP_IQ_SATURATION_PAYLOAD 416
++#define I6_ISP_IQ_SATURATION_MANUAL  392
++#define I6_ISP_IQ_SHARPNESS_PAYLOAD  1268
++#define I6_ISP_IQ_SHARPNESS_MANUAL   1192
++#define I6_ISP_IQ_NRLUMA_PAYLOAD     112
++#define I6_ISP_IQ_NRLUMA_MANUAL      104
++#define I6_ISP_IQ_NR3D_PAYLOAD       1776
++#define I6_ISP_IQ_NR3D_MANUAL        1672
++
++/*
++ * NR3D -- raptor's temper knob, and the one row whose value is written into
++ * stAuto rather than stManual.
++ *
++ * u8TfStr is the temporal denoise strength. Pudding has one strength plus an
++ * extension where Maruko splits luma and chroma, and it is bounded at 64 where
++ * Maruko's TfStrY runs to 127 -- isp_api.xml annotates the Maruko field "64 is
++ * x1 gain", so a ceiling of exactly 64 here is unity and this family publishes
++ * no headroom above it. Every shipped Infinity6E tuning sits at that ceiling,
++ * flat across all sixteen entries, which is what lets one scalar stand for the
++ * run; the knob's whole travel is therefore downward, and that is a property of
++ * the field rather than a choice raptor makes. MdGain is the field that ramps
++ * with gain and it is not this knob -- the vendor SOP calls it a motion scale.
++ *
++ * ENTRY is sizeof(NR3D_PARAM_t) and AUTO is offsetof(stAuto): together the
++ * stride and the base of the sixteen-entry run. 8 + 16 * 104 = 1672 is
++ * stManual and 1776 the payload, which is what MI_ISP_IQ_SetNR3D declares
++ * (mov.w r3, #1776) and what api id 4110 carries in every shipped 6E bin.
++ *
++ * 104 and not the 102 the XML's field list sums to: NR3D_PARAM_t opens with a
++ * u8 followed by a u16, so the struct carries a pad byte after u8MdThd and one
++ * on the tail. Worth stating because the padded reading is not the obvious one
++ * and both readings produce plausible numbers -- decoding the six shipped 6E
++ * tunings packed puts 435..479 field values outside their own declared ranges,
++ * where the aligned reading puts at most one, in the unused manual entry.
++ *
++ * TFSTR is 4 for the same reason, and is named rather than spelled inline
++ * because a field that moves between SoCs is exactly what tests/abi_iq.c
++ * exists to catch.
++ *
++ * The symbol is MI_ISP_IQ_GetNR3D here and MI_ISP_IQ_GetNr3d on Infinity6C.
++ * The vendor capitalises it per family, as with WDR, so a shared table would
++ * resolve one of the two to nothing.
++ */
++#define I6_ISP_IQ_NR3D_AUTO          8
++#define I6_ISP_IQ_NR3D_ENTRY         104
++#define I6_ISP_IQ_NR3D_TFSTR         4
++#define I6_ISP_IQ_NR3D_AUTO_NUM      16
++
++/*
++ * WDR -- raptor's DRC knob; see the Infinity6C header for the shape. The
++ * layout is not Infinity6C's: the entry is 52 bytes rather than 112 and
++ * Strength sits at +43, so nothing here can be poked at the other family's
++ * offset. Derived twice and agreeing: the schema gives 8 + 17*52 = 892 with
++ * the level at 8 + 16*52 + 43 = 883, and the wrapper declares 0x37c = 892.
++ *
++ * The symbol is MI_ISP_IQ_GetWDR here and MI_ISP_IQ_GetWdr on Infinity6C --
++ * the vendor capitalises it differently per family, which a shared table
++ * would otherwise get wrong.
++ */
++#define I6_ISP_IQ_WDR_PAYLOAD        892
++#define I6_ISP_IQ_WDR_MANUAL         840
++#define I6_ISP_IQ_WDR_STRENGTH       43
++
++#define I6_ISP_IQ_DEFOG_PAYLOAD      28
++#define I6_ISP_IQ_GRAY_PAYLOAD       4
++#define I6_ISP_AE_EVCOMP_PAYLOAD     8
++#define I6_ISP_AE_FLICKER_PAYLOAD    4
++
++/* X(row, vendor type) -- payload is { bEnable, enOpType, stAuto[16], stManual }. */
++#define I6_ISP_IQ_AUTOMAN_ROWS(X)                 \
++    X(IQ_BRIGHTNESS, MI_ISP_IQ_BRIGHTNESS_TYPE_t) \
++    X(IQ_CONTRAST,   MI_ISP_IQ_CONTRAST_TYPE_t)   \
++    X(IQ_SATURATION, MI_ISP_IQ_SATURATION_TYPE_t) \
++    X(IQ_SHARPNESS,  MI_ISP_IQ_SHARPNESS_TYPE_t)  \
++    X(IQ_NRLUMA,     MI_ISP_IQ_NRLUMA_TYPE_t)
++
++/* X(row, vendor type) -- no auto/manual split; the field written is at offset 0. */
++#define I6_ISP_IQ_FLAT_ROWS(X)                  \
++    X(IQ_DEFOG,   MI_ISP_IQ_DEFOG_TYPE_t)       \
++    X(IQ_GRAY,    MI_ISP_IQ_COLORTOGRAY_TYPE_t) \
++    X(AE_EVCOMP,  MI_ISP_AE_EV_COMP_TYPE_t)     \
++    X(AE_FLICKER, MI_ISP_AE_FLICKER_TYPE_e)
++
++/*
++ * X(row, vendor type, vendor param type, field, field width, field offset) -- a
++ * run of one field taken across the sixteen gain-indexed stAuto entries, rather
++ * than a single level inside stManual.
++ *
++ * The point of the shape is what it does *not* do: enOpType stays auto, so MI
++ * keeps interpolating the entries by gain and every other field in the module
++ * keeps the curve the tuner gave it. Writing stManual instead would cost all of
++ * it -- NR3D is 1776 bytes of tuning here and its per-gain curves carry the
++ * motion detector, which is where this family's shipped tunings do their work.
++ */
++#define I6_ISP_IQ_GAINRUN_ROWS(X)                                    \
++    X(IQ_NR3D,       MI_ISP_IQ_NR3D_TYPE_t,     NR3D_PARAM_t,        \
++      u8TfStr,       MI_U8,                     I6_ISP_IQ_NR3D_TFSTR)
++
++#endif /* SIGMASTAR_I6_ISP_H */
+diff --git a/sigmastar-headers/infinity6e/i6_rgn.h b/sigmastar-headers/infinity6e/i6_rgn.h
+new file mode 100644
+index 0000000..723f317
+--- /dev/null
++++ b/sigmastar-headers/infinity6e/i6_rgn.h
+@@ -0,0 +1,144 @@
++/*
++ * i6_rgn.h -- MI_RGN (region/overlay) ABI for Infinity6E
++ *
++ * Vendored from divinus (MIT) `src/hal/star/i6_rgn.h`, corroborated
++ * field for field against waybeam's `src/debug_osd.c`. There is **no
++ * MI_RGN chapter in the vendored SSD20X documentation** -- unlike MI_SYS,
++ * MI_VENC, MI_AI and MI_AO, RGN was never part of that doc set -- so
++ * unlike i6_aud.h there is no "semantics from the docs" half here. Both
++ * references are the whole authority, which is exactly why the two traps
++ * below are called out rather than left to be rediscovered.
++ *
++ * TRAP 1: THE MODULE ID IN AttachToChn IS NOT i6_sys_mod.
++ *
++ * MI_RGN_AttachToChn takes what looks like an ordinary i6_sys_bind, but
++ * its `module` field uses **RGN's own private module enum** (see
++ * i6_rgn_mod below): VPE is 0 and VENC is 2. Under i6_sys_mod, 0 is IVE
++ * and 2 is VENC. That is why divinus's region code sets `.module = 0`
++ * while filling in VPE's device and channel -- it reads like a bug and
++ * is not. waybeam documents the same two ids explicitly and warns that
++ * the values come from the device's libmi_rgn build. If attach starts
++ * failing after a vendor library update, look here first.
++ *
++ * TRAP 2: THE PIXEL FORMAT SUPPORT SET IS NOT KNOWN STATICALLY.
++ *
++ * `i6_rgn_pixfmt` below is the full enum the vendor library declares,
++ * but which entries a given chip accepts for an OSD region is decided in
++ * mi_rgn.ko (it maps MI formats onto MHAL ones and rejects the rest with
++ * "ePixelFmt not support"). mhal.ko names ARGB1555, ARGB4444, ARGB8888
++ * and the I4/I8 palettes, but the accepted *OSD* subset could not be
++ * pinned down by disassembly cheaply, and the two references only ever
++ * use ARGB1555 (divinus) and I4 (waybeam) -- neither of which is
++ * evidence about the 32-bit formats. hal_osd.c therefore probes at
++ * create time and keeps whichever format the driver accepts, rather than
++ * this header pretending to know.
++ *
++ * Note ARGB888 is the vendor's spelling of a 32-bit ARGB8888 format; the
++ * name is kept as the SDK has it so the enum ordering stays checkable
++ * against the reference sources.
++ */
++
++#ifndef SIGMASTAR_I6_RGN_H
++#define SIGMASTAR_I6_RGN_H
++
++#include "i6_common.h"
++#include "i6_sys.h"
++
++/*
++ * RGN's private module enum for AttachToChn/DetachFromChn. See TRAP 1.
++ * Only the two ids both references confirm are named; the rest of the
++ * enum is not needed and guessing at it would be fiction.
++ */
++typedef enum {
++    I6_RGN_MOD_VPE = 0,
++    I6_RGN_MOD_VENC = 2,
++} i6_rgn_mod;
++
++typedef enum {
++    I6_RGN_PIXFMT_ARGB1555,
++    I6_RGN_PIXFMT_ARGB4444,
++    I6_RGN_PIXFMT_I2,
++    I6_RGN_PIXFMT_I4,
++    I6_RGN_PIXFMT_I8,
++    I6_RGN_PIXFMT_RGB565,
++    I6_RGN_PIXFMT_ARGB888,
++    I6_RGN_PIXFMT_END
++} i6_rgn_pixfmt;
++
++typedef enum {
++    I6_RGN_TYPE_OSD,
++    I6_RGN_TYPE_COVER,
++    I6_RGN_TYPE_END
++} i6_rgn_type;
++
++typedef struct {
++    unsigned int width;
++    unsigned int height;
++} i6_rgn_size;
++
++typedef struct {
++    i6_rgn_pixfmt pixFmt;
++    i6_rgn_size size;
++    void *data;
++} i6_rgn_bmp;
++
++typedef struct {
++    i6_rgn_type type;
++    i6_rgn_pixfmt pixFmt;
++    i6_rgn_size size;
++} i6_rgn_cnf;
++
++typedef struct {
++    unsigned int layer;
++    i6_rgn_size size;
++    unsigned int color;
++} i6_rgn_cov;
++
++typedef struct {
++    int invColOn;
++    int lowThanThresh;
++    unsigned int lumThresh;
++    unsigned short divWidth;
++    unsigned short divHeight;
++} i6_rgn_inv;
++
++typedef struct {
++    unsigned int layer;
++    int constAlphaOn;
++    union {
++        unsigned char bgFgAlpha[2];
++        unsigned char constAlpha[2];
++    };
++    i6_rgn_inv invert;
++} i6_rgn_osd;
++
++typedef struct {
++    unsigned int x;
++    unsigned int y;
++} i6_rgn_pnt;
++
++typedef struct {
++    int show;
++    i6_rgn_pnt point;
++    union {
++        i6_rgn_cov cover;
++        i6_rgn_osd osd;
++    };
++} i6_rgn_chn;
++
++typedef struct {
++    unsigned char alpha;
++    unsigned char red;
++    unsigned char green;
++    unsigned char blue;
++} i6_rgn_pale;
++
++typedef struct {
++    i6_rgn_pale element[256];
++} i6_rgn_pal;
++
++_Static_assert(sizeof(i6_rgn_cnf) == 16, "i6_rgn_cnf must be type + pixFmt + 2x u32 size");
++_Static_assert(sizeof(i6_rgn_bmp) == 16, "i6_rgn_bmp must be pixFmt + 2x u32 size + pointer");
++_Static_assert(sizeof(i6_rgn_pal) == 1024, "i6_rgn_pal is 256 x 4-byte entries");
++
++#endif /* SIGMASTAR_I6_RGN_H */
+diff --git a/sigmastar-headers/infinity6e/i6_snr.h b/sigmastar-headers/infinity6e/i6_snr.h
+new file mode 100644
+index 0000000..307b7c5
+--- /dev/null
++++ b/sigmastar-headers/infinity6e/i6_snr.h
+@@ -0,0 +1,91 @@
++/*
++ * i6_snr.h -- MI_SNR bindings, Infinity6E
++ *
++ * Vendored from OpenIPC divinus, src/hal/star/i6_snr.h (MIT).
++ * See i6_common.h for why these declarations are vendored rather than derived.
++ *
++ * Note that MI_SNR is entirely index-based: resolutions are queried by count
++ * and index, and no call anywhere in this API names a sensor. The sensor
++ * identity is fixed when sensor_<name>_mipi.ko is insmod'd, so raptor's
++ * sensor "discovery" is a module check plus the geometry queries below --
++ * not the probing the Ingenic backend does.
++ *
++ * Copyright (c) 2024 OpenIPC
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef SIGMASTAR_I6_SNR_H
++#define SIGMASTAR_I6_SNR_H
++
++#include "i6_common.h"
++
++typedef enum {
++    I6_SNR_HWHDR_NONE,
++    I6_SNR_HWHDR_SONY_DOL,
++    I6_SNR_HWHDR_DCG,
++    I6_SNR_HWHDR_EMBED_RAW8,
++    I6_SNR_HWHDR_EMBED_RAW10,
++    I6_SNR_HWHDR_EMBED_RAW12,
++    I6_SNR_HWHDR_EMBED_RAW16
++} i6_snr_hwhdr;
++
++typedef struct {
++    unsigned int laneCnt;
++    unsigned int rgbFmtOn;
++    i6_common_input input;
++    unsigned int hsyncMode;
++    unsigned int sampDelay;
++    i6_snr_hwhdr hwHdr;
++    unsigned int virtChn;
++    unsigned int packType[2];
++} i6_snr_mipi;
++
++typedef struct {
++    unsigned int multplxNum;
++    i6_common_sync sync;
++    i6_common_edge edge;
++    int bitswap;
++} i6_snr_bt656;
++
++typedef struct {
++    i6_common_sync sync;
++} i6_snr_par;
++
++typedef union {
++    i6_snr_par parallel;
++    i6_snr_mipi mipi;
++    i6_snr_bt656 bt656;
++} i6_snr_intfattr;
++
++typedef struct {
++    unsigned int planeCnt;
++    i6_common_intf intf;
++    i6_common_hdr hdr;
++    i6_snr_intfattr intfAttr;
++    char earlyInit;
++} i6_snr_pad;
++
++typedef struct {
++    unsigned int planeId;
++    char sensName[32];
++    i6_common_rect capt;
++    i6_common_bayer bayer;
++    i6_common_prec precision;
++    int hdrSrc;
++    // Value in microseconds
++    unsigned int shutter;
++    // Value multiplied by 1024
++    unsigned int sensGain;
++    unsigned int compGain;
++    i6_common_pixfmt pixFmt;
++} i6_snr_plane;
++
++typedef struct {
++    i6_common_rect crop;
++    i6_common_dim output;
++    unsigned int maxFps;
++    unsigned int minFps;
++    char desc[32];
++} __attribute__((packed, aligned(4))) i6_snr_res;
++
++#endif /* SIGMASTAR_I6_SNR_H */
+diff --git a/sigmastar-headers/infinity6e/i6_sys.h b/sigmastar-headers/infinity6e/i6_sys.h
+new file mode 100644
+index 0000000..8926487
+--- /dev/null
++++ b/sigmastar-headers/infinity6e/i6_sys.h
+@@ -0,0 +1,198 @@
++/*
++ * i6_sys.h -- MI_SYS bindings, Infinity6E
++ *
++ * Vendored from OpenIPC divinus, src/hal/star/i6_sys.h (MIT).
++ * See i6_common.h for why these declarations are vendored rather than derived.
++ *
++ * libcam_os_wrapper is loaded first and RTLD_GLOBAL: every libmi_* depends
++ * on it, and its absence is not fatal here on purpose -- some firmware
++ * builds satisfy those symbols another way, and failing the whole load for a
++ * library that may be unnecessary would be worse than letting the libmi_sys
++ * dlopen report the real problem.
++ *
++ * The frame-buffer entry points (MI_SYS_ChnOutputPortGetBuf / PutBuf,
++ * MI_SYS_GetFd / CloseFd, MI_SYS_FlushInvCache, MI_SYS_Va2Pa) have no divinus
++ * counterpart -- it reads encoded streams out of VENC and never touches a raw
++ * frame -- so their types came from waybeam_venc, which does read VIF/VPE output
++ * on this silicon, and are now checked against the vendor headers.
++ *
++ * Copyright (c) 2024 OpenIPC
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef SIGMASTAR_I6_SYS_H
++#define SIGMASTAR_I6_SYS_H
++
++#include "i6_common.h"
++
++/* i6_sys_bufinfo declares endOfFrame as bool */
++#include <stdbool.h>
++
++#define I6_SYS_API "1.0"
++
++typedef enum {
++    I6_SYS_LINK_FRAMEBASE = 0x1,
++    I6_SYS_LINK_LOWLATENCY = 0x2,
++    I6_SYS_LINK_REALTIME = 0x4,
++    I6_SYS_LINK_AUTOSYNC = 0x8,
++    I6_SYS_LINK_RING = 0x10
++} i6_sys_link;
++
++typedef enum {
++    I6_SYS_MOD_IVE,
++    I6_SYS_MOD_VDF,
++    I6_SYS_MOD_VENC,
++    I6_SYS_MOD_RGN,
++    I6_SYS_MOD_AI,
++    I6_SYS_MOD_AO,
++    I6_SYS_MOD_VIF,
++    I6_SYS_MOD_VPE,
++    I6_SYS_MOD_VDEC,
++    I6_SYS_MOD_SYS,
++    I6_SYS_MOD_FB,
++    I6_SYS_MOD_HDMI,
++    I6_SYS_MOD_DIVP,
++    I6_SYS_MOD_GFX,
++    I6_SYS_MOD_VDISP,
++    I6_SYS_MOD_DISP,
++    I6_SYS_MOD_OS,
++    I6_SYS_MOD_IAE,
++    I6_SYS_MOD_MD,
++    I6_SYS_MOD_OD,
++    I6_SYS_MOD_SHADOW,
++    I6_SYS_MOD_WARP,
++    I6_SYS_MOD_UAC,
++    I6_SYS_MOD_LDC,
++    I6_SYS_MOD_SD,
++    I6_SYS_MOD_PANEL,
++    I6_SYS_MOD_CIPHER,
++    I6_SYS_MOD_SNR,
++    I6_SYS_MOD_WLAN,
++    I6_SYS_MOD_IPU,
++    I6_SYS_MOD_MIPITX,
++    I6_SYS_MOD_GYRO,
++    I6_SYS_MOD_JPD,
++    I6_SYS_MOD_ISP,
++    I6_SYS_MOD_SCL,
++    I6_SYS_MOD_WBC,
++    I6_SYS_MOD_DSP,
++    I6_SYS_MOD_PCIE,
++    I6_SYS_MOD_DUMMY,
++    I6_SYS_MOD_NIR,
++    I6_SYS_MOD_DPU,
++    I6_SYS_MOD_END,
++} i6_sys_mod;
++
++typedef struct {
++    i6_sys_mod module;
++    unsigned int device;
++    unsigned int channel;
++    unsigned int port;
++} i6_sys_bind;
++
++typedef struct {
++    unsigned char version[128];
++} i6_sys_ver;
++
++/*
++ * Output-port frame buffers -- MI_SYS_BufInfo_t and the union it carries.
++ *
++ * Every header offset below matches the vendor struct field for field, and
++ * the union's largest arm is MI_SYS_FrameDataMultiPlane_t: MI_U8 plus four
++ * 56-byte sub-planes, 232 bytes. MI_BOOL is a 1-byte C99 bool, which is
++ * what puts the union at offset 32.
++ *
++ * Reserving 512 for the union is deliberate over-allocation. 0601's
++ * MI_SYS_BufInfo_t is 264 bytes and the board's libmi_sys.so copies 272
++ * out -- 264 + the trailing u8CusFlag, aligned, so the board's MI_SYS is
++ * very likely newer than the SDK drop these were checked against. Sizing
++ * for the largest thing either could be costs nothing on a stack frame
++ * this code allocates once, and every field read sits in the first 136
++ * bytes regardless.
++ *
++ * The assertions pin the copy size and the offsets the kernel writes
++ * through, so a later edit cannot quietly shrink this below what MI_SYS
++ * memcpy's into it.
++ */
++typedef enum {
++    I6_SYS_BUFDATA_RAW = 0,
++    I6_SYS_BUFDATA_FRAME = 1,
++    I6_SYS_BUFDATA_META = 2,
++    /* Real, and the arm it selects is what makes MI_SYS_BufInfo_t as large
++     * as it is -- see the 272-byte note above. Nothing on a single-plane
++     * path produces one, but with _END sitting at 3 such a frame reads as
++     * the terminator rather than as a type. */
++    I6_SYS_BUFDATA_MULTIPLANE = 3,
++    I6_SYS_BUFDATA_END
++} i6_sys_bufdata;
++
++typedef struct {
++    int tileMode;
++    i6_common_pixfmt pixFmt;
++    i6_common_compr compress;
++    int scanMode;
++    int fieldType;
++    int layoutType;
++    unsigned short width;
++    unsigned short height;
++    void *virAddr[3];
++    unsigned long long phyAddr[3];
++    unsigned int stride[3];
++    unsigned int bufSize;
++    unsigned short ringStartLine;
++    unsigned short ringTotalHeight;
++    struct {
++        int type;
++        union {
++            unsigned int globalGradient;
++        } attr;
++    } ispInfo;
++    i6_common_rect crop;
++} i6_sys_frame;
++
++typedef struct {
++    void *virAddr;
++    unsigned long long phyAddr;
++    unsigned int bufSize;
++    unsigned int contentSize;
++    bool endOfFrame;
++    unsigned long long seqNum;
++} i6_sys_raw;
++
++typedef struct {
++    void *virAddr;
++    unsigned long long phyAddr;
++    unsigned int size;
++    unsigned int extraData;
++    unsigned int fromModule;
++} i6_sys_meta;
++
++typedef struct {
++    unsigned long long pts;
++    unsigned long long sidebandMsg;
++    i6_sys_bufdata bufType;
++    bool endOfStream;
++    bool usrBuf;
++    unsigned int seqNum;
++    bool drop;
++    union {
++        i6_sys_frame frame;
++        i6_sys_raw raw;
++        i6_sys_meta meta;
++        unsigned char reserved[512];
++    };
++    unsigned char cusFlag;
++} i6_sys_bufinfo;
++
++/* The port descriptor MI memcpy's out of argument 1 -- 16 bytes, and the probe
++ * confirmed sizeof(i6_sys_bind) == 16 on hardware. */
++_Static_assert(sizeof(i6_sys_bind) == 16, "i6_sys_bind must match the 16 bytes GetBuf copies");
++_Static_assert(sizeof(i6_sys_bufinfo) >= 272,
++    "i6_sys_bufinfo must not be smaller than the 272 bytes MI_SYS copies into it");
++_Static_assert(offsetof(i6_sys_bufinfo, seqNum) == 24, "i6_sys_bufinfo header layout drifted");
++_Static_assert(offsetof(i6_sys_bufinfo, frame) == 32, "i6_sys_bufinfo union must start at 32");
++_Static_assert(offsetof(i6_sys_frame, virAddr) == 28, "i6_sys_frame plane pointers drifted");
++_Static_assert(offsetof(i6_sys_frame, phyAddr) == 40, "i6_sys_frame phyAddr must be 8-aligned");
++_Static_assert(offsetof(i6_sys_frame, stride) == 64, "i6_sys_frame stride drifted");
++
++#endif /* SIGMASTAR_I6_SYS_H */
+diff --git a/sigmastar-headers/infinity6e/i6_venc.h b/sigmastar-headers/infinity6e/i6_venc.h
+new file mode 100644
+index 0000000..6201c15
+--- /dev/null
++++ b/sigmastar-headers/infinity6e/i6_venc.h
+@@ -0,0 +1,322 @@
++/*
++ * i6_venc.h -- MI_VENC bindings, Infinity6E
++ *
++ * Vendored from OpenIPC divinus, src/hal/star/i6_venc.h (MIT).
++ * See i6_common.h for why these declarations are vendored rather than derived.
++ *
++ * Rate-control mode numbering is read from the driver, not from upstream.
++ * _MI_VENC_IMPL_CheckRcMode, inlined into MI_VENC_IMPL_CreateChn, range-checks
++ * the mode per codec, and both shipped mi_venc.ko builds agree exactly:
++ *
++ *     eType 2 (H.264)   mode-1 <= 4    ->  1..5
++ *     eType 3 (H.265)   mode-8 <= 3    ->  8..11
++ *
++ * Five H.264 slots, then MJPEG's two, then four H.265 slots. That is what the
++ * enum below spells. The version this replaces had the H.264 block as
++ * CBR/VBR/FIXQP/AVBR/UBR, which put FIXQP and AVBR one low: measured on an
++ * SSC333, asking for AVBR gave a channel the driver reported as FixQP, and
++ * asking for FIXQP landed on slot 3 -- which is ABR, and which this part does
++ * not implement. H.265 was unaffected because its block starts at a fixed 8
++ * and holds four modes either way.
++ *
++ * There are no UBR modes here. The slot upstream calls H264UBR is AVBR, and
++ * H265UBR at 12 is outside what the driver accepts at all.
++ *
++ * The I6OG_ enum below is the original Infinity6 (series 0xEF) numbering,
++ * kept only to stay diffable against upstream, which supports both. Nothing
++ * in this backend uses it.
++ *
++ * I6_VENC_CHN_NUM below is where hal_caps.c's INFINITY6E max_enc_channels
++ * comes from -- 9 addressable channels, capped to RSS_MAX_ENC_CHANNELS.
++ *
++ * Copyright (c) 2024 OpenIPC
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef SIGMASTAR_I6_VENC_H
++#define SIGMASTAR_I6_VENC_H
++
++#include "i6_common.h"
++
++#define I6_VENC_CHN_NUM 9
++
++typedef enum {
++    I6_VENC_CODEC_H264 = 2,
++    I6_VENC_CODEC_H265,
++    I6_VENC_CODEC_MJPG,
++    I6_VENC_CODEC_END
++} i6_venc_codec;
++
++typedef enum {
++    I6_VENC_NALU_H264_PSLICE = 1,
++    I6_VENC_NALU_H264_ISLICE = 5,
++    I6_VENC_NALU_H264_SEI,
++    I6_VENC_NALU_H264_SPS,
++    I6_VENC_NALU_H264_PPS,
++    I6_VENC_NALU_H264_IPSLICE,
++    I6_VENC_NALU_H264_PREFIX = 14,
++    I6_VENC_NALU_H264_END
++} i6_venc_nalu_h264;
++
++typedef enum {
++    I6_VENC_NALU_H265_PSLICE = 1,
++    I6_VENC_NALU_H265_ISLICE = 19,
++    I6_VENC_NALU_H265_VPS = 32,
++    I6_VENC_NALU_H265_SPS,
++    I6_VENC_NALU_H265_PPS,
++    I6_VENC_NALU_H265_SEI = 39,
++    I6_VENC_NALU_H265_END
++} i6_venc_nalu_h265;
++
++typedef enum {
++    I6_VENC_NALU_MJPG_ECS = 5,
++    I6_VENC_NALU_MJPG_APP,
++    I6_VENC_NALU_MJPG_VDO,
++    I6_VENC_NALU_MJPG_PIC,
++    I6_VENC_NALU_MJPG_END
++} i6_venc_nalu_mjpg;
++
++typedef enum {
++    I6_VENC_SRC_CONF_NORMAL,
++    I6_VENC_SRC_CONF_RING_ONE,
++    I6_VENC_SRC_CONF_RING_HALF,
++    I6_VENC_SRC_CONF_END
++} i6_venc_src_conf;
++
++typedef enum {
++    I6_VENC_RATEMODE_H264CBR = 1,
++    I6_VENC_RATEMODE_H264VBR,
++    /* Slot 3 is ABR, not a codec raptor maps anything to. Named so the two
++     * that follow it sit at the numbers the driver reads. */
++    I6_VENC_RATEMODE_H264ABR,
++    I6_VENC_RATEMODE_H264FIXQP,
++    I6_VENC_RATEMODE_H264AVBR,
++    I6_VENC_RATEMODE_MJPGCBR,
++    I6_VENC_RATEMODE_MJPGFIXQP,
++    I6_VENC_RATEMODE_H265CBR,
++    I6_VENC_RATEMODE_H265VBR,
++    I6_VENC_RATEMODE_H265FIXQP,
++    I6_VENC_RATEMODE_H265AVBR,
++    I6_VENC_RATEMODE_END
++} i6_venc_ratemode;
++
++typedef enum {
++    I6OG_VENC_RATEMODE_H264CBR = 1,
++    I6OG_VENC_RATEMODE_H264VBR,
++    I6OG_VENC_RATEMODE_H264QP,
++    I6OG_VENC_RATEMODE_H264AVBR,
++    I6OG_VENC_RATEMODE_MJPGCBR,
++    I6OG_VENC_RATEMODE_MJPGQP,
++    I6OG_VENC_RATEMODE_H265CBR,
++    I6OG_VENC_RATEMODE_H265VBR,
++    I6OG_VENC_RATEMODE_H265QP,
++    I6OG_VENC_RATEMODE_H265AVBR,
++    I6OG_VENC_RATEMODE_END
++} i6og_venc_ratemode;
++
++typedef struct {
++    unsigned int maxWidth;
++    unsigned int maxHeight;
++    unsigned int bufSize;
++    unsigned int profile;
++    char byFrame;
++    unsigned int width;
++    unsigned int height;
++    unsigned int bFrameNum;
++    unsigned int refNum;
++} i6_venc_attr_h26x;
++
++typedef struct {
++    unsigned int maxWidth;
++    unsigned int maxHeight;
++    unsigned int bufSize;
++    char byFrame;
++    unsigned int width;
++    unsigned int height;
++    char dcfThumbs;
++    unsigned int markPerRow;
++} i6_venc_attr_mjpg;
++
++typedef struct {
++    i6_venc_codec codec;
++    union {
++        i6_venc_attr_h26x h264;
++        i6_venc_attr_mjpg mjpg;
++        i6_venc_attr_h26x h265;
++    };
++} i6_venc_attrib;
++
++typedef struct {
++    unsigned int gop;
++    unsigned int statTime;
++    unsigned int fpsNum;
++    unsigned int fpsDen;
++    unsigned int bitrate;
++    unsigned int avgLvl;
++} i6_venc_rate_h26xcbr;
++
++typedef struct {
++    unsigned int gop;
++    unsigned int statTime;
++    unsigned int fpsNum;
++    unsigned int fpsDen;
++    unsigned int maxBitrate;
++    unsigned int maxQual;
++    unsigned int minQual;
++} i6_venc_rate_h26xvbr;
++
++typedef struct {
++    unsigned int gop;
++    unsigned int fpsNum;
++    unsigned int fpsDen;
++    unsigned int interQual;
++    unsigned int predQual;
++} i6_venc_rate_h26xqp;
++
++typedef struct {
++    unsigned int bitrate;
++    unsigned int fpsNum;
++    unsigned int fpsDen;
++} i6_venc_rate_mjpgcbr;
++
++typedef struct {
++    unsigned int fpsNum;
++    unsigned int fpsDen;
++    unsigned int quality;
++} i6_venc_rate_mjpgqp;
++
++typedef struct {
++    i6_venc_ratemode mode;
++    union {
++        i6_venc_rate_h26xcbr h264Cbr;
++        i6_venc_rate_h26xvbr h264Vbr;
++        i6_venc_rate_h26xqp h264Qp;
++        i6_venc_rate_h26xvbr h264Avbr;
++        i6_venc_rate_mjpgcbr mjpgCbr;
++        i6_venc_rate_mjpgqp mjpgQp;
++        i6_venc_rate_h26xcbr h265Cbr;
++        i6_venc_rate_h26xvbr h265Vbr;
++        i6_venc_rate_h26xqp h265Qp;
++        i6_venc_rate_h26xvbr h265Avbr;
++    };
++} i6_venc_rate;
++
++/* No trailing pointer: MI_VENC_RcAttr_t is the mode plus the union, 32
++ * bytes. divinus's extra void *extend made it 36 and i6_venc_chn 76 against
++ * the vendor's 72. Benign only because stRcAttr is the last member of
++ * MI_VENC_ChnAttr_t, so nothing after it was displaced. */
++_Static_assert(sizeof(i6_venc_rate) == 32, "MI_VENC_RcAttr_t is 32 bytes");
++
++typedef struct {
++    i6_venc_attrib attrib;
++    i6_venc_rate rate;
++} i6_venc_chn;
++
++_Static_assert(sizeof(i6_venc_chn) == 72, "MI_VENC_ChnAttr_t is 72 bytes");
++
++typedef struct {
++    unsigned int quality;
++    unsigned char qtLuma[64];
++    unsigned char qtChroma[64];
++    unsigned int mcuPerEcs;
++} i6_venc_jpg;
++
++typedef union {
++    i6_venc_nalu_h264 h264Nalu;
++    i6_venc_nalu_mjpg mjpgNalu;
++    i6_venc_nalu_h265 h265Nalu;
++} i6_venc_nalu;
++
++typedef struct {
++    i6_venc_nalu packType;
++    unsigned int offset;
++    unsigned int length;
++} i6_venc_packinfo;
++
++/* A trailing u32SliceId here is MI 3.0 (it appears in SSC377's
++ * mi_venc_datatype.h and in neither Infinity6E drop). Both divinus and
++ * waybeam carry it, because both are multi-chip; that is why their
++ * agreement is not evidence for this struct. At 16 bytes rather than 12 a
++ * consumer walks packetInfo[] at the wrong stride and reads a neighbouring
++ * offset or length as a NAL type, and i6_venc_pack inherits the error. */
++_Static_assert(sizeof(i6_venc_packinfo) == 12,
++               "i6_venc_packinfo is 12 bytes; a u32SliceId here is MI 3.0");
++
++typedef struct {
++    unsigned long long addr;
++    unsigned char *data;
++    unsigned int length;
++    unsigned long long timestamp;
++    char endFrame;
++    i6_venc_nalu naluType;
++    unsigned int offset;
++    unsigned int packNum;
++    i6_venc_packinfo packetInfo[8];
++} i6_venc_pack;
++
++_Static_assert(sizeof(i6_venc_pack) == 136, "MI_VENC_Pack_t is 136 bytes");
++
++typedef struct {
++    unsigned int leftPics;
++    unsigned int leftBytes;
++    unsigned int leftFrames;
++    unsigned int leftMillis;
++    unsigned int curPacks;
++    unsigned int leftRecvPics;
++    unsigned int leftEncPics;
++    unsigned int fpsNum;
++    unsigned int fpsDen;
++    unsigned int bitrate;
++} i6_venc_stat;
++
++typedef struct {
++    unsigned int size;
++    unsigned int skipMb;
++    unsigned int ipcmMb;
++    unsigned int iMb16x8;
++    unsigned int iMb16x16;
++    unsigned int iMb8x16;
++    unsigned int iMb8x8;
++    unsigned int pMb16;
++    unsigned int pMb8;
++    unsigned int pMb4;
++    unsigned int refSliceType;
++    unsigned int refType;
++    unsigned int updAttrCnt;
++    unsigned int startQual;
++} i6_venc_strminfo_h264;
++
++typedef struct {
++    unsigned int size;
++    unsigned int iCu64x64;
++    unsigned int iCu32x32;
++    unsigned int iCu16x16;
++    unsigned int iCu8x8;
++    unsigned int pCu32x32;
++    unsigned int pCu16x16;
++    unsigned int pCu8x8;
++    unsigned int pCu4x4;
++    unsigned int refType;
++    unsigned int updAttrCnt;
++    unsigned int startQual;
++} i6_venc_strminfo_h265;
++
++typedef struct {
++    unsigned int size;
++    unsigned int updAttrCnt;
++    unsigned int quality;
++} i6_venc_strminfo_mjpg;
++
++typedef struct {
++    i6_venc_pack *packet;
++    unsigned int count;
++    unsigned int sequence;
++    int handle;
++    union {
++        i6_venc_strminfo_h264 h264Info;
++        i6_venc_strminfo_mjpg mjpgInfo;
++        i6_venc_strminfo_h265 h265Info;
++    };
++} i6_venc_strm;
++
++#endif /* SIGMASTAR_I6_VENC_H */
+diff --git a/sigmastar-headers/infinity6e/i6_vif.h b/sigmastar-headers/infinity6e/i6_vif.h
+new file mode 100644
+index 0000000..1b2e7a8
+--- /dev/null
++++ b/sigmastar-headers/infinity6e/i6_vif.h
+@@ -0,0 +1,85 @@
++/*
++ * i6_vif.h -- MI_VIF bindings, Infinity6E
++ *
++ * Vendored from OpenIPC divinus, src/hal/star/i6_vif.h (MIT).
++ * See i6_common.h for why these declarations are vendored rather than derived.
++ *
++ * VIF is the sensor-facing capture interface: a device carries the interface
++ * type and sync polarity, its channel ports carry crop and destination
++ * geometry. It has no Ingenic counterpart -- IMP folds this into
++ * IMP_ISP_AddSensor -- which is the main reason the MI backend is a separate
++ * translation unit rather than more #ifdefs in src/hal_common.c.
++ *
++ * Copyright (c) 2024 OpenIPC
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef SIGMASTAR_I6_VIF_H
++#define SIGMASTAR_I6_VIF_H
++
++#include "i6_common.h"
++
++typedef enum {
++    I6_VIF_FRATE_FULL,
++    I6_VIF_FRATE_HALF,
++    I6_VIF_FRATE_QUART,
++    I6_VIF_FRATE_OCTANT,
++    I6_VIF_FRATE_3QUARTS,
++    I6_VIF_FRATE_END
++} i6_vif_frate;
++
++typedef enum {
++    I6_VIF_WORK_1MULTIPLEX,
++    I6_VIF_WORK_2MULTIPLEX,
++    I6_VIF_WORK_4MULTIPLEX,
++    I6_VIF_WORK_RGB_REALTIME,
++    I6_VIF_WORK_RGB_FRAME,
++    I6_VIF_WORK_END
++} i6_vif_work;
++
++typedef struct {
++    i6_common_intf intf;
++    i6_vif_work work;
++    i6_common_hdr hdr;
++    i6_common_edge edge;
++    i6_common_input input;
++    char bitswap;
++    i6_common_sync sync;
++    /*
++     * MI_VIF_DevAttr_t.u32DevStitchMask, "multi vif dev bitmask by
++     * MI_VIF_DevId_e", at +48 in a 52-byte struct. Set it to
++     * E_MI_VIF_DEVICE_ID0 = 1.
++     *
++     * Omitting it does not fail loudly, which is why it is called out
++     * rather than simply declared. The vendor reads a word of the caller's
++     * stack frame and passes it to the driver as a device bitmap,
++     * deterministically for a given binary -- one stack layout leaves the 1
++     * the driver wants, another leaves a fragment of the sensor-name string
++     * (0x36346367, "gc46"), and VIF then never syncs: dmesg loops on
++     * _MI_VIF_EnqueueOutputTaskDev "layout type 2, bindmode 4 not sync err"
++     * and no stream is produced. Hence the asserts below rather than trust.
++     */
++    unsigned int multidevmap;
++} i6_vif_dev;
++
++_Static_assert(sizeof(i6_vif_dev) == 52, "i6_vif_dev must match the 52 bytes MI_VIF_SetDevAttr copies");
++_Static_assert(offsetof(i6_vif_dev, multidevmap) == 48, "u32MultiDevMap sits at +48; see the comment above");
++
++typedef struct {
++    i6_common_rect capt;
++    i6_common_dim dest;
++    // Values 0-3 correspond to No, Top, Bottom, Both
++    int field;
++    int interlaceOn;
++    i6_common_pixfmt pixFmt;
++    i6_vif_frate frate;
++    unsigned int frameLineCnt;
++} i6_vif_port;
++
++/* Checked the same way as i6_vif_dev above, since a short struct here would
++ * fail identically: MI_VIF_SetChnPortAttr copies 2 x 16 bytes and its ioctl
++ * payload is 40, i.e. 8 bytes of channel and port plus these 32. This one was
++ * already the right size -- the assert is here so it stays that way. */
++_Static_assert(sizeof(i6_vif_port) == 32, "i6_vif_port must match the 32 bytes MI_VIF_SetChnPortAttr copies");
++
++#endif /* SIGMASTAR_I6_VIF_H */
+diff --git a/sigmastar-headers/infinity6e/i6_vpe.h b/sigmastar-headers/infinity6e/i6_vpe.h
+new file mode 100644
+index 0000000..412a306
+--- /dev/null
++++ b/sigmastar-headers/infinity6e/i6_vpe.h
+@@ -0,0 +1,224 @@
++/*
++ * i6_vpe.h -- MI_VPE bindings, Infinity6E
++ *
++ * Vendored from OpenIPC divinus, src/hal/star/i6_vpe.h (MIT).
++ * See i6_common.h for why these declarations are vendored rather than derived.
++ *
++ * IMPORTANT -- two channel/param layouts, and the family picks. divinus is
++ * right about this (i6_hal.c:302-345, `if (series == 0xF1)`): Infinity6E takes
++ * the longer i6e_ structs, Infinity6B0 the shorter i6_ ones, for BOTH
++ * MI_VPE_CreateChannel and MI_VPE_SetChannelParam.
++ *
++ * Do not settle this from the vendor SDK headers. ssc335 (Ispahan/6B0),
++ * ssc336q (Pudding/6E) and ssc377 (Maruko/6C) all declare the SHORT
++ * MI_VPE_ChannelPara_t, with eHDRType straight after stPqParam -- and that is
++ * simply not what the shipped libmi_vpe.so does on 6E. The library is the
++ * ground truth because it never interprets the struct: MI_VPE_SetChannelParam
++ * memcpys it whole into an ioctl buffer, so the copy length IS the ABI.
++ *
++ *   6E   (ssc30kq, libmi_vpe.so dc127daf)  memset 104, memcpy 100
++ *                                          = sizeof(i6e_vpe_para), 16+72+4+4+4
++ *   6B0  (ssc333,  libmi_vpe.so 970fcb10)  memset  32, memcpy  28
++ *                                          = sizeof(i6_vpe_para),  16+4+4+4
++ *
++ * So e3DNRLevel is at +92 on 6E and +20 on 6B0, and a backend serving both
++ * must choose per platform -- star_state.h does, via star_vpe_para.
++ *
++ * What handing 6B0 the i6e_ form cost, measured on an SSC333 at 2304x1296:
++ * its libmi_vpe.so copied the first 28 bytes of a 100-byte struct, so
++ * e3DNRLevel came out of the zeroed LDC block, MhalCameraOpen logged
++ * "3DNR = 0", no DNR reference frame was allocated, and every NR3D value in
++ * the tuning binary was inert because the engine never ran. On 6E the same
++ * code has always been correct -- .229 shows DNR_INFO0 at 0x5a0000, the
++ * level-2 signature at 1440 rows.
++ *
++ * Copyright (c) 2024 OpenIPC
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef SIGMASTAR_I6_VPE_H
++#define SIGMASTAR_I6_VPE_H
++
++#include "i6_common.h"
++
++typedef enum {
++    I6_VPE_MODE_INVALID,
++    I6_VPE_MODE_DVR = 0x1,
++    I6_VPE_MODE_CAM_TOP = 0x2,
++    I6_VPE_MODE_CAM_BOTTOM = 0x4,
++    I6_VPE_MODE_CAM = I6_VPE_MODE_CAM_TOP | I6_VPE_MODE_CAM_BOTTOM,
++    I6_VPE_MODE_REALTIME_TOP = 0x8,
++    I6_VPE_MODE_REALTIME_BOTTOM = 0x10,
++    I6_VPE_MODE_REALTIME = I6_VPE_MODE_REALTIME_TOP | I6_VPE_MODE_REALTIME_BOTTOM,
++    I6_VPE_MODE_END
++} i6_vpe_mode;
++
++/*
++ * MI_VPE_SensorChannel_e. A bitmask, not an index: the 2021-09-02 drop
++ * numbered these sequentially and the 2022-06-01 drop made them bits to
++ * support multi-sensor stitch, moving ID2 from 3 to 4 and ID3 from 4 to 8.
++ * ID0 and ID1 happen to be the same either way.
++ */
++typedef enum {
++    I6_VPE_SENS_INVALID = 0,
++    I6_VPE_SENS_ID0 = 0x1,
++    I6_VPE_SENS_ID1 = 0x2,
++    I6_VPE_SENS_ID2 = 0x4,
++    I6_VPE_SENS_ID3 = 0x8,
++    I6_VPE_SENS_ID4 = 0x10,
++    I6_VPE_SENS_ID5 = 0x20,
++    I6_VPE_SENS_ID6 = 0x40,
++    I6_VPE_SENS_ID7 = 0x80,
++    I6_VPE_SENS_END,
++} i6_vpe_sens;
++
++typedef struct {
++    unsigned int rev;
++    unsigned int size;
++    unsigned char data[64];
++} i6_vpe_iqver;
++
++typedef struct {
++    int mode;
++    char bypassOn;
++    char proj3x3On;
++    int proj3x3[9];
++    unsigned short userSliceNum;
++    unsigned int focalLengthX;
++    unsigned int focalLengthY;
++    void *configAddr;
++    unsigned int configSize;
++    int mapType;
++    union {
++        struct {
++            void *xMapAddr, *yMapAddr;
++            unsigned int xMapSize, yMapSize;
++        } dispInfo;
++        struct {
++            void *calibPolyBinAddr;
++            unsigned int calibPolyBinSize;
++        } calibInfo;
++    };
++} i6e_vpe_ildc;
++
++/* MI_VPE_LdcInitPara_t is 84 bytes and has no trailing bEnLdc of its own --
++ * i6e_vpe_chn carries that, immediately after this struct. A duplicate here
++ * pushes the channel attr's own bEnLdc and u32ChnPortMode 4 bytes late, so
++ * MI_VPE_CreateChannel reads bEnLdc out of this struct's tail and never sees
++ * chnPort at all. Zero-initialised callers do not notice; enabling LDC or
++ * setting a channel port mode would look like the SDK ignoring the request. */
++_Static_assert(sizeof(i6e_vpe_ildc) == 84, "MI_VPE_LdcInitPara_t is 84 bytes");
++
++typedef struct {
++    char bypassOn;
++    char proj3x3On;
++    int proj3x3[9];
++    unsigned int focalLengthX;
++    unsigned int focalLengthY;
++    void *configAddr;
++    unsigned int configSize;
++    union {
++        struct {
++            void *xMapAddr, *yMapAddr;
++            unsigned int xMapSize, yMapSize;
++        } dispInfo;
++        struct {
++            void *calibPolyBinAddr;
++            unsigned int calibPolyBinSize;
++        } calibInfo;
++    };
++} i6e_vpe_ldc;
++
++typedef struct {
++    i6_common_dim capt;
++    i6_common_pixfmt pixFmt;
++    i6_common_hdr hdr;
++    i6_vpe_sens sensor;
++    char noiseRedOn;
++    char edgeOn;
++    char edgeSmoothOn;
++    char contrastOn;
++    char invertOn;
++    char rotateOn;
++    i6_vpe_mode mode;
++    /*
++     * MI_VPE_ChannelAttr_t.tIspInitPara, not a version string: a 64-byte
++     * blob VPE forwards to the ISP as early-init sensor state -- first
++     * frames' fps, shutter, gains and AWB gains. Zeroed here, which is the
++     * "no opinion" value.
++     */
++    i6_vpe_iqver iqparam;
++    i6e_vpe_ildc lensInit;
++    char lensAdjOn;
++    unsigned int chnPort;
++} i6e_vpe_chn;
++
++_Static_assert(sizeof(i6e_vpe_chn) == 192, "MI_VPE_ChannelAttr_t is 192 bytes");
++_Static_assert(offsetof(i6e_vpe_chn, lensAdjOn) == 184, "bEnLdc sits at +184");
++_Static_assert(offsetof(i6e_vpe_chn, chnPort) == 188, "u32ChnPortMode sits at +188");
++
++typedef struct {
++    i6_common_dim capt;
++    i6_common_pixfmt pixFmt;
++    i6_common_hdr hdr;
++    i6_vpe_sens sensor;
++    char noiseRedOn;
++    char edgeOn;
++    char edgeSmoothOn;
++    char contrastOn;
++    char invertOn;
++    char rotateOn;
++    i6_vpe_mode mode;
++    i6_vpe_iqver iqparam;
++    char lensAdjOn;
++    unsigned int chnPort;
++} i6_vpe_chn;
++
++/* MI_VPE_ChannelPara_t as Infinity6E's libmi_vpe.so reads it: 100 bytes,
++ * level3DNR at +92. Infinity6B0 wants i6_vpe_para instead -- see above. */
++typedef struct {
++    char reserved[16];
++    i6e_vpe_ldc lensAdj;
++    i6_common_hdr hdr;
++    // Accepts values from 0-7
++    int level3DNR;
++    char mirror;
++    char flip;
++    char reserved2;
++    char lensAdjOn;
++} i6e_vpe_para;
++
++typedef struct {
++    char reserved[16];
++    i6_common_hdr hdr;
++    // Accepts values from 0-7
++    int level3DNR;
++    char mirror;
++    char flip;
++    char reserved2;
++    char lensAdjOn;
++} i6_vpe_para;
++
++/*
++ * reserved[16] is MI_VPE_PqParam_t (nine NR strengths, six edge gains and a
++ * contrast, all MI_U8); reserved2 and lensAdjOn are bWdrEn and bEnLdc.
++ *
++ * The sizes are asserted because each one is the exact number of bytes its
++ * family's libmi_vpe.so memcpys out of this struct, and a mismatch is silent:
++ * the ioctl still succeeds, it just carries the wrong fields.
++ */
++_Static_assert(sizeof(i6_vpe_para) == 28, "Infinity6B0 libmi_vpe.so copies 28");
++_Static_assert(offsetof(i6_vpe_para, hdr) == 16, "eHDRType sits at +16");
++_Static_assert(offsetof(i6_vpe_para, level3DNR) == 20, "e3DNRLevel sits at +20");
++_Static_assert(sizeof(i6e_vpe_para) == 100, "Infinity6E libmi_vpe.so copies 100");
++_Static_assert(offsetof(i6e_vpe_para, level3DNR) == 92, "6E e3DNRLevel at +92");
++
++typedef struct {
++    i6_common_dim output;
++    char mirror;
++    char flip;
++    i6_common_pixfmt pixFmt;
++    i6_common_compr compress;
++} i6_vpe_port;
++
++#endif /* SIGMASTAR_I6_VPE_H */
+-- 
+2.43.0
+

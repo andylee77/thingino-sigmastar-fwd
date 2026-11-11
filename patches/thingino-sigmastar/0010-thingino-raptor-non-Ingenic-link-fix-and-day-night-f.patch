@@ -1,31 +1,85 @@
-From 65b54e828813f91bc9bcf8b5b2f95a57f67992ca Mon Sep 17 00:00:00 2001
+From 2f8fbfd2f13111c8dab15671599520a178976f5f Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 4 Nov 2026 08:19:15 -0500
-Subject: [PATCH 10/21] thingino-raptor: non-Ingenic link fix and day/night for
+Date: Wed, 11 Nov 2026 17:09:54 -0500
+Subject: [PATCH 10/22] thingino-raptor: non-Ingenic link fix and day/night for
  PWM IR banks (ric)
 
+raptor patches 0101-0105: LDFLAGS_HAL links libimp and libalog on Ingenic
+only (any other HAL failed to link); ric's irled_cmd hook for an IR bank that
+is not on a GPIO, the luma trigger for such banks and days that stick, an IR
+level ladder stepped by night gain, and exposure polled on a fixed cadence.
+The raptor patches are numbered from 0101, so the patches Thingino itself
+carries in package/thingino-raptor/ (from 0001) apply first.
+
+The three new [ircut] keys (irled_cmd, ir_levels, ir_step_gain) are
+RAPTOR_IRCUT_* options in thingino-raptor-config (Kconfig and conf-map).
+thingino-raptor's Config.in and .mk also carry the package side of the later
+patches: the Streamer menu options (BR2_PACKAGE_THINGINO_RAPTOR_UI_*), the
+SCL ring depth and AE max-shutter options, the sigmastar-lib build order, and
+the SigmaStar installs (the web UI flags and the watchdog).
 ---
+ package/thingino-raptor-config/Kconfig        |  16 +
+ package/thingino-raptor-config/conf-map       |   3 +
  ...bimp-and-libalog-for-Ingenic-platfor.patch |  32 ++
  ...ok-for-an-850-nm-bank-that-is-not-on.patch | 108 ++++++
  ...-for-irled_cmd-banks-and-days-that-s.patch | 191 +++++++++++
  ...-IR-level-ladder-for-irled_cmd-banks.patch | 317 ++++++++++++++++++
  ...ric-poll-exposure-on-a-fixed-cadence.patch |  58 ++++
  package/thingino-raptor/Config.in             |  82 +++++
- package/thingino-raptor/Config.in.conf        |  16 +
- .../thingino-raptor/thingino-raptor-conf.mk   |   3 +
  package/thingino-raptor/thingino-raptor.mk    |  64 +++-
  9 files changed, 870 insertions(+), 1 deletion(-)
- create mode 100644 package/thingino-raptor/0001-Makefile-link-libimp-and-libalog-for-Ingenic-platfor.patch
- create mode 100644 package/thingino-raptor/0002-ric-irled_cmd-hook-for-an-850-nm-bank-that-is-not-on.patch
- create mode 100644 package/thingino-raptor/0003-ric-luma-trigger-for-irled_cmd-banks-and-days-that-s.patch
- create mode 100644 package/thingino-raptor/0004-ric-IR-level-ladder-for-irled_cmd-banks.patch
- create mode 100644 package/thingino-raptor/0005-ric-poll-exposure-on-a-fixed-cadence.patch
+ create mode 100644 package/thingino-raptor/0101-Makefile-link-libimp-and-libalog-for-Ingenic-platfor.patch
+ create mode 100644 package/thingino-raptor/0102-ric-irled_cmd-hook-for-an-850-nm-bank-that-is-not-on.patch
+ create mode 100644 package/thingino-raptor/0103-ric-luma-trigger-for-irled_cmd-banks-and-days-that-s.patch
+ create mode 100644 package/thingino-raptor/0104-ric-IR-level-ladder-for-irled_cmd-banks.patch
+ create mode 100644 package/thingino-raptor/0105-ric-poll-exposure-on-a-fixed-cadence.patch
 
-diff --git a/package/thingino-raptor/0001-Makefile-link-libimp-and-libalog-for-Ingenic-platfor.patch b/package/thingino-raptor/0001-Makefile-link-libimp-and-libalog-for-Ingenic-platfor.patch
+diff --git a/package/thingino-raptor-config/Kconfig b/package/thingino-raptor-config/Kconfig
+index 143e5fb26..3d5dc36e6 100644
+--- a/package/thingino-raptor-config/Kconfig
++++ b/package/thingino-raptor-config/Kconfig
+@@ -1596,6 +1596,22 @@ config RAPTOR_IRCUT_PULSE_MS
+ 	string "pulse_ms - dual-GPIO coil pulse width in ms (1-1000, default 10)"
+ 	default ""
+ 
++config RAPTOR_IRCUT_IRLED_CMD
++	string "irled_cmd - command for an 850nm bank not on a GPIO (run as '<cmd> on|off')"
++	default ""
++
++config RAPTOR_IRCUT_IR_LEVELS
++	string "ir_levels - IR brightness steps in %, ascending (irled_cmd bank only)"
++	default ""
++	help
++	  e.g. "10,20,40,70,100". Night starts on the first level and steps up
++	  while the IR-lit gain stays above ir_step_gain; ric then runs
++	  "<irled_cmd> on <percent>". Empty = plain on|off.
++
++config RAPTOR_IRCUT_IR_STEP_GAIN
++	string "ir_step_gain - IR-lit gain above this steps the IR up (default 16000)"
++	default ""
++
+ choice
+ 	prompt "ir850 - enable 850nm IR LED (default true)"
+ 	default RAPTOR_IRCUT_IR850_DEFAULT
+diff --git a/package/thingino-raptor-config/conf-map b/package/thingino-raptor-config/conf-map
+index 2530196cc..431c3af02 100644
+--- a/package/thingino-raptor-config/conf-map
++++ b/package/thingino-raptor-config/conf-map
+@@ -246,6 +246,9 @@ str ircut gpio_ircut2 RAPTOR_IRCUT_GPIO_IRCUT2
+ str ircut gpio_irled RAPTOR_IRCUT_GPIO_IRLED
+ str ircut gpio_irled2 RAPTOR_IRCUT_GPIO_IRLED2
+ str ircut pulse_ms RAPTOR_IRCUT_PULSE_MS
++str ircut irled_cmd RAPTOR_IRCUT_IRLED_CMD
++str ircut ir_levels RAPTOR_IRCUT_IR_LEVELS
++str ircut ir_step_gain RAPTOR_IRCUT_IR_STEP_GAIN
+ bool ircut ir850 RAPTOR_IRCUT_IR850
+ bool ircut ir940 RAPTOR_IRCUT_IR940
+ bool recording enabled RAPTOR_RECORDING_ENABLED
+diff --git a/package/thingino-raptor/0101-Makefile-link-libimp-and-libalog-for-Ingenic-platfor.patch b/package/thingino-raptor/0101-Makefile-link-libimp-and-libalog-for-Ingenic-platfor.patch
 new file mode 100644
-index 000000000..f09c7a8d0
+index 000000000..6bb6758bb
 --- /dev/null
-+++ b/package/thingino-raptor/0001-Makefile-link-libimp-and-libalog-for-Ingenic-platfor.patch
++++ b/package/thingino-raptor/0101-Makefile-link-libimp-and-libalog-for-Ingenic-platfor.patch
 @@ -0,0 +1,32 @@
 +From 615a05a4603b894748d173e9b3c66a8ad0ba7d55 Mon Sep 17 00:00:00 2001
 +From: Andy <andylee77@users.noreply.github.com>
@@ -59,11 +113,11 @@ index 000000000..f09c7a8d0
 + 
 + # IVS detection libs
 + ifeq ($(IVS_DETECT),1)
-diff --git a/package/thingino-raptor/0002-ric-irled_cmd-hook-for-an-850-nm-bank-that-is-not-on.patch b/package/thingino-raptor/0002-ric-irled_cmd-hook-for-an-850-nm-bank-that-is-not-on.patch
+diff --git a/package/thingino-raptor/0102-ric-irled_cmd-hook-for-an-850-nm-bank-that-is-not-on.patch b/package/thingino-raptor/0102-ric-irled_cmd-hook-for-an-850-nm-bank-that-is-not-on.patch
 new file mode 100644
-index 000000000..572432bce
+index 000000000..96ef4a9c0
 --- /dev/null
-+++ b/package/thingino-raptor/0002-ric-irled_cmd-hook-for-an-850-nm-bank-that-is-not-on.patch
++++ b/package/thingino-raptor/0102-ric-irled_cmd-hook-for-an-850-nm-bank-that-is-not-on.patch
 @@ -0,0 +1,108 @@
 +From 7b4fd0fb1139ddc6b2d0953879c543d3d7381137 Mon Sep 17 00:00:00 2001
 +From: Andy <andylee77@users.noreply.github.com>
@@ -173,11 +227,11 @@ index 000000000..572432bce
 + 	c->ir850_enabled = rss_config_get_bool(cfg, "ircut", "ir850", true);
 + 	/* Probed before the get, because the getters store their default into
 + 	 * the config on a miss (for config-get-section) and the key would
-diff --git a/package/thingino-raptor/0003-ric-luma-trigger-for-irled_cmd-banks-and-days-that-s.patch b/package/thingino-raptor/0003-ric-luma-trigger-for-irled_cmd-banks-and-days-that-s.patch
+diff --git a/package/thingino-raptor/0103-ric-luma-trigger-for-irled_cmd-banks-and-days-that-s.patch b/package/thingino-raptor/0103-ric-luma-trigger-for-irled_cmd-banks-and-days-that-s.patch
 new file mode 100644
-index 000000000..2d2f8cbdf
+index 000000000..cf23f8da4
 --- /dev/null
-+++ b/package/thingino-raptor/0003-ric-luma-trigger-for-irled_cmd-banks-and-days-that-s.patch
++++ b/package/thingino-raptor/0103-ric-luma-trigger-for-irled_cmd-banks-and-days-that-s.patch
 @@ -0,0 +1,191 @@
 +From 7259f925fb82c8cade9b68ad840b7716da476851 Mon Sep 17 00:00:00 2001
 +From: andylee77 <andylee77@users.noreply.github.com>
@@ -370,11 +424,11 @@ index 000000000..2d2f8cbdf
 +-- 
 +2.43.0
 +
-diff --git a/package/thingino-raptor/0004-ric-IR-level-ladder-for-irled_cmd-banks.patch b/package/thingino-raptor/0004-ric-IR-level-ladder-for-irled_cmd-banks.patch
+diff --git a/package/thingino-raptor/0104-ric-IR-level-ladder-for-irled_cmd-banks.patch b/package/thingino-raptor/0104-ric-IR-level-ladder-for-irled_cmd-banks.patch
 new file mode 100644
-index 000000000..b97a3bf42
+index 000000000..ce06cc46f
 --- /dev/null
-+++ b/package/thingino-raptor/0004-ric-IR-level-ladder-for-irled_cmd-banks.patch
++++ b/package/thingino-raptor/0104-ric-IR-level-ladder-for-irled_cmd-banks.patch
 @@ -0,0 +1,317 @@
 +From 20e2dd5fc5db0404e61a8f8211456248d940ee7b Mon Sep 17 00:00:00 2001
 +From: andylee77 <andylee77@users.noreply.github.com>
@@ -693,11 +747,11 @@ index 000000000..b97a3bf42
 +-- 
 +2.43.0
 +
-diff --git a/package/thingino-raptor/0005-ric-poll-exposure-on-a-fixed-cadence.patch b/package/thingino-raptor/0005-ric-poll-exposure-on-a-fixed-cadence.patch
+diff --git a/package/thingino-raptor/0105-ric-poll-exposure-on-a-fixed-cadence.patch b/package/thingino-raptor/0105-ric-poll-exposure-on-a-fixed-cadence.patch
 new file mode 100644
-index 000000000..55c0fa8d8
+index 000000000..cd54e5cd1
 --- /dev/null
-+++ b/package/thingino-raptor/0005-ric-poll-exposure-on-a-fixed-cadence.patch
++++ b/package/thingino-raptor/0105-ric-poll-exposure-on-a-fixed-cadence.patch
 @@ -0,0 +1,58 @@
 +From abd68e9109c20a995bec971e50afd3e0aa15a7d2 Mon Sep 17 00:00:00 2001
 +From: andylee77 <andylee77@users.noreply.github.com>
@@ -758,10 +812,10 @@ index 000000000..55c0fa8d8
 +2.43.0
 +
 diff --git a/package/thingino-raptor/Config.in b/package/thingino-raptor/Config.in
-index f4b598702..062a213e4 100644
+index 48bfbcfbb..5ca7336ab 100644
 --- a/package/thingino-raptor/Config.in
 +++ b/package/thingino-raptor/Config.in
-@@ -231,6 +231,88 @@ config BR2_PACKAGE_THINGINO_RAPTOR_DEBUG
+@@ -233,5 +233,87 @@ config BR2_PACKAGE_THINGINO_RAPTOR_DEBUG
  
  endmenu
  
@@ -847,52 +901,10 @@ index f4b598702..062a213e4 100644
 +	  25 fps there at ~50 % more gain. Written to /etc/default/raptor as
 +	  RSS_AE_MAX_SHUTTER_US.
 +
- source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-raptor/Config.in.conf"
  
  endif # BR2_PACKAGE_THINGINO_RAPTOR
-diff --git a/package/thingino-raptor/Config.in.conf b/package/thingino-raptor/Config.in.conf
-index e8bc3a912..bb781e626 100644
---- a/package/thingino-raptor/Config.in.conf
-+++ b/package/thingino-raptor/Config.in.conf
-@@ -1511,6 +1511,22 @@ config BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_GPIO_IRLED2
- 	string "gpio_irled2 - 940nm LED pin (-1=auto, default -1)"
- 	default ""
- 
-+config BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IRLED_CMD
-+	string "irled_cmd - command for an 850nm bank not on a GPIO (run as '<cmd> on|off')"
-+	default ""
-+
-+config BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IR_LEVELS
-+	string "ir_levels - IR brightness steps in %, ascending (irled_cmd bank only)"
-+	default ""
-+	help
-+	  e.g. "10,20,40,70,100". Night starts on the first level and
-+	  steps up while the IR-lit gain stays above ir_step_gain; ric
-+	  then runs "<irled_cmd> on <percent>". Empty = plain on|off.
-+
-+config BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IR_STEP_GAIN
-+	string "ir_step_gain - IR-lit gain above this steps the IR up (default 16000)"
-+	default ""
-+
- config BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_PULSE_MS
- 	string "pulse_ms - dual-GPIO coil pulse width in ms (1-1000, default 10)"
- 	default ""
-diff --git a/package/thingino-raptor/thingino-raptor-conf.mk b/package/thingino-raptor/thingino-raptor-conf.mk
-index effe5c839..58f305e0a 100644
---- a/package/thingino-raptor/thingino-raptor-conf.mk
-+++ b/package/thingino-raptor/thingino-raptor-conf.mk
-@@ -292,6 +292,9 @@ define THINGINO_RAPTOR_PATCH_CONF
- 	rset ircut gpio_ircut2 "$(call qstrip,$(BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_GPIO_IRCUT2))"; \
- 	rset ircut gpio_irled "$(call qstrip,$(BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_GPIO_IRLED))"; \
- 	rset ircut gpio_irled2 "$(call qstrip,$(BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_GPIO_IRLED2))"; \
-+	rset ircut irled_cmd "$(call qstrip,$(BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IRLED_CMD))"; \
-+	rset ircut ir_levels "$(call qstrip,$(BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IR_LEVELS))"; \
-+	rset ircut ir_step_gain "$(call qstrip,$(BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IR_STEP_GAIN))"; \
- 	rset ircut pulse_ms "$(call qstrip,$(BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_PULSE_MS))"; \
- 	rset ircut ir850 "$(call raptor_bval,IRCUT_IR850)"; \
- 	rset ircut ir940 "$(call raptor_bval,IRCUT_IR940)"; \
 diff --git a/package/thingino-raptor/thingino-raptor.mk b/package/thingino-raptor/thingino-raptor.mk
-index ef2e741e3..2c7c81d5b 100644
+index cf8168c50..26cc4af31 100644
 --- a/package/thingino-raptor/thingino-raptor.mk
 +++ b/package/thingino-raptor/thingino-raptor.mk
 @@ -5,7 +5,7 @@ THINGINO_RAPTOR_SITE_METHOD = git
@@ -972,7 +984,7 @@ index ef2e741e3..2c7c81d5b 100644
  define THINGINO_RAPTOR_INSTALL_TARGET_CMDS
  	# Install the thingino-agent backend adapter at the fixed path, overwriting
  	# the null fallback installed by thingino-agent.
-@@ -186,6 +233,10 @@ define THINGINO_RAPTOR_INSTALL_TARGET_CMDS
+@@ -190,6 +237,10 @@ define THINGINO_RAPTOR_INSTALL_TARGET_CMDS
  	# WebUI plugin (streamer pages, audio, save/restart CGIs)
  	$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/raptor.webui.json \
  		$(TARGET_DIR)/var/www/a/plugins/raptor.webui.json
@@ -982,8 +994,8 @@ index ef2e741e3..2c7c81d5b 100644
 +	fi
  	$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/www/config-audio.html \
  		$(TARGET_DIR)/var/www/config-audio.html
- 	$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/www/streamer-image.html \
-@@ -202,6 +253,9 @@ define THINGINO_RAPTOR_INSTALL_TARGET_CMDS
+ 	$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/www/config-privacy.html \
+@@ -212,6 +263,9 @@ define THINGINO_RAPTOR_INSTALL_TARGET_CMDS
  		$(TARGET_DIR)/var/www/tool-timelapse.html
  	$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/www/a/streamer.js \
  		$(TARGET_DIR)/var/www/a/streamer.js
@@ -993,7 +1005,7 @@ index ef2e741e3..2c7c81d5b 100644
  	$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/www/a/preview-endpoints.js \
  		$(TARGET_DIR)/var/www/a/preview-endpoints.js
  	$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/www/a/streamer-config.js \
-@@ -242,6 +296,14 @@ define THINGINO_RAPTOR_INSTALL_TARGET_CMDS
+@@ -252,6 +306,14 @@ define THINGINO_RAPTOR_INSTALL_TARGET_CMDS
  		$(INSTALL) -D -m 0755 $(@D)/config/S31raptor \
  			$(TARGET_DIR)/etc/init.d/S31raptor; \
  	fi
@@ -1005,6 +1017,9 @@ index ef2e741e3..2c7c81d5b 100644
 +		$(INSTALL) -D -m 0755 $(THINGINO_RAPTOR_PKGDIR)/files/S34raptor-watchdog \
 +			$(TARGET_DIR)/etc/init.d/S34raptor-watchdog; \
 +	fi
- 	$(INSTALL) -D -m 0755 $(THINGINO_RAPTOR_PKGDIR)/files/privacy \
- 		$(TARGET_DIR)/usr/sbin/privacy
- 	$(INSTALL) -D -m 0755 $(THINGINO_RAPTOR_PKGDIR)/files/microphone \
+ 	# Photosensing page for ric; daynightd ships its own under the same name.
+ 	if [ "$(BR2_PACKAGE_THINGINO_RAPTOR_RIC)" = "y" ]; then \
+ 		$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/www/config-photosensing.html \
+-- 
+2.43.0
+

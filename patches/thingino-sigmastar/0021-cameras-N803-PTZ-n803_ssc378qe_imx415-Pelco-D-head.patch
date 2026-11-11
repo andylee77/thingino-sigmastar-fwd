@@ -1,39 +1,36 @@
-From 360b0e4596ac0fe182d60e1f208058945200d0bf Mon Sep 17 00:00:00 2001
+From 287095b6aab78f0733ee4ce36af6d6b024b653b5 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 4 Nov 2026 08:19:16 -0500
-Subject: [PATCH 21/21] cameras: N803 PTZ (n803_ssc378qe_imx415, Pelco-D head)
+Date: Wed, 11 Nov 2026 17:09:54 -0500
+Subject: [PATCH 21/22] cameras: N803 PTZ (n803_ssc378qe_imx415, Pelco-D head)
 
+SSC378QE + IMX415, 3840x2160 + 1280x720, 5x zoom: its own board DTS, the
+Pelco-D head through lensd -P, microSD, a 5-partition flash with its own env
+partition. The OEM MAC is per unit: S04oemmac reads it from the overlay, and
+none is baked in. The RAPTOR_* keys are in raptor.config. The OEM sensor
+tuning is a vendor file and is not included.
 ---
- ...M-dts-infinity6c-add-the-N803-module.patch |  93 +++++++
+ ...M-dts-infinity6c-add-the-N803-module.patch | 115 ++++++++
  .../cameras/n803_ssc378qe_imx415/.gitignore   |   2 +
- .../n803_ssc378qe_imx415.kernel.config        |  32 +++
- .../n803_ssc378qe_imx415_defconfig            | 251 ++++++++++++++++++
- .../overlay/etc/default/lensd                 |   2 +
- .../overlay/etc/fw_env.config                 |  14 +
- .../overlay/etc/fw_env.dat                    | Bin 0 -> 65536 bytes
- .../overlay/etc/init.d/S04oemmac              |  11 +
- .../overlay/etc/init.d/S30light               |  19 ++
- .../n803_ssc378qe_imx415/overlay/etc/timezone |   1 +
- .../overlay/usr/sbin/light                    | 151 +++++++++++
- 11 files changed, 576 insertions(+)
+ .../n803_ssc378qe_imx415.kernel.config        |  41 +++
+ .../n803_ssc378qe_imx415_defconfig            | 254 ++++++++++++++++++
+ .../overlay/etc/init.d/S04oemmac              |  23 ++
+ .../overlay/etc/modules.d/sdcard              |   5 +
+ .../n803_ssc378qe_imx415/raptor.config        |  39 +++
+ 7 files changed, 479 insertions(+)
  create mode 100755 board/sigmastar/infinity6c/patches/linux/0003-ARM-dts-infinity6c-add-the-N803-module.patch
  create mode 100644 configs/cameras/n803_ssc378qe_imx415/.gitignore
  create mode 100755 configs/cameras/n803_ssc378qe_imx415/n803_ssc378qe_imx415.kernel.config
  create mode 100644 configs/cameras/n803_ssc378qe_imx415/n803_ssc378qe_imx415_defconfig
- create mode 100644 configs/cameras/n803_ssc378qe_imx415/overlay/etc/default/lensd
- create mode 100755 configs/cameras/n803_ssc378qe_imx415/overlay/etc/fw_env.config
- create mode 100755 configs/cameras/n803_ssc378qe_imx415/overlay/etc/fw_env.dat
  create mode 100755 configs/cameras/n803_ssc378qe_imx415/overlay/etc/init.d/S04oemmac
- create mode 100755 configs/cameras/n803_ssc378qe_imx415/overlay/etc/init.d/S30light
- create mode 100644 configs/cameras/n803_ssc378qe_imx415/overlay/etc/timezone
- create mode 100755 configs/cameras/n803_ssc378qe_imx415/overlay/usr/sbin/light
+ create mode 100644 configs/cameras/n803_ssc378qe_imx415/overlay/etc/modules.d/sdcard
+ create mode 100644 configs/cameras/n803_ssc378qe_imx415/raptor.config
 
 diff --git a/board/sigmastar/infinity6c/patches/linux/0003-ARM-dts-infinity6c-add-the-N803-module.patch b/board/sigmastar/infinity6c/patches/linux/0003-ARM-dts-infinity6c-add-the-N803-module.patch
 new file mode 100755
-index 000000000..8e1946d21
+index 000000000..b7cee831a
 --- /dev/null
 +++ b/board/sigmastar/infinity6c/patches/linux/0003-ARM-dts-infinity6c-add-the-N803-module.patch
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,115 @@
 +From: Andy <andylee77@users.noreply.github.com>
 +Subject: [PATCH] ARM: dts: infinity6c: add the Anpviz/UVision N803-HS5X module
 +
@@ -45,13 +42,17 @@ index 000000000..8e1946d21
 +dtsi (internal MII PHY). Selected with
 +CONFIG_SS_DTB_NAME="infinity6c-ssc378qe-n803".
 +
++The microSD node has one slot, on SDIO IP 1, as on the JL12D2: the
++reference's other slot (IP 0) takes gpio 33, this board's alarm input, as
++its power pin.
++
 +FIRST DRAFT: validate on the bench over UART before flashing a mounted unit
 +(sensor I2C bus/addr, white-PWM and SD pads are the likely iteration points).
 +
 +---
 +--- /dev/null	2026-10-17 15:21:06.361937226 -0400
 ++++ b/arch/arm/boot/dts/infinity6c-ssc378qe-n803.dts	2026-10-29 11:30:39.574377807 -0400
-+@@ -0,0 +1,75 @@
++@@ -0,0 +1,93 @@
 ++/*
 ++ * infinity6c-ssc378qe-n803.dts - Anpviz/UVision N803-HS5X 8MP PTZ module
 ++ *
@@ -66,7 +67,7 @@ index 000000000..8e1946d21
 ++ * Starts from the SSC027D reference board (this module's OEM base is SSC027D)
 ++ * and replaces the padmux with the one decoded from the OEM firmware (ko.sh
 ++ * "378" branch + the vendor connector table; see
-++ * docs/contrib/thingino/oem-reference/N803-PAD-MAP.md). emac0 comes from the
+++ * the N803 pad map, OEM reference notes). emac0 comes from the
 ++ * base dtsi (internal MII PHY) -- the Ethernet signals physically route RJ45 ->
 ++ * PTZ base board -> SoC board, but electrically it is the i6c internal EMAC, so
 ++ * the base node brings the link up unchanged, as on the MC-A85 and JL12D2.
@@ -82,9 +83,16 @@ index 000000000..8e1946d21
 ++ *  - PAD_FUART_RX/TX = 2-wire FUART -> ttyS2 = the AF-lens MCU (57600 8N1; the
 ++ *    zoom/focus serial channel, driven by a lensd-style daemon -- PTZ phase 2).
 ++ *  - PAD_I2C1_SCL/SDA = IMX415 sensor I2C (adapter 1), as on the MC-A85.
-++ *  - PAD_SD_* + PAD_PM_SD_CDZ = microSD slot (SDIO1), the N803 extend-board slot
-++ *    (OEM /dev/mmcblk1). UNVERIFIED pad group -- confirm on the bench; SD is not
-++ *    needed for streaming, so a wrong guess here only costs the card, not boot.
+++ *  - microSD, the extend-board slot: one slot, on SDIO IP 1 and pad set 1 --
+++ *    PAD_SD_CLK/CMD/D0-D3, card detect on PAD_PM_SD_CDZ (0x16), power on
+++ *    PAD_FUART_RTS (0x2d; the FUART runs 2-wire). These are the OEM tree's
+++ *    SDIO1 padmux lines and its slot 1, exactly, and the JL12D2's wiring. The
+++ *    OEM tree keeps the SSC027D eval board's two slots; its slot 0 (IP 0 on
+++ *    the PAD_SD1_IO pads, detect PAD_SD1_IO6, power PAD_PM_GPIO9) is not wired
+++ *    here: PAD_PM_GPIO9 is gpio 33, the alarm input. The base node's slot 0
+++ *    is dropped below, so the driver no longer drives that pin. Not yet
+++ *    checked with a card; SD is not needed for streaming, so a wrong guess
+++ *    here only costs the card, not boot.
 ++ *
 ++ * IR-cut is gpio80 (day) / gpio81 (night), an H-bridge coil driven by ric via
 ++ * /sys/class/gpio -- a plain PM GPIO, no padmux entry needed. The pan/tilt
@@ -123,7 +131,18 @@ index 000000000..8e1946d21
 ++				<PAD_SD_CMD      PINMUX_FOR_SD0_MODE_1         MDRV_PUSE_SDIO1_CMD>,
 ++				<PAD_SD_D3       PINMUX_FOR_SD0_MODE_1         MDRV_PUSE_SDIO1_D3>,
 ++				<PAD_SD_D2       PINMUX_FOR_SD0_MODE_1         MDRV_PUSE_SDIO1_D2>,
+++				<PAD_FUART_RTS   PINMUX_FOR_GPIO_MODE          MDRV_PUSE_SDIO1_PWR>,
 ++				<PAD_PM_SD_CDZ   PINMUX_FOR_SD0_CDZ_MODE_1     MDRV_PUSE_SDIO1_CDZ>;
+++		};
+++
+++		/* One microSD slot on SDIO IP 1 (see above); the per-slot arrays keep
+++		 * the base's three cells, only the first is read. */
+++		sdmmc {
+++			slotnum = <1>;
+++			slot-ip-orders = <1 1 2>;
+++			slot-pad-orders = <1 1 2>;
+++			slot-cdzs-pad = <0x16 0x16 0x16>;
+++			slot-pwr-pad = <0x2d 0x2d 0x2d>;
 ++		};
 ++	};
 ++};
@@ -137,10 +156,10 @@ index 000000000..5dc98a25f
 +*.bin
 diff --git a/configs/cameras/n803_ssc378qe_imx415/n803_ssc378qe_imx415.kernel.config b/configs/cameras/n803_ssc378qe_imx415/n803_ssc378qe_imx415.kernel.config
 new file mode 100755
-index 000000000..c2f6690cd
+index 000000000..483fad694
 --- /dev/null
 +++ b/configs/cameras/n803_ssc378qe_imx415/n803_ssc378qe_imx415.kernel.config
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,41 @@
 +# Kernel config fragment for the Anjvision/UVision N803-HS5X PTZ
 +# (n803_ssc378qe_imx415), merged over
 +# board/sigmastar/infinity6c/kernel/5.10/infinity6c.config.
@@ -173,12 +192,21 @@ index 000000000..c2f6690cd
 +# the base dtsi (internal MII PHY), so first boot should reach the network.
 +# FIRST DRAFT: validate on the bench over UART before flashing the mounted unit.
 +CONFIG_SS_DTB_NAME="infinity6c-ssc378qe-n803"
++
++# microSD (the extend-board slot: one slot on SDIO IP 1, the board DTS's sdmmc
++# node). Modules, not built in, as on the JL12D2 and YMF46D: a probe that goes
++# wrong then cannot stop the boot or the network. exFAT for cards over 32 GB.
++# The same lines as theirs.
++CONFIG_MMC=m
++CONFIG_MMC_BLOCK=m
++CONFIG_MS_SDMMC=m
++CONFIG_EXFAT_FS=m
 diff --git a/configs/cameras/n803_ssc378qe_imx415/n803_ssc378qe_imx415_defconfig b/configs/cameras/n803_ssc378qe_imx415/n803_ssc378qe_imx415_defconfig
 new file mode 100644
-index 000000000..95a455570
+index 000000000..a43405713
 --- /dev/null
 +++ b/configs/cameras/n803_ssc378qe_imx415/n803_ssc378qe_imx415_defconfig
-@@ -0,0 +1,251 @@
+@@ -0,0 +1,254 @@
 +# NAME: Anpviz/UVision N803-HS5X — SSC378QE, Infinity6C, Sony IMX415 (8MP) PTZ
 +#
 +# STATUS (2026-10-29): FIRST DRAFT, not yet booted on hardware. Cloned from the
@@ -192,7 +220,7 @@ index 000000000..95a455570
 +# Board:  Anpviz/UVision N803 module (SSC027D reference design, die SSC378QE,
 +#         256 MB DDR); device tree infinity6c-ssc378qe-n803, see LINUX below.
 +#         Anpviz PTZIP...-5X-A 8MP PTZ dome, OEM firmware "N803-HS5X V1.0.4.12".
-+#         Full hardware map: docs/contrib/thingino/oem-reference/N803-PAD-MAP.md.
++#         Full hardware map: the N803 pad map in the OEM reference notes.
 +# Sensor: Sony IMX415, MIPI 4-lane 10-bit, 8MP (1/2.8"). OEM captures the raw
 +#         VIF pad at 3840x2160 (video.conf vi_width/height); main stream 4K@20.
 +#         OEM ran 2-frame DOL HDR (wdr_mode=3); we run LINEAR 4K here (the i6c
@@ -224,7 +252,7 @@ index 000000000..95a455570
 +# chmap=1 (no lane override — the driver forces 4-lane for the 4K modes; add
 +# lane_num=4 if a live i2cdetect/dmesg shows it bringing up only 2). We build it
 +# from source via BR2_SIGMASTAR_SENSOR_SOURCE (same path the GC8613 uses, against
-+# the sensor headers package/sigmastar-sdk/0001 restores to match 1230's mi.ko).
++# the sensor headers from sigmastar-sensor-headers that match 1230's mi.ko).
 +# FRAG: soc-sigmastar core-sigmastar
 +
 +# board.mk includes this file as a makefile before thingino.mk runs, so the
@@ -233,7 +261,8 @@ index 000000000..95a455570
 +BR2_SOC_VENDOR_SIGMASTAR=y
 +BR2_SIGMASTAR_SOC_MODEL="ssc378qe"
 +
-+# Sony IMX415 (8MP), built from the SDK sensor-src (see SENSOR above).
++# Sony IMX415 (8MP), built from the SDK sensor-src (see SENSOR above; every
++# board sets BR2_SIGMASTAR_SENSOR_SOURCE, so every image carries the same drivers).
 +BR2_SENSOR_1_NAME="imx415"
 +BR2_SIGMASTAR_SENSOR_SOURCE=y
 +
@@ -327,7 +356,6 @@ index 000000000..95a455570
 +# MI_ISP_AE_SetFlickerEx manual lock on the first frame, after the tuning loads:
 +# exposure snaps to n x 1/120 s. Measured rolling band ripple 3.8 DN unlocked ->
 +# 0.03 DN locked at a forced 12 ms shutter.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_SENSOR_ANTIFLICKER="2"
 +
 +# ---- SENSOR IDENTITY FOR RVD ----
 +# Upstream rvd reads the sensor's name and I2C address from /proc/jz/sensor, an
@@ -335,8 +363,6 @@ index 000000000..95a455570
 +# come from [sensor]. The address is 7-bit, raptor.conf's convention (IMX415's
 +# 8-bit slave is 0x34). The Infinity6C backend does not use it; rvd only
 +# refuses 0.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_SENSOR_NAME="imx415"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_SENSOR_I2C_ADDR="0x1a"
 +
 +# ---- DAY/NIGHT ----
 +# IR-cut: two-pin H-bridge coil (datasheet AOUT/BOUT, 5-12 V, 25-60 Ohm), from
@@ -348,9 +374,6 @@ index 000000000..95a455570
 +# pulse_ms (10) is too short for this coil. Same pins/behaviour as the MC-A85.
 +# The coil plugs into the sensor board and the drive reaches it via the SoC<->
 +# sensor FPC ribbon; gpio 23 is the CDS/IR-detect input. See N803-PAD-MAP.md.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_GPIO_IRCUT="80"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_GPIO_IRCUT2="81"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_PULSE_MS="250"
 +
 +# Auto day/night: ric's luma trigger, which judges night->day against a night
 +# baseline taken with the IR lit, plus an IR level ladder. The legacy gain
@@ -360,12 +383,8 @@ index 000000000..95a455570
 +# and steps up while the IR-lit gain stays above 16000 (on the bench: 29460 at
 +# 5% down to 3003 at 100%); day returns when gain drops under 25% of the settled
 +# night baseline, or when an IR-off probe finds gain at or under 20000 (half of
-+# night_gain). Needs raptor patches 0003-0004 and the raptor-hal fork's 0..255
-+# ae_luma. See docs/contrib/thingino/DAYNIGHT-TUNING.md.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_TRIGGER="luma"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_NIGHT_GAIN="40000"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IR_LEVELS="10,20,40,70,100"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IR_STEP_GAIN="16000"
++# night_gain). Needs raptor patches 0103-0104 and the raptor-hal fork's 0..255
++# ae_luma, tuned on the bench.
 +
 +# ---- LIGHTS ----
 +# IR (850 nm) and white banks are PWM-dimmed on the SoC's two PWM pads, as in
@@ -378,13 +397,14 @@ index 000000000..95a455570
 +# The board device tree muxes both pads that way; PWM0 is routed to no pad, so
 +# mi.ko's frame-sync wave on PWM0 strobes nothing and the sync output is left at
 +# its default (the reference board gave these pads to I2C0 and carried PWM0 on
-+# PAD_PWM0, which is what strobed). overlay/etc/init.d/
-+# S30light sets up the two PWM channels at boot via overlay/usr/sbin/light,
-+# which also provides thingino's "light <type> on|off|toggle|read" CLI (the
-+# WebUI light buttons) plus "light <type> brightness 0-100". ric switches the
++# PAD_PWM0, which is what strobed). sigmastar-light's S30light sets up the two
++# channels at boot, and its /usr/sbin/light is thingino's "light <type>
++# on|off|toggle|read" CLI (the WebUI light buttons) plus "light <type>
++# brightness 0-100"; both read the channels from /etc/default/light. ric switches the
 +# IR bank with day/night through our irled_cmd hook
-+# (package/thingino-raptor/0002-ric-irled_cmd-hook-*.patch).
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IRLED_CMD="/usr/sbin/light ir"
++# (package/thingino-raptor/0102-ric-irled_cmd-hook-*.patch).
++BR2_PACKAGE_SIGMASTAR_LIGHT_IR_PWM=1
++BR2_PACKAGE_SIGMASTAR_LIGHT_WHITE_PWM=9
 +
 +# ---- STREAMS / OSD / RING ----
 +# This module has 256 MB DDR (~90 MB Linux + 166 MB MMA) -- unlike the MC-A85's
@@ -394,288 +414,138 @@ index 000000000..95a455570
 +# main + JPEG floods MMA" does NOT apply here, that was its tight 70 MB part).
 +# The 720p sub also carries JPEG. refmode (zero-copy ring) over-allocs -- copy mode.
 +# OSD = timestamp (date+clock) only; each MI_RGN element costs MMA.
-+# See docs/contrib/thingino/RAPTOR-PACKAGE-TOPOLOGY.md.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM0_WIDTH="3840"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM0_HEIGHT="2160"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM1_ENABLED_TRUE=y
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM1_WIDTH="1280"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM1_HEIGHT="720"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_RING_REFMODE_FALSE=y
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_OSD_ENABLED_TRUE=y
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_OSD_TIMESTAMP_VISIBLE_TRUE=y
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_OSD_UPTIME_VISIBLE_FALSE=y
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_OSD_CAMERA_VISIBLE_FALSE=y
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_OSD_LOGO_VISIBLE_FALSE=y
 +
 +# ---- RTSP ----
 +# Four clients is not enough: Frigate holds two (main + sub), an NVR two
 +# more, and a live view or snapshot client then gets refused (as on the
 +# YMF46D).
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_RTSP_MAX_CLIENTS="8"
 +
 +# ---- HTTP (rhd) ----
 +# rhd serves the snapshots and MJPEG the web UI previews. HTTPS on 8443, as on
 +# the unit today: its [http] credentials travel as Basic auth.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_HTTP_PORT="8443"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_HTTP_HTTPS_TRUE=y
 +
 +# ---- AUDIO ----
 +# One AI device on this chip (the analog condenser mic); rad's default of device
 +# 1 does not exist, so without this the mic stays off (the same fix the B8A63
-+# needed). Unlike the MC-A85, the N803 HAS a microSD slot (SDIO1 in the board
-+# DTS, OEM /dev/mmcblk1) -- SD is left to the kernel MMC driver + thingino
-+# automount, a bench verify item. The speaker/talk path needs its amp enabled
-+# (gpio54 high); deferred to the two-way-audio bring-up.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_AUDIO_DEVICE="0"
++# needed). The speaker/talk path needs its amp enabled (gpio54 high); deferred
++# to the two-way-audio bring-up.
 +
-+# ---- LENS / PTZ: N803 is a Pelco-D manual-focus head; lensd runs -P ----
-+BR2_PACKAGE_THINGINO_LENSD=y
-diff --git a/configs/cameras/n803_ssc378qe_imx415/overlay/etc/default/lensd b/configs/cameras/n803_ssc378qe_imx415/overlay/etc/default/lensd
-new file mode 100644
-index 000000000..567deda63
---- /dev/null
-+++ b/configs/cameras/n803_ssc378qe_imx415/overlay/etc/default/lensd
-@@ -0,0 +1,2 @@
-+# N803-HS5X: Pelco-D manual-focus head -- lensd pelco-only, no AF feed.
-+LENSD_ARGS="-P"
-diff --git a/configs/cameras/n803_ssc378qe_imx415/overlay/etc/fw_env.config b/configs/cameras/n803_ssc378qe_imx415/overlay/etc/fw_env.config
-new file mode 100755
-index 000000000..f746872af
---- /dev/null
-+++ b/configs/cameras/n803_ssc378qe_imx415/overlay/etc/fw_env.config
-@@ -0,0 +1,14 @@
-+# U-Boot environment location on the Anpviz/UVision N803 (OEM KL_LX510 U-Boot).
-+#
-+# Deliberately a FILE, not flash. Unlike the MC-A85/JL12D2 (whose OEM env
-+# overlapped the kernel partition and bricked on fw_setenv), the N803 HAS a
-+# dedicated ENV partition (mtd1, 0x4F000..0x50000), so writing real flash env
-+# would be safe here. We still point fw_setenv/fw_printenv at a scratch file:
-+# U-Boot auto-boots from its own env (bootcmd "sf read KERNEL; bootm") and the
-+# thingino kernel forces its own command line, so nothing in Linux needs to
-+# reach U-Boot's real env -- and a scratch file cannot touch flash at all. If a
-+# future need arises to edit the real U-Boot env from Linux, repoint this at
-+# "/dev/mtd1 0x0 0x1000 0x1000" (safe on this board; mtd1 is ENV-only).
-+#
-+# <device> <offset> <env size>
-+/etc/fw_env.dat 0x0 0x10000
-diff --git a/configs/cameras/n803_ssc378qe_imx415/overlay/etc/fw_env.dat b/configs/cameras/n803_ssc378qe_imx415/overlay/etc/fw_env.dat
-new file mode 100755
-index 0000000000000000000000000000000000000000..c97c12f9b0a24bfc19c74a2b265a97c924137775
-GIT binary patch
-literal 65536
-zcmeIufdBvi0Dz$VsTV1P3IhfV7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd
-z0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd0RsjM7%*VKfB^#r3>YwA
-zz<>b*1`HT5V8DO@0|pEjFkrxd0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEj
-zFkrxd0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd0RsjM7%*VKfB^#r
-z3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@
-u0|pEjFkrxd0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFi-;k4*&rG
-
-literal 0
-HcmV?d00001
-
++# ---- LENS / PTZ ----
++# A Pelco-D manual-focus head with no SoC-fed autofocus: lensd -P.
++BR2_PACKAGE_THINGINO_LENSD_MODE_PELCO=y
++# Its measured motion (package/thingino-lensd/files/heads/hs5x.conf), which
++# ONVIF RelativeMove (Frigate autotracking) needs.
++BR2_PACKAGE_THINGINO_LENSD_HEAD="hs5x"
++
++# ---- MICRO SD ----
++# The extend-board slot. MMC core, block, the SigmaStar SDIO driver and exFAT
++# are kernel modules (see the fragment), loaded at S11 from
++# overlay/etc/modules.d/sdcard; thingino's mdev rule mounts each partition at
++# /mnt/<dev>. The slot is SDIO IP 1, the JL12D2's wiring: the board DTS's
++# sdmmc node keeps one slot, the OEM tree's slot 1 (the reference board's
++# other slot would power itself from gpio 33, the alarm input). The mdev
++# rule's handler, /lib/mdev/automount (+ S30mdev's boot-time scan), is
++# BR2_PACKAGE_THINGINO_SYSTEM_AUTOMOUNT, which every board ships
++# (core-sigmastar.fragment). Not yet checked with a card.
++# OVERLAY-HW: etc/modules.d/sdcard the microSD slot's modules, the same on every board with the slot
++
++# === profile contract completion: WebUI stream-choice menus + SCL ring ===
++BR2_PACKAGE_THINGINO_RAPTOR_SCL_RING_DIV="2"
++BR2_PACKAGE_THINGINO_RAPTOR_UI_STREAM0_RESOLUTIONS="3840x2160 2560x1440 1920x1080"
++BR2_PACKAGE_THINGINO_RAPTOR_UI_STREAM1_RESOLUTIONS="1280x720 960x540 640x360"
++BR2_PACKAGE_THINGINO_RAPTOR_UI_FPS="5 10 15 20 25"
++BR2_PACKAGE_THINGINO_RAPTOR_UI_STREAM0_BITRATES="2000 3000 4000 6000 8000 10000"
++BR2_PACKAGE_THINGINO_RAPTOR_UI_STREAM1_BITRATES="256 512 768 1000 1500 2000 3000"
++BR2_PACKAGE_THINGINO_RAPTOR_UI_CODECS="h264 h265"
++BR2_PACKAGE_THINGINO_RAPTOR_UI_PROFILES="baseline main high"
++BR2_PACKAGE_THINGINO_RAPTOR_UI_RC_MODES="cbr vbr capped_vbr"
++BR2_PACKAGE_THINGINO_RAPTOR_UI_GOP_SECONDS="1 2 4"
++BR2_PACKAGE_THINGINO_RAPTOR_UI_JPEG_QUALITIES="50 60 75 85 95"
 diff --git a/configs/cameras/n803_ssc378qe_imx415/overlay/etc/init.d/S04oemmac b/configs/cameras/n803_ssc378qe_imx415/overlay/etc/init.d/S04oemmac
 new file mode 100755
-index 000000000..2c8922772
+index 000000000..1a4dfbda9
 --- /dev/null
 +++ b/configs/cameras/n803_ssc378qe_imx415/overlay/etc/init.d/S04oemmac
-@@ -0,0 +1,11 @@
+@@ -0,0 +1,23 @@
 +#!/bin/sh
-+# N803-HS5X: present the unit's documented OEM MAC (the "original" address that
-+# DHCP reservations/records are keyed to; the camera label has no MAC printed).
-+# Thingino's SoC-die-ID derivation (S03mac) fails on this SSC378QE and falls back
-+# to the U-Boot ethaddr, so set eth.mac explicitly -- same effect as the web-UI
-+# network page. Only sets it when unset, so the web UI still wins and a reflash
-+# that keeps the overlay keeps the chosen value.
-+# PER-UNIT VALUE: set this to your unit's OEM MAC before building.
++# N803-HS5X: present the unit's OEM MAC, the address its DHCP reservation and
++# records are keyed to (the camera label has no MAC). Thingino's SoC-die-ID
++# derivation (S03mac) fails on this SSC378QE and falls back to the U-Boot
++# ethaddr, so set eth.mac explicitly -- the same effect as the web UI's
++# network page.
++#
++# The MAC is per unit, so it is not in the image. Provisioning writes it once
++# onto the overlay (read it from the OEM web UI, or from the unit's OEM flash
++# backup):
++#   echo XX:XX:XX:XX:XX:XX > /etc/default/oemmac
++# eth.mac is set only while it is unset, so the web UI still wins and a reflash
++# that keeps the overlay keeps the chosen value. A factory reset clears both:
++# write the file again, or set the MAC in the web UI.
 +command -v jct >/dev/null 2>&1 || exit 0
-+jct /etc/thingino.json get eth.mac >/dev/null 2>&1 || \
-+  jct /etc/thingino.json set eth.mac AA:BB:CC:DD:EE:FF
-diff --git a/configs/cameras/n803_ssc378qe_imx415/overlay/etc/init.d/S30light b/configs/cameras/n803_ssc378qe_imx415/overlay/etc/init.d/S30light
-new file mode 100755
-index 000000000..76e0189d8
---- /dev/null
-+++ b/configs/cameras/n803_ssc378qe_imx415/overlay/etc/init.d/S30light
-@@ -0,0 +1,19 @@
-+#!/bin/sh
-+# S30light -- set up the MC-A85 LED PWM channels and leave both banks off.
-+# Runs before S31raptor so ric's irled_cmd hook finds the channels ready.
-+
-+case "$1" in
-+	start | restart | reload)
-+		printf "Starting light: "
-+		if /usr/sbin/light init; then echo "OK"; else echo "FAIL"; fi
-+		;;
-+	stop)
-+		/usr/sbin/light ir off 2>/dev/null
-+		/usr/sbin/light white off 2>/dev/null
-+		;;
-+	*)
-+		echo "Usage: $0 {start|stop|restart}"
-+		exit 1
-+		;;
-+esac
-+exit 0
-diff --git a/configs/cameras/n803_ssc378qe_imx415/overlay/etc/timezone b/configs/cameras/n803_ssc378qe_imx415/overlay/etc/timezone
++jct /etc/thingino.json get eth.mac >/dev/null 2>&1 && exit 0
++[ -r /etc/default/oemmac ] || exit 0
++mac=$(tr -d ' \t\r\n' </etc/default/oemmac)
++if echo "$mac" | grep -qiE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'; then
++	jct /etc/thingino.json set eth.mac "$mac"
++else
++	echo "S04oemmac: /etc/default/oemmac is not a MAC address; eth.mac left unset" >&2
++fi
+diff --git a/configs/cameras/n803_ssc378qe_imx415/overlay/etc/modules.d/sdcard b/configs/cameras/n803_ssc378qe_imx415/overlay/etc/modules.d/sdcard
 new file mode 100644
-index 000000000..3eeea8cc9
+index 000000000..4f75b6c17
 --- /dev/null
-+++ b/configs/cameras/n803_ssc378qe_imx415/overlay/etc/timezone
-@@ -0,0 +1 @@
-+America/New York
-diff --git a/configs/cameras/n803_ssc378qe_imx415/overlay/usr/sbin/light b/configs/cameras/n803_ssc378qe_imx415/overlay/usr/sbin/light
-new file mode 100755
-index 000000000..3c63c22e6
++++ b/configs/cameras/n803_ssc378qe_imx415/overlay/etc/modules.d/sdcard
+@@ -0,0 +1,5 @@
++# microSD: the SigmaStar SDIO driver (pulls in mmc_core), the block
++# layer, and exFAT for cards over 32 GB. See the camera defconfig.
++kdrv_sdmmc
++mmc_block
++exfat
+diff --git a/configs/cameras/n803_ssc378qe_imx415/raptor.config b/configs/cameras/n803_ssc378qe_imx415/raptor.config
+new file mode 100644
+index 000000000..7a40c1b25
 --- /dev/null
-+++ b/configs/cameras/n803_ssc378qe_imx415/overlay/usr/sbin/light
-@@ -0,0 +1,151 @@
-+#!/bin/sh
-+# light -- IR and white LED control for the Anpviz / UVision MC-A85 (SSC378DE)
-+#
-+#   light <ir|ir850|white|flood> <on|off|toggle|read|1|0|~>
-+#   light <ir|ir850|white|flood> on <0-100>
-+#   light <ir|ir850|white|flood> brightness [0-100]
-+#   light init | status
-+#
-+# Same command line as thingino's GPIO light script (the web UI's light
-+# buttons call "light <type> <0|1|~>"), but both banks here are PWM-dimmed.
-+# The board wires them to the SoC's two PWM pads, as the OEM firmware does:
-+#
-+#   PAD_PWM1 -> IR (850 nm) bank, driven by PWM1
-+#   PAD_PWM0 -> white bank, driven by PWM9 via PINMUX_FOR_PWM9_MODE_2
-+#
-+# The board device tree (infinity6c-ssc378de-mca85) sets that padmux at boot.
-+# PWM9 rather than the OEM's PWM0 so the white bank cannot pick up mi.ko's
-+# dual-sensor frame-sync wave: mi.ko drives that on PWM0, which the board DT
-+# routes to no pad, so it strobes nothing (on the reference board PAD_PWM0
-+# carried PWM0, which is what strobed the LEDs).
-+#
-+# Brightness persists in /etc/light.conf. "on <percent>" lights the bank at
-+# that level once without saving it: ric's IR level ladder steps the IR bank
-+# that way, and must not rewrite flash at every step. Off is duty 0 with the
-+# channel left enabled, so switching does not re-export.
-+
-+CONF=/etc/light.conf
-+PWM=/sys/class/pwm/pwmchip0
-+PERIOD=50000 # ns, 20 kHz -- the OEM's period for this board family
-+
-+IR_CH=1
-+WHITE_CH=9
-+# The level for a plain "on" (web UI buttons, manual use). ric's automatic
-+# night picks its own level from [ircut] ir_levels.
-+IR_BRIGHTNESS=40
-+WHITE_BRIGHTNESS=100
-+[ -f "$CONF" ] && . "$CONF"
-+
-+die() {
-+	echo "light: $*" >&2
-+	exit 1
-+}
-+
-+usage() {
-+	echo "Usage: light <ir|ir850|white|flood> <on|off|toggle|read|brightness [0-100]>
-+       light init | status" >&2
-+	exit 1
-+}
-+
-+save_conf() {
-+	cat >"$CONF" <<EOF
-+IR_BRIGHTNESS=$IR_BRIGHTNESS
-+WHITE_BRIGHTNESS=$WHITE_BRIGHTNESS
-+EOF
-+}
-+
-+ch_setup() {
-+	local ch=$1
-+	[ -d $PWM/pwm$ch ] || echo "$ch" >$PWM/export || return 1
-+	echo 0 >$PWM/pwm$ch/duty_cycle 2>/dev/null
-+	echo $PERIOD >$PWM/pwm$ch/period
-+	echo 0 >$PWM/pwm$ch/duty_cycle
-+	echo 1 >$PWM/pwm$ch/enable
-+}
-+
-+init() {
-+	ch_setup $IR_CH || die "cannot set up pwm$IR_CH"
-+	ch_setup $WHITE_CH || die "cannot set up pwm$WHITE_CH"
-+}
-+
-+ready() {
-+	[ -f $PWM/pwm$IR_CH/duty_cycle ] && [ -f $PWM/pwm$WHITE_CH/duty_cycle ] || init
-+}
-+
-+duty_of() { cat $PWM/pwm$1/duty_cycle 2>/dev/null || echo 0; }
-+
-+set_level() { # set_level <ch> <percent>
-+	echo $((PERIOD * $2 / 100)) >$PWM/pwm$1/duty_cycle
-+}
-+
-+state() { [ "$(duty_of "$1")" -gt 0 ] && echo 1 || echo 0; }
-+
-+case "$1" in
-+	init)
-+		init
-+		exit 0
-+		;;
-+	status)
-+		ready
-+		echo "{\"ir\":$(state $IR_CH),\"ir_brightness\":$IR_BRIGHTNESS,\"white\":$(state $WHITE_CH),\"white_brightness\":$WHITE_BRIGHTNESS}"
-+		exit 0
-+		;;
-+	ir | ir850)
-+		CH=$IR_CH
-+		VAR=IR_BRIGHTNESS
-+		;;
-+	white | flood)
-+		CH=$WHITE_CH
-+		VAR=WHITE_BRIGHTNESS
-+		;;
-+	ir940)
-+		die "this board has no 940 nm bank"
-+		;;
-+	*)
-+		usage
-+		;;
-+esac
-+
-+ready
-+eval "LEVEL=\$$VAR"
-+
-+case "${2:-read}" in
-+	1 | on)
-+		if [ -n "$3" ]; then
-+			case "$3" in
-+				*[!0-9]*) die "level must be 0-100" ;;
-+			esac
-+			[ "$3" -le 100 ] || die "level must be 0-100"
-+			set_level $CH "$3"
-+		else
-+			set_level $CH "$LEVEL"
-+		fi
-+		;;
-+	0 | off)
-+		set_level $CH 0
-+		;;
-+	~ | toggle)
-+		if [ "$(state $CH)" = 1 ]; then set_level $CH 0; else set_level $CH "$LEVEL"; fi
-+		;;
-+	\? | read)
-+		echo -n "$(state $CH)"
-+		;;
-+	brightness)
-+		if [ -z "$3" ]; then
-+			echo "$LEVEL"
-+			exit 0
-+		fi
-+		case "$3" in
-+			*[!0-9]* | "") die "brightness must be 0-100" ;;
-+		esac
-+		[ "$3" -le 100 ] || die "brightness must be 0-100"
-+		eval "$VAR=$3"
-+		save_conf
-+		# a bank that is on follows the new level at once
-+		[ "$(state $CH)" = 1 ] && set_level $CH "$3"
-+		;;
-+	*)
-+		usage
-+		;;
-+esac
-+exit 0
++++ b/configs/cameras/n803_ssc378qe_imx415/raptor.config
+@@ -0,0 +1,39 @@
++RAPTOR_SENSOR_ANTIFLICKER="2"
++RAPTOR_SENSOR_NAME="imx415"
++RAPTOR_SENSOR_I2C_ADDR="0x1a"
++RAPTOR_IRCUT_GPIO_IRCUT="80"
++RAPTOR_IRCUT_GPIO_IRCUT2="81"
++RAPTOR_IRCUT_PULSE_MS="250"
++RAPTOR_IRCUT_TRIGGER="luma"
++RAPTOR_IRCUT_NIGHT_GAIN="40000"
++RAPTOR_IRCUT_IR_LEVELS="10,20,40,70,100"
++RAPTOR_IRCUT_IR_STEP_GAIN="16000"
++RAPTOR_IRCUT_IRLED_CMD="/usr/sbin/light ir"
++RAPTOR_STREAM0_WIDTH="3840"
++RAPTOR_STREAM0_HEIGHT="2160"
++RAPTOR_STREAM1_ENABLED_TRUE=y
++RAPTOR_STREAM1_WIDTH="1280"
++RAPTOR_STREAM1_HEIGHT="720"
++RAPTOR_RING_REFMODE_FALSE=y
++RAPTOR_OSD_ENABLED_TRUE=y
++RAPTOR_OSD_TIMESTAMP_VISIBLE_TRUE=y
++RAPTOR_OSD_UPTIME_VISIBLE_FALSE=y
++RAPTOR_OSD_CAMERA_VISIBLE_FALSE=y
++RAPTOR_OSD_LOGO_VISIBLE_FALSE=y
++RAPTOR_RTSP_MAX_CLIENTS="8"
++RAPTOR_HTTP_PORT="8443"
++RAPTOR_HTTP_HTTPS_TRUE=y
++RAPTOR_AUDIO_DEVICE="0"
++RAPTOR_SENSOR_FPS="25"
++RAPTOR_STREAM0_FPS="25"
++RAPTOR_STREAM0_GOP="25"
++RAPTOR_STREAM0_RC_MODE="cbr"
++RAPTOR_STREAM0_BITRATE="3000000"
++RAPTOR_STREAM0_MAX_BITRATE="4000000"
++RAPTOR_STREAM0_JPEG_TRUE=y
++RAPTOR_STREAM1_FPS="25"
++RAPTOR_STREAM1_GOP="25"
++RAPTOR_STREAM1_RC_MODE="vbr"
++RAPTOR_STREAM1_BITRATE="1500000"
++RAPTOR_STREAM1_MAX_BITRATE="2000000"
++RAPTOR_AUDIO_ENABLED_TRUE=y
+-- 
+2.43.0
+

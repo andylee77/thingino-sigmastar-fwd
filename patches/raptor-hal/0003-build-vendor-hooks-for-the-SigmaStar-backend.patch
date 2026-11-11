@@ -1,7 +1,7 @@
-From 4006c405bc4cc77db18fdaafbb18abdab9088b63 Mon Sep 17 00:00:00 2001
+From 0087e975a774e67dd72daedfbf615097c8ff9fdf Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 12:50:44 -0400
-Subject: [PATCH 1/6] build: vendor hooks for the SigmaStar backend
+Subject: [PATCH 03/13] build: vendor hooks for the SigmaStar backend
 
 John Chia's hooks from his fork, applied to gtxaspec main: -include
 mk/<vendor>.mk, VENDOR-keyed source lists and SDK_INCLUDE, SOC_MODEL as a
@@ -254,3 +254,6 @@ index 79bd5a6..c2403ec 100644
  
      /* Platform-specific opaque data */
      void *platform;
+-- 
+2.43.0
+

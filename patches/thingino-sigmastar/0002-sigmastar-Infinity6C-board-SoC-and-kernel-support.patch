@@ -1,18 +1,37 @@
-From 75a157a17ac621663d09ed321d8778137b4c2770 Mon Sep 17 00:00:00 2001
+From 6f5850bdfb7b68ac5793b287f687a6a84aeeb5cc Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 4 Nov 2026 08:19:15 -0500
-Subject: [PATCH 02/21] sigmastar: Infinity6C board, SoC and kernel support
+Date: Wed, 11 Nov 2026 17:09:54 -0500
+Subject: [PATCH 02/22] sigmastar: Infinity6C board, SoC and kernel support
 
+board/sigmastar (the Infinity6C kernel config, the board DTS patch
+directory, the post-image script, toolchain notes, the vendor overlay),
+soc/sigmastar/infinity6c.mk with the vendor-drop variables exported, and
+kernels/sigmastar.mk: one johnchia/linux branch per family, pinned by hash,
+since upstream moved kernel selection and requires KERNEL_BRANCH.
+
+The vendor overlay points fw_setenv at a scratch file on every board. The
+shared overlay's /dev/mtd1 is the kernel's first block on the OEM flash
+layouts, and an fw_setenv there once erased a uImage header.
 ---
  .../infinity6c/kernel/5.10/infinity6c.config  | 2958 +++++++++++++++++
- .../infinity6c/patches/linux/README.md        |   61 +
+ .../infinity6c/patches/linux/README.md        |   73 +
+ board/sigmastar/overlay/etc/fw_env.config     |   20 +
+ board/sigmastar/overlay/etc/fw_env.dat        |  Bin 0 -> 65536 bytes
+ .../sigmastar/overlay/etc/raptor-replay.conf  |   17 +
+ board/sigmastar/overlay/etc/raptor.d/replay   |   60 +
+ board/sigmastar/overlay/etc/timezone          |    1 +
  board/sigmastar/post-image.sh                 |  275 ++
  board/sigmastar/toolchain/README.md           |   92 +
  kernels/sigmastar.mk                          |   37 +
- soc/sigmastar/infinity6c.mk                   |  102 +
- 6 files changed, 3525 insertions(+)
+ soc/sigmastar/infinity6c.mk                   |  106 +
+ 11 files changed, 3639 insertions(+)
  create mode 100644 board/sigmastar/infinity6c/kernel/5.10/infinity6c.config
  create mode 100644 board/sigmastar/infinity6c/patches/linux/README.md
+ create mode 100644 board/sigmastar/overlay/etc/fw_env.config
+ create mode 100644 board/sigmastar/overlay/etc/fw_env.dat
+ create mode 100644 board/sigmastar/overlay/etc/raptor-replay.conf
+ create mode 100755 board/sigmastar/overlay/etc/raptor.d/replay
+ create mode 100644 board/sigmastar/overlay/etc/timezone
  create mode 100755 board/sigmastar/post-image.sh
  create mode 100644 board/sigmastar/toolchain/README.md
  create mode 100644 kernels/sigmastar.mk
@@ -2984,10 +3003,10 @@ index 000000000..22bbeb450
 +# end of Kernel hacking
 diff --git a/board/sigmastar/infinity6c/patches/linux/README.md b/board/sigmastar/infinity6c/patches/linux/README.md
 new file mode 100644
-index 000000000..ae89e4b00
+index 000000000..e949a0f98
 --- /dev/null
 +++ b/board/sigmastar/infinity6c/patches/linux/README.md
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,73 @@
 +# Kernel patches — Infinity6C
 +
 +`core-sigmastar.fragment` sets `BR2_LINUX_KERNEL_PATCH` to this directory for
@@ -3005,6 +3024,18 @@ index 000000000..ae89e4b00
 +
 +- `0001-ARM-dts-infinity6c-add-the-UVision-MC-A85-module.patch`:
 +  `infinity6c-ssc378de-mca85`, for `yma85_ssc378_gc8613`.
++- `0002-ARM-dts-infinity6c-add-the-JL12D2-module.patch`:
++  `infinity6c-ssc377d-jl12d2`, for `mcl12d2_ssc377d_imx335`, and
++  `infinity6c-ssc377d-anjvision.dtsi`, the board wiring it shares with the
++  YMF46D (FUART, sensor MIPI and I2C, microSD).
++- `0003-ARM-dts-infinity6c-add-the-N803-module.patch`:
++  `infinity6c-ssc378qe-n803`, for `n803_ssc378qe_imx415`.
++- `0004-ARM-dts-infinity6c-add-the-YMF46D-module.patch`:
++  `infinity6c-ssc377d-ymf46d`, for `ymf46d_ssc377d_gc4653`: the shared
++  include plus its own model string and lights.
++
++Two boards that share an include each keep their own `.dts`, so a change to
++one board's lights or model cannot reach the other.
 +
 +## Do not add the armthumb BCJ patch here
 +
@@ -3049,6 +3080,143 @@ index 000000000..ae89e4b00
 +mtdparts identifier, watchdog magic close, python3 scripts, i2c warnings,
 +regulatory defaults. A new patch here should be something that branch does not
 +already have.
+diff --git a/board/sigmastar/overlay/etc/fw_env.config b/board/sigmastar/overlay/etc/fw_env.config
+new file mode 100644
+index 000000000..56900d5a4
+--- /dev/null
++++ b/board/sigmastar/overlay/etc/fw_env.config
+@@ -0,0 +1,20 @@
++# U-Boot environment for fw_printenv / fw_setenv on SigmaStar boards.
++#
++# Deliberately a FILE, not flash. These boards keep their OEM U-Boot, which
++# boots from its built-in bootargs (and the thingino kernel forces its own
++# command line), so nothing in Linux needs to reach U-Boot's real env, and a
++# scratch file cannot touch flash at all.
++#
++# The shared overlay's "/dev/mtd1 0x0" is unsafe here. On the Anjvision layout
++# (MC-A85, JL12D2, YMF46D: BOOT, kernel, rootfs, data) the OEM U-Boot keeps its
++# saveenv copy at flash 0x30000, the first block of the kernel partition (mtd1),
++# so every fw_setenv (S97sysupgrade's "mark sysupgrade complete" on the first
++# boot after a flash, the WebUI) erased the kernel's first 64 KB and the next
++# power-on found no kernel. That bricked a JL12D2 once.
++#
++# A board with a partition of its own for the env (the N803: mtd1 = ENV,
++# 0x4F000..0x50000) could point at it, "/dev/mtd1 0x0 0x1000 0x1000", from its
++# camera overlay, if Linux ever needs the real env. Nothing does today.
++#
++# <device> <offset> <env size>
++/etc/fw_env.dat 0x0 0x10000
+diff --git a/board/sigmastar/overlay/etc/fw_env.dat b/board/sigmastar/overlay/etc/fw_env.dat
+new file mode 100644
+index 0000000000000000000000000000000000000000..c97c12f9b0a24bfc19c74a2b265a97c924137775
+GIT binary patch
+literal 65536
+zcmeIufdBvi0Dz$VsTV1P3IhfV7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd
+z0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd0RsjM7%*VKfB^#r3>YwA
+zz<>b*1`HT5V8DO@0|pEjFkrxd0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEj
+zFkrxd0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd0RsjM7%*VKfB^#r
+z3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@
+u0|pEjFkrxd0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFi-;k4*&rG
+
+literal 0
+HcmV?d00001
+
+diff --git a/board/sigmastar/overlay/etc/raptor-replay.conf b/board/sigmastar/overlay/etc/raptor-replay.conf
+new file mode 100644
+index 000000000..689db6dc4
+--- /dev/null
++++ b/board/sigmastar/overlay/etc/raptor-replay.conf
+@@ -0,0 +1,17 @@
++# raptorctl commands replayed after every start of the raptor stack, boot
++# and restarts alike (/etc/raptor.d/replay). One command per line, without
++# "raptorctl"; "#" starts a comment. For settings rvd keeps only while it
++# runs, such as the encoder rate-control extras below. Try a command by hand
++# first; a line that fails is logged (logread | grep raptor-replay) and
++# skipped.
++#
++# Keyframes coarser than P frames by 3 QP (I = P - delta); -3 brought night
++# keyframes from about 55 % of the bytes to 38 % at the same bitrate:
++#rvd enc-set 0 qp_ip_delta -3
++#
++# Keyframes capped near 100 KB (kbits; the cap is soft and lands about 1.3x
++# over it):
++#rvd set-max-pic-size 0 800 0
++#
++# I-frame QP 30-40 inside a frame QP of 20-48:
++#rvd set-qp-bounds-per-frame 0 30 40 20 48
+diff --git a/board/sigmastar/overlay/etc/raptor.d/replay b/board/sigmastar/overlay/etc/raptor.d/replay
+new file mode 100755
+index 000000000..af86f864f
+--- /dev/null
++++ b/board/sigmastar/overlay/etc/raptor.d/replay
+@@ -0,0 +1,60 @@
++#!/bin/sh
++# /etc/raptor.d/replay -- replay saved raptorctl commands once raptor is up.
++#
++# S31raptor runs every executable in /etc/raptor.d with "start" once the
++# stack is up -- after rvd has its ring and the other daemons are started --
++# and with "stop" before it goes down. Every start of the stack goes through
++# S31raptor: boot, the web UI's streamer restart, raptor-watchdog's recovery,
++# a setting saved through the agent. So the commands come back after each of
++# them, not only at boot.
++#
++# It is for settings rvd keeps only while it runs, such as the encoder
++# rate-control extras (set-max-pic-size, set-qp-bounds-per-frame,
++# set-super-frame, enc-set qp_ip_delta). Settings rvd writes to raptor.conf
++# itself (set-bitrate, set-qp-bounds, ...) need no replay.
++#
++# /etc/raptor-replay.conf: one raptorctl command per line, without
++# "raptorctl", words separated by spaces; "#" starts a comment. A command
++# that fails is logged and skipped. Run "/etc/raptor.d/replay start" to apply
++# the file by hand.
++
++CONF=/etc/raptor-replay.conf
++TAG=raptor-replay
++
++[ "$1" = start ] || exit 0
++[ -r "$CONF" ] || exit 0
++grep -q '^[[:space:]]*[^#[:space:]]' "$CONF" || exit 0
++
++# S31raptor waited for rvd's ring; its control socket can trail by a moment.
++n=0
++until raptorctl rvd status >/dev/null 2>&1; do
++	n=$((n + 1))
++	if [ "$n" -ge 20 ]; then
++		logger -t "$TAG" "rvd does not answer after 5 s; nothing replayed"
++		exit 0
++	fi
++	usleep 250000
++done
++
++ok=0
++bad=0
++while IFS= read -r line || [ -n "$line" ]; do
++	line=${line%%#*}
++	# shellcheck disable=SC2086 # the words of the command, split on purpose
++	set -- $line
++	[ $# -gt 0 ] || continue
++	# raptorctl exits 0 on an error reply too; the reply says.
++	if out=$(raptorctl "$@" 2>&1) && ! printf '%s' "$out" | grep -q '"status" *: *"error"'; then
++		ok=$((ok + 1))
++	else
++		bad=$((bad + 1))
++		logger -t "$TAG" "raptorctl $*: $out"
++	fi
++done <"$CONF"
++
++if [ "$bad" -gt 0 ]; then
++	logger -t "$TAG" "replayed $ok command(s) from $CONF, $bad failed"
++else
++	logger -t "$TAG" "replayed $ok command(s) from $CONF"
++fi
++exit 0
+diff --git a/board/sigmastar/overlay/etc/timezone b/board/sigmastar/overlay/etc/timezone
+new file mode 100644
+index 000000000..3eeea8cc9
+--- /dev/null
++++ b/board/sigmastar/overlay/etc/timezone
+@@ -0,0 +1 @@
++America/New York
 diff --git a/board/sigmastar/post-image.sh b/board/sigmastar/post-image.sh
 new file mode 100755
 index 000000000..767b4aa28
@@ -3430,7 +3598,7 @@ index 000000000..6e26485d8
 +branch and have the matrix see that branch's `configs/github`.
 diff --git a/kernels/sigmastar.mk b/kernels/sigmastar.mk
 new file mode 100644
-index 000000000..1c2cb4590
+index 000000000..cdf89e855
 --- /dev/null
 +++ b/kernels/sigmastar.mk
 @@ -0,0 +1,37 @@
@@ -3439,7 +3607,7 @@ index 000000000..1c2cb4590
 +# One per family, from that family's branch of johnchia/linux, a fork of
 +# OpenIPC's sigmastar-* trees. Each branch carries its own vendor BSP, and the
 +# prebuilt MI modules are tied to it by vermagic, so every branch is pinned by
-+# hash. Fetched from the local mirror kept by mirror-sigmastar-deps.sh.
++# hash. Fetched from a local mirror of that repository.
 +#
 +# Leaving KERNEL_BRANCH unset rejects the combination; thingino.mk turns that
 +# into an error rather than a fallback. Only Infinity6C is carried so far.
@@ -3473,10 +3641,10 @@ index 000000000..1c2cb4590
 +endif
 diff --git a/soc/sigmastar/infinity6c.mk b/soc/sigmastar/infinity6c.mk
 new file mode 100644
-index 000000000..98acc097b
+index 000000000..a205c7608
 --- /dev/null
 +++ b/soc/sigmastar/infinity6c.mk
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,106 @@
 +# SigmaStar Infinity6C family. Included for every board; the filter
 +# below is what limits it to this family's models.
 +ifneq ($(filter $(SOC_MODEL),ssc377 ssc377d ssc377de ssc377qe ssc378de ssc378qe),)
@@ -3563,9 +3731,13 @@ index 000000000..98acc097b
 +# this mi.ko reads 2624. Nothing fails at load; MI_SNR_QueryResCount just
 +# returns success with zero modes. Only imx335 and imx307 exist prebuilt.
 +#
-+# sigmastar-sdk's 0001 patch puts back the sensor-src headers that match this
-+# mi.ko (the ones before fe5d953), so a board with another sensor can build its
-+# driver against 1230 by setting BR2_SIGMASTAR_SENSOR_SOURCE in its defconfig.
++# The sensor-src headers that match this mi.ko (the ones before fe5d953) come
++# from sigmastar-sensor-headers, so the other sensors can be built against
++# 1230. BR2_SIGMASTAR_SENSOR_SOURCE builds them, and sigmastar-sdk then puts
++# the drop's prebuilt imx335 and imx307 back over the source-built ones. Every
++# camera defconfig sets it, so each image carries the same driver set. It must
++# be in the defconfig: this file reads it from the defconfig included as a
++# makefile, and a fragment never reaches that.
 +ifeq ($(BR2_SIGMASTAR_SENSOR_SOURCE),y)
 +SIGMASTAR_SENSOR := source
 +else
@@ -3579,3 +3751,6 @@ index 000000000..98acc097b
 +export SIGMASTAR_DROP SIGMASTAR_LIBC SIGMASTAR_GCC SIGMASTAR_KREL SIGMASTAR_SENSOR
 +
 +endif
+-- 
+2.43.0
+

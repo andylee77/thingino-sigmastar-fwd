@@ -1,0 +1,240 @@
+From fc93187180b4efc69c5b7f1bc513d627e8c063a2 Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 16:33:15 -0500
+Subject: [PATCH 13/13] infinity6c: opt-in encoder statistics from
+ RSS_VENC_STATS
+
+RSS_VENC_STATS=<seconds> (from /etc/default/raptor, which S31raptor
+exports) logs one line per H.26x channel per window: frames, the
+keyframes' share of the bytes, average and largest size and the QP range,
+per frame type. The QP is MI's per-pack u8FrameQP (frameQual), which no
+stream analyser off the camera can see. A channel with RcParam extras also
+logs GetRcParam read back a window after the deferred apply.
+
+It measures the I-frame share where the GOP-boundary burst is made, and it
+is the instrument for testing the rate-control extras on a camera. Unset or
+0 is off and costs one branch per frame.
+---
+ src/infinity6c/hal_encoder.c      | 134 ++++++++++++++++++++++++++++--
+ src/infinity6c/infinity6c_state.h |  25 ++++++
+ 2 files changed, 150 insertions(+), 9 deletions(-)
+
+diff --git a/src/infinity6c/hal_encoder.c b/src/infinity6c/hal_encoder.c
+index ca9cdfc..93bf2cf 100644
+--- a/src/infinity6c/hal_encoder.c
++++ b/src/infinity6c/hal_encoder.c
+@@ -361,21 +361,22 @@ static i6c_rc_arm i6c_enc_rate_now(infinity6c_state_t *st, int chn, int *attr_mi
+     return arm;
+ }
+ 
+-static void i6c_enc_rc_log(int chn, i6c_rc_arm arm, const i6c_venc_rcparam *p)
++/* what: "sent" for a push, "read back" for the stats' GetRcParam. */
++static void i6c_enc_rc_log(int chn, i6c_rc_arm arm, const i6c_venc_rcparam *p, const char *what)
+ {
+     i6c_rc_fields f;
+ 
+     i6c_rc_decode(arm, p, &f);
+     if (arm == I6C_RC_ARM_CBR)
+-        HAL_LOG_INFO("venc chn %d: RcParam %s: QP [%d, %d], I QP [%d, %d], I/P delta %d, "
+-                     "I/P prop %d, max I %u, max P %u (applies with the next frame)",
+-                     chn, i6c_rc_arm_name(arm), f.min_qp, f.max_qp, f.min_iqp, f.max_iqp,
++        HAL_LOG_INFO("venc chn %d: RcParam %s %s: QP [%d, %d], I QP [%d, %d], I/P delta %d, "
++                     "I/P prop %d, max I %u, max P %u",
++                     chn, i6c_rc_arm_name(arm), what, f.min_qp, f.max_qp, f.min_iqp, f.max_iqp,
+                      f.ip_delta, f.max_ip_prop, f.max_i_size, f.max_p_size);
+     else
+-        HAL_LOG_INFO("venc chn %d: RcParam %s: I QP [%d, %d], I/P delta %d, change pos %d, "
+-                     "I/P prop %d, max I %u, max P %u (applies with the next frame)",
+-                     chn, i6c_rc_arm_name(arm), f.min_iqp, f.max_iqp, f.ip_delta, f.change_pos,
+-                     f.max_ip_prop, f.max_i_size, f.max_p_size);
++        HAL_LOG_INFO("venc chn %d: RcParam %s %s: I QP [%d, %d], I/P delta %d, change pos %d, "
++                     "I/P prop %d, max I %u, max P %u",
++                     chn, i6c_rc_arm_name(arm), what, f.min_iqp, f.max_iqp, f.ip_delta,
++                     f.change_pos, f.max_ip_prop, f.max_i_size, f.max_p_size);
+ }
+ 
+ /*
+@@ -434,7 +435,8 @@ static int i6c_enc_push_rc(infinity6c_state_t *st, int chn)
+         return i6c_enc_mi_err(ret);
+     }
+ 
+-    i6c_enc_rc_log(chn, arm, &out);
++    /* Sent, not applied: the driver takes it with the next frame. */
++    i6c_enc_rc_log(chn, arm, &out, "sent");
+     return RSS_OK;
+ }
+ 
+@@ -1575,6 +1577,115 @@ int hal_enc_poll(void *ctx, int chn, uint32_t timeout_ms)
+     return RSS_OK;
+ }
+ 
++/*
++ * OPT-IN ENCODER STATISTICS
++ *
++ * RSS_VENC_STATS=<seconds> (from /etc/default/raptor, which S31raptor exports)
++ * logs one line per H.26x channel per window: frames, the keyframes' share of
++ * the bytes, average and largest frame size and the QP range, each per frame
++ * type. That is the GOP-boundary burst measured where it is made, and the
++ * per-frame QP (MI's u8FrameQP, frameQual) is what no stream analyser off the
++ * camera can see. A channel with RcParam extras also logs GetRcParam, read back
++ * a window after the deferred apply. Unset or 0 is off and costs one branch per
++ * frame.
++ */
++static void i6c_enc_stats_env(infinity6c_state_t *st)
++{
++    const char *s = getenv("RSS_VENC_STATS");
++    char *end = NULL;
++    long v;
++
++    st->enc_stats_read = true;
++    if (!s || !*s)
++        return;
++
++    v = strtol(s, &end, 10);
++    if (*end || v < 0 || v > 3600) {
++        HAL_LOG_WARN("infinity6c: RSS_VENC_STATS=%s ignored (seconds, 0-3600)", s);
++        return;
++    }
++    st->enc_stats_us = (int64_t)v * 1000000;
++    if (v)
++        HAL_LOG_INFO("infinity6c: encoder statistics every %ld s (RSS_VENC_STATS)", v);
++}
++
++static void i6c_enc_stats(infinity6c_state_t *st, int chn, const rss_frame_t *frame)
++{
++    infinity6c_venc_chn_t *enc = &st->enc[chn];
++    int64_t ts = frame->timestamp;
++    bool key = frame->is_key;
++    uint32_t bytes = 0;
++    unsigned int qp = 0;
++    unsigned int i, n;
++
++    /* Every pack, not only the ones nals[] reports, and the largest QP among them. */
++    n = enc->strm.count < enc->pack_cap ? enc->strm.count : enc->pack_cap;
++    for (i = 0; i < n; i++) {
++        const i6c_venc_pack *pack = &enc->strm.packet[i];
++
++        bytes += pack->length > pack->offset ? pack->length - pack->offset : 0;
++        if (pack->frameQual > qp)
++            qp = pack->frameQual;
++    }
++
++    if (!enc->stats.t0) {
++        memset(&enc->stats, 0, sizeof(enc->stats));
++        enc->stats.t0 = ts ? ts : 1;
++        enc->stats.iqp_min = enc->stats.pqp_min = 0xff;
++    }
++
++    enc->stats.frames++;
++    if (key) {
++        enc->stats.iframes++;
++        enc->stats.ibytes += bytes;
++        enc->stats.imax = bytes > enc->stats.imax ? bytes : enc->stats.imax;
++        enc->stats.iqp_min = qp < enc->stats.iqp_min ? (uint8_t)qp : enc->stats.iqp_min;
++        enc->stats.iqp_max = qp > enc->stats.iqp_max ? (uint8_t)qp : enc->stats.iqp_max;
++    } else {
++        enc->stats.pbytes += bytes;
++        enc->stats.pmax = bytes > enc->stats.pmax ? bytes : enc->stats.pmax;
++        enc->stats.pqp_min = qp < enc->stats.pqp_min ? (uint8_t)qp : enc->stats.pqp_min;
++        enc->stats.pqp_max = qp > enc->stats.pqp_max ? (uint8_t)qp : enc->stats.pqp_max;
++    }
++
++    if (ts - enc->stats.t0 < st->enc_stats_us)
++        return;
++
++    {
++        int64_t ms = (ts - enc->stats.t0) / 1000;
++        uint64_t total = enc->stats.ibytes + enc->stats.pbytes;
++        uint32_t pframes = enc->stats.frames - enc->stats.iframes;
++
++        if (ms <= 0)
++            ms = 1;
++        HAL_LOG_INFO("venc chn %d stats: %u frames in %lld ms, %llu kbit/s; I %u, %llu%% of "
++                     "bytes, avg %llu max %u B, QP %u-%u; P %u, avg %llu max %u B, QP %u-%u",
++                     chn, enc->stats.frames, (long long)ms,
++                     (unsigned long long)(total * 8 / (uint64_t)ms),
++                     enc->stats.iframes,
++                     (unsigned long long)(total ? enc->stats.ibytes * 100 / total : 0),
++                     (unsigned long long)(enc->stats.iframes ? enc->stats.ibytes /
++                                                                   enc->stats.iframes
++                                                             : 0),
++                     enc->stats.imax, enc->stats.iframes ? enc->stats.iqp_min : 0,
++                     enc->stats.iqp_max, pframes,
++                     (unsigned long long)(pframes ? enc->stats.pbytes / pframes : 0),
++                     enc->stats.pmax, pframes ? enc->stats.pqp_min : 0, enc->stats.pqp_max);
++    }
++    enc->stats.t0 = 0;
++
++    if (st->enc_rcx[chn].any && st->venc.get_rc_param) {
++        int lo, hi;
++        i6c_rc_arm arm = i6c_enc_rate_now(st, chn, &lo, &hi);
++        i6c_venc_rcparam p;
++
++        memset(&p, 0, sizeof(p));
++        if (arm != I6C_RC_ARM_NONE &&
++            st->venc.get_rc_param(enc->device, (unsigned int)chn, &p) == 0)
++            i6c_enc_rc_log(chn, arm, &p, "read back");
++    }
++}
++
+ int hal_enc_get_frame(void *ctx, int chn, rss_frame_t *frame)
+ {
+     infinity6c_venc_chn_t *enc;
+@@ -1632,6 +1743,11 @@ int hal_enc_get_frame(void *ctx, int chn, rss_frame_t *frame)
+     i6c_enc_fill_nals(enc, frame);
+     frame->_priv = enc;
+ 
++    if (!st->enc_stats_read)
++        i6c_enc_stats_env(st);
++    if (st->enc_stats_us && enc->device != I6C_VENC_DEV_MJPG_0)
++        i6c_enc_stats(st, chn, frame);
++
+     return RSS_OK;
+ }
+ 
+diff --git a/src/infinity6c/infinity6c_state.h b/src/infinity6c/infinity6c_state.h
+index e605c09..d0e681f 100644
+--- a/src/infinity6c/infinity6c_state.h
++++ b/src/infinity6c/infinity6c_state.h
+@@ -380,6 +380,24 @@ typedef struct {
+      * attribute, which is read, modified and written back whole.
+      */
+     rss_video_config_t cfg;
++
++    /*
++     * One window of the opt-in encoder statistics (RSS_VENC_STATS, see
++     * i6c_enc_stats): frames, keyframes, bytes and the QP range per frame type.
++     * t0 is the window's first timestamp, 0 before it opens. Cleared with the
++     * channel.
++     */
++    struct {
++        int64_t t0;
++        uint32_t frames;
++        uint32_t iframes;
++        uint64_t ibytes;
++        uint64_t pbytes;
++        uint32_t imax;
++        uint32_t pmax;
++        uint8_t iqp_min, iqp_max;
++        uint8_t pqp_min, pqp_max;
++    } stats;
+ } infinity6c_venc_chn_t;
+ 
+ /*
+@@ -575,6 +593,13 @@ typedef struct {
+     /* Bits per MaxISize/MaxPSize unit; 0 until RSS_VENC_SIZE_UNIT_BITS is read. */
+     uint32_t enc_size_unit_bits;
+ 
++    /*
++     * RSS_VENC_STATS in microseconds, 0 = off; read once, at the first frame
++     * (enc_stats_read).
++     */
++    int64_t enc_stats_us;
++    bool enc_stats_read;
++
+     /*
+      * Audio capture -- src/infinity6c/hal_audio.c, and only ever touched by the
+      * audio archive. Both archives share this struct, as they do on the i6e
+-- 
+2.43.0
+

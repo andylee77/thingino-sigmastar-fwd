@@ -1,7 +1,7 @@
-From d9cd1472a31f7ec3c6b37cf982e3367bf1d6daa6 Mon Sep 17 00:00:00 2001
-From: andylee77 <andylee77@users.noreply.github.com>
+From 3e8ff5b27c8195b768d2e775123263afa49478de Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 16:36:13 -0400
-Subject: [PATCH 6/6] infinity6c: report ae_luma on the 0..255 scale
+Subject: [PATCH 08/13] infinity6c: report ae_luma on the 0..255 scale
 
 The upstream exposure contract, and ric's night_luma, are 0..255. CUS3A's
 preAvgY is 10-bit: on the MC-A85 bench AE settled every IR-lit scene at
@@ -30,3 +30,6 @@ index 0a86af2..5351568 100644
      exposure->valid_mask |= RSS_EXPOSURE_VALID_AE_LUMA;
  
      have_awb =
+-- 
+2.43.0
+

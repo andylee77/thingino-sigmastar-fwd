@@ -1,8 +1,8 @@
-From 90c17d364de7fbf9f62a6cdce6710955faf364d1 Mon Sep 17 00:00:00 2001
+From 0bf9ae01d7f771d3adc38817797e1fc8845f88f0 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 12:55:57 -0400
-Subject: [PATCH 4/6] infinity6c: map upstream raptor's 0..255 image knobs onto
- native units
+Subject: [PATCH 06/13] infinity6c: map upstream raptor's 0..255 image knobs
+ onto native units
 
 Upstream rvd, raptorctl and Thingino's web UI speak raptor's Ingenic scale for
 the image knobs: 0..255, with 128 meaning "default". rvd pushes 128 to every
@@ -523,3 +523,6 @@ index 0000000..183e00f
 +    printf("%s: %d failure(s)\n", failures ? "FAIL" : "PASS", failures);
 +    return failures != 0;
 +}
+-- 
+2.43.0
+

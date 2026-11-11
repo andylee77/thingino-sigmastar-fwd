@@ -1,0 +1,332 @@
+From 5c8d71723bb06dd57fb8214f33ea5ae1a224b1de Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 17:09:54 -0500
+Subject: [PATCH 09/22] thingino: platform-enabling fixes and web UI platform
+ flags
+
+- thingino-isp pulls no Ingenic ISP stack on other vendors;
+- thingino-ethernet selects the JZ MAC kernel options on Ingenic only;
+- the control bar links "Photosensing Config" only with thingino-daynightd,
+  and hides the motion controls and locks the speaker where the platform's
+  web UI flags say so;
+- the OSD page offers a stream restart instead of a reboot where the
+  platform flag says a restart applies the OSD;
+- the Sensor IQ page finds the sensor and its IQ file on SigmaStar
+  (/etc/sensor/model; sensor-iq-name gives <sensor>.bin for the infinity*
+  SoCs);
+- the digital zoom bar's probe asks rvd for a non-zero crop window, so the
+  bar stays off where rvd cannot zoom (no /proc/jz/sensor, as on SigmaStar)
+  instead of failing on a click.
+
+The flags default to the old behaviour. The SigmaStar values are set in
+raptor-sigmastar.webui.json, in the streaming patch.
+---
+ overlay/usr/sbin/sensor-iq-name               |  4 +-
+ package/thingino-ethernet/Config.in           |  4 +-
+ package/thingino-isp/Config.in                |  2 +
+ .../files/www/a/streamer-osd.js               | 69 +++++++++++++++++--
+ .../files/www/streamer-osd.html               |  2 +-
+ .../files/www/x/json-sensor-upload.cgi        |  7 +-
+ package/thingino-raptor/files/www/x/zoom.cgi  |  4 +-
+ .../thingino-webui/files/www/a/control-bar.js | 27 ++++++--
+ package/thingino-webui/files/www/a/main.js    |  2 +-
+ .../files/www/x/json-sensor-info.cgi          |  7 +-
+ 10 files changed, 110 insertions(+), 18 deletions(-)
+
+diff --git a/overlay/usr/sbin/sensor-iq-name b/overlay/usr/sbin/sensor-iq-name
+index 962df9677..9ef362077 100755
+--- a/overlay/usr/sbin/sensor-iq-name
++++ b/overlay/usr/sbin/sensor-iq-name
+@@ -1,6 +1,8 @@
+ #!/bin/sh
+ # Print the sensor IQ file name the Ingenic SDK loads for a sensor and SoC.
+ # T10/T20/T30 SDKs install <sensor>.bin; newer families <sensor>-<soc>.bin.
++# SigmaStar (soc -f prints infinity*): the raptor HAL looks the file up by
++# the sensor name alone, <sensor>.bin.
+ 
+ if [ $# -ne 2 ]; then
+ 	echo "usage: sensor-iq-name <sensor> <soc>" >&2
+@@ -8,6 +10,6 @@ if [ $# -ne 2 ]; then
+ fi
+ 
+ case "$2" in
+-	t10 | t20 | t30) printf '%s.bin\n' "$1" ;;
++	t10 | t20 | t30 | infinity*) printf '%s.bin\n' "$1" ;;
+ 	*) printf '%s-%s.bin\n' "$1" "$2" ;;
+ esac
+diff --git a/package/thingino-ethernet/Config.in b/package/thingino-ethernet/Config.in
+index 6044f84b4..b740eab5c 100644
+--- a/package/thingino-ethernet/Config.in
++++ b/package/thingino-ethernet/Config.in
+@@ -1,7 +1,9 @@
+ config BR2_PACKAGE_THINGINO_ETHERNET
+ 	bool "thingino-ethernet"
+ 	select BR2_PACKAGE_THINGINO_KOPT
+-	select BR2_PACKAGE_THINGINO_KOPT_JZ_MAC
++	# The Ingenic JZ MAC kernel options. Other vendors' kernel configs carry
++	# their own MAC driver.
++	select BR2_PACKAGE_THINGINO_KOPT_JZ_MAC if BR2_SOC_VENDOR_INGENIC
+ #	select BR2_PACKAGE_THINGINO_KOPT_JZ_MAC_INTERNAL_PHY
+ #	select BR2_PACKAGE_THINGINO_KOPT_JZ_MAC_V12
+ #	select BR2_PACKAGE_THINGINO_KOPT_JZ_MAC_V13
+diff --git a/package/thingino-isp/Config.in b/package/thingino-isp/Config.in
+index 14f3655a6..44fe7eed4 100644
+--- a/package/thingino-isp/Config.in
++++ b/package/thingino-isp/Config.in
+@@ -6,6 +6,7 @@ choice
+ 	default BR2_PACKAGE_THINGINO_ISP_NONE if BR2_THINGINO_TOOLCHAIN
+ 	default BR2_PACKAGE_THINGINO_ISP_NONE if BR2_SOC_FAMILY = "a1"
+ 	default BR2_PACKAGE_THINGINO_ISP_NONE if !BR2_THINGINO_DEV_CAMERA
++	default BR2_PACKAGE_THINGINO_ISP_NONE if !BR2_SOC_VENDOR_INGENIC
+ 	default BR2_PACKAGE_THINGINO_ISP_PROPRIETARY
+ 	help
+ 	  Select the ISP kernel and userspace implementation used by the
+@@ -18,6 +19,7 @@ config BR2_PACKAGE_THINGINO_ISP_NONE
+ 
+ config BR2_PACKAGE_THINGINO_ISP_PROPRIETARY
+ 	bool "Proprietary Ingenic ISP stack"
++	depends on BR2_SOC_VENDOR_INGENIC
+ 	depends on !BR2_SOC_FAMILY = "a1"
+ 	depends on BR2_THINGINO_DEV_CAMERA
+ 	select BR2_PACKAGE_THINGINO_ISP
+diff --git a/package/thingino-raptor/files/www/a/streamer-osd.js b/package/thingino-raptor/files/www/a/streamer-osd.js
+index aa49fe514..a2b2a3caf 100644
+--- a/package/thingino-raptor/files/www/a/streamer-osd.js
++++ b/package/thingino-raptor/files/www/a/streamer-osd.js
+@@ -17,6 +17,53 @@
+   const alphaFill = document.getElementById("alpha_fill");
+   const alphaOutline = document.getElementById("alpha_outline");
+   const saveBtn = document.getElementById("save-osd-config");
++  const applyNote = document.getElementById("osd-apply-note");
++
++  // Where a stream restart is known to apply saved OSD changes (a platform
++  // feature flag; on a T20 it dropped the OSD until the next boot, so the
++  // default stays "reboot"), offer that instead: about 10 s, not a reboot.
++  const uiDevice = (window.thinginoUIConfig || {}).device || {};
++  const restartApplies = uiDevice.osd_restart_applies === true;
++  const RESTART_NOTE =
++    "Saved to /etc/raptor.conf. Most text changes show at once; the logo, " +
++    "the OSD on/off switch and anything that does not show yet apply when " +
++    "the stream restarts (about 10 seconds).";
++
++  async function restartStream() {
++    showAlert("info", "Restarting the stream...", 5000);
++    try {
++      await fetch("/x/restart-streamer.cgi", {
++        method: "POST",
++        cache: "no-store",
++      });
++      showAlert(
++        "success",
++        "Stream restarted; the OSD can take a few seconds to reappear.",
++        6000,
++      );
++    } catch (err) {
++      showAlert("danger", "Failed to restart the stream: " + err.message);
++    }
++  }
++
++  if (restartApplies && applyNote) {
++    applyNote.textContent = RESTART_NOTE + " ";
++    const btn = document.createElement("button");
++    btn.type = "button";
++    btn.className = "btn btn-link btn-sm p-0 align-baseline";
++    btn.textContent = "Restart stream now";
++    btn.addEventListener("click", async () => {
++      const ok = await thinginoConfirm({
++        title: "Restart stream",
++        message:
++          "Restart the stream to apply the saved OSD? Video stops for about 10 seconds.",
++        confirmLabel: "Restart stream",
++        intent: "warning",
++      });
++      if (ok) restartStream();
++    });
++    applyNote.appendChild(btn);
++  }
+ 
+   function updateSwatch(input, swatch) {
+     let v = (input.value || "").trim();
+@@ -273,11 +320,23 @@
+       await patchLeaves(helper, "time/", time);
+ 
+       await saveElements(helper);
+-      showAlert(
+-        "success",
+-        "OSD configuration saved. Reboot the camera to apply it.",
+-        6000,
+-      );
++      if (restartApplies) {
++        const restart = await thinginoConfirm({
++          title: "OSD saved",
++          message:
++            "Most text changes show at once. Restart the stream now to apply the rest (the logo, the OSD on/off switch)? Video stops for about 10 seconds.",
++          confirmLabel: "Restart stream",
++          cancelLabel: "Later",
++          intent: "warning",
++        });
++        if (restart) await restartStream();
++      } else {
++        showAlert(
++          "success",
++          "OSD configuration saved. Reboot the camera to apply it.",
++          6000,
++        );
++      }
+     } catch (err) {
+       console.error("Failed to save OSD config", err);
+       showAlert("danger", "Failed to save OSD: " + err.message, 6000);
+diff --git a/package/thingino-raptor/files/www/streamer-osd.html b/package/thingino-raptor/files/www/streamer-osd.html
+index b445d095f..76a85c014 100644
+--- a/package/thingino-raptor/files/www/streamer-osd.html
++++ b/package/thingino-raptor/files/www/streamer-osd.html
+@@ -195,7 +195,7 @@
+               </div>
+             </div>
+           </div>
+-          <p class="text-secondary small">
++          <p class="text-secondary small" id="osd-apply-note">
+             Saved to /etc/raptor.conf. Raptor does not reliably apply OSD element
+             changes to a running stream, so <a href="/x/reboot.cgi" class="confirm" data-confirm="Reboot the camera now?">reboot the camera</a>
+             to apply them.
+diff --git a/package/thingino-raptor/files/www/x/json-sensor-upload.cgi b/package/thingino-raptor/files/www/x/json-sensor-upload.cgi
+index eaf61d553..1573ae428 100755
+--- a/package/thingino-raptor/files/www/x/json-sensor-upload.cgi
++++ b/package/thingino-raptor/files/www/x/json-sensor-upload.cgi
+@@ -7,7 +7,9 @@ require_auth
+ 
+ SENSOR_IQ_PATH="/etc/sensor"
+ SENSOR_IQ_UPLOAD_PATH="/opt/sensor"
+-SENSOR_MODEL=$(cat /proc/jz/sensor/sensor0/name 2>/dev/null || cat /proc/jz/sensor/name 2>/dev/null)
++# The sensor name: Ingenic's sensor driver reports it under /proc/jz; other
++# SoCs (SigmaStar) have no /proc/jz, but every build writes /etc/sensor/model.
++SENSOR_MODEL=$(cat /proc/jz/sensor/sensor0/name 2>/dev/null || cat /proc/jz/sensor/name 2>/dev/null || cat "$SENSOR_IQ_PATH/model" 2>/dev/null)
+ SOC_MODEL=$(soc -f 2>/dev/null)
+ SENSOR_IQ_FILE=$(sensor-iq-name "$SENSOR_MODEL" "$SOC_MODEL")
+ UPLOADED_SENSOR_IQ_FILE="${SENSOR_IQ_UPLOAD_PATH}/uploaded.bin"
+@@ -64,6 +66,9 @@ case "${REQUEST_METHOD:-GET}" in
+ 	*) send_error '405 Method Not Allowed' 'Method not allowed.' ;;
+ esac
+ 
++# Without a sensor name the link would be "-<soc>.bin", which nothing loads.
++[ -n "$SENSOR_MODEL" ] || send_error '500 Internal Server Error' 'Cannot tell which sensor this camera has.'
++
+ case "${CONTENT_TYPE:-}" in
+ 	multipart/form-data*)
+ 		BOUNDARY=$(printf '%s' "$CONTENT_TYPE" | sed -n 's/.*boundary=//p')
+diff --git a/package/thingino-raptor/files/www/x/zoom.cgi b/package/thingino-raptor/files/www/x/zoom.cgi
+index c9b0e9c83..bf57b8505 100755
+--- a/package/thingino-raptor/files/www/x/zoom.cgi
++++ b/package/thingino-raptor/files/www/x/zoom.cgi
+@@ -16,7 +16,9 @@ esac
+ # raptor build answers get-zoom; older builds have no such command.
+ case "$QUERY_STRING" in
+ 	*info=1*)
+-		if raptorctl rvd get-zoom 2>/dev/null | grep -q '"enable"'; then
++		# Without the sensor's geometry (no /proc/jz/sensor, as on SigmaStar)
++		# rvd answers get-zoom with a zero window and refuses set-zoom.
++		if raptorctl rvd get-zoom 2>/dev/null | grep -Eq '"width"[[:space:]]*:[[:space:]]*[1-9]'; then
+ 			supported=true
+ 		else
+ 			supported=false
+diff --git a/package/thingino-webui/files/www/a/control-bar.js b/package/thingino-webui/files/www/a/control-bar.js
+index e07a68b19..204b45184 100644
+--- a/package/thingino-webui/files/www/a/control-bar.js
++++ b/package/thingino-webui/files/www/a/control-bar.js
+@@ -416,6 +416,14 @@
+       icon: "bi bi-volume-up",
+       label: "Speaker",
+     });
++    // Lock the speaker where the hardware's audio-out isn't wired, so it
++    // cannot be switched on in the UI and never shows a misleading "on" state.
++    // A platform says so with the feature flag audio_out: false (a
++    // *.webui.json); without the flag the speaker stays usable.
++    if (((window.thinginoUIConfig || {}).device || {}).audio_out === false) {
++      spkButton.disabled = true;
++      spkButton.title = "Speaker output is not available on this camera";
++    }
+ 
+     // Dropdown toggle
+     const toggle = createButton({
+@@ -576,6 +584,9 @@
+         icon: "bi bi-gear",
+         label: "Photosensing Config",
+         title: "Photosensing Config",
++        // daynightd's page: absent when another daemon (raptor's ric)
++        // runs day/night, and the link would only 404.
++        feature: "daynight",
+       },
+       {
+         type: "link",
+@@ -586,7 +597,8 @@
+       },
+     ];
+ 
+-    items.forEach((item) => {
++    const device = (window.thinginoUIConfig || {}).device || {};
++    items.filter((item) => !item.feature || device[item.feature]).forEach((item) => {
+       const li = document.createElement("li");
+       if (item.type === "divider") {
+         const divider = document.createElement("hr");
+@@ -725,15 +737,20 @@
+     bar.id = "button-bar";
+     bar.className = "d-flex align-items-stretch gap-1 mb-2 flex-wrap";
+ 
+-    const motionBtn = createMotionGuardButton();
+-    motionBtn.classList.add("flex-fill");
+-    bar.appendChild(motionBtn);
++    var uiConfig = window.thinginoUIConfig || {};
++
++    // A streamer plugin sets the motion feature flag false when the camera
++    // cannot detect motion itself (no IVS in its HAL); absent means it can.
++    if (!(uiConfig.device && uiConfig.device.motion === false)) {
++      const motionBtn = createMotionGuardButton();
++      motionBtn.classList.add("flex-fill");
++      bar.appendChild(motionBtn);
++    }
+ 
+     const privacyBtn = createPrivacyModeButton();
+     privacyBtn.classList.add("flex-fill");
+     bar.appendChild(privacyBtn);
+ 
+-    var uiConfig = window.thinginoUIConfig || {};
+     if (uiConfig.device && uiConfig.device.wireguard) {
+       var wireguardBtn = createWireGuardButton();
+       wireguardBtn.classList.add("flex-fill");
+diff --git a/package/thingino-webui/files/www/a/main.js b/package/thingino-webui/files/www/a/main.js
+index de1bd1ac0..1b26daab8 100644
+--- a/package/thingino-webui/files/www/a/main.js
++++ b/package/thingino-webui/files/www/a/main.js
+@@ -1046,7 +1046,7 @@ function updateHeartbeatUi(json) {
+   // Update speaker button
+   if (typeof json.spk_enabled !== "undefined") {
+     const spkBtn = $("#speaker");
+-    if (spkBtn) {
++    if (spkBtn && !spkBtn.disabled) {
+       spkBtn.classList.remove("pending");
+       const isActive =
+         json.spk_enabled &&
+diff --git a/package/thingino-webui/files/www/x/json-sensor-info.cgi b/package/thingino-webui/files/www/x/json-sensor-info.cgi
+index 127e5f0a1..26fb8ebf0 100755
+--- a/package/thingino-webui/files/www/x/json-sensor-info.cgi
++++ b/package/thingino-webui/files/www/x/json-sensor-info.cgi
+@@ -10,11 +10,14 @@ printf 'Cache-Control: no-cache\r\n'
+ printf 'Connection: close\r\n'
+ printf '\r\n'
+ 
+-SENSOR_MODEL=$(cat /proc/jz/sensor/sensor0/name 2>/dev/null || cat /proc/jz/sensor/name 2>/dev/null)
++SENSOR_IQ_PATH="/etc/sensor"
++
++# The sensor name: Ingenic's sensor driver reports it under /proc/jz; other
++# SoCs (SigmaStar) have no /proc/jz, but every build writes /etc/sensor/model.
++SENSOR_MODEL=$(cat /proc/jz/sensor/sensor0/name 2>/dev/null || cat /proc/jz/sensor/name 2>/dev/null || cat "$SENSOR_IQ_PATH/model" 2>/dev/null)
+ SOC_MODEL=$(soc -f 2>/dev/null)
+ SOC_FAMILY=$(echo "$SOC_MODEL" | sed 's/[0-9x].*//' | tr '[:upper:]' '[:lower:]')
+ 
+-SENSOR_IQ_PATH="/etc/sensor"
+ SENSOR_IQ_FILE=$(sensor-iq-name "$SENSOR_MODEL" "$SOC_MODEL")
+ SENSOR_FILE_FULL_PATH="${SENSOR_IQ_PATH}/${SENSOR_IQ_FILE}"
+ 
+-- 
+2.43.0
+

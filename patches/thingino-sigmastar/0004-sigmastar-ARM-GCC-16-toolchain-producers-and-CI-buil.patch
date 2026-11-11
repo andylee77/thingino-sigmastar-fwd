@@ -1,8 +1,12 @@
-From 44dd4d6ac7a56a59f6bae364d0cab374bd661877 Mon Sep 17 00:00:00 2001
+From 2887db05886c422571599179e31096103966103f Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 4 Nov 2026 08:19:15 -0500
-Subject: [PATCH 04/21] sigmastar: ARM GCC 16 toolchain producers and CI build
+Date: Wed, 11 Nov 2026 17:09:54 -0500
+Subject: [PATCH 04/22] sigmastar: ARM GCC 16 toolchain producers and CI build
 
+Producer defconfigs for the Infinity6 ARM toolchains (GCC 16, glibc and
+uClibc) in the toolchain workflows, a SigmaStar build workflow, and
+scripts/check-target-libs.sh, which checks that every DT_NEEDED in the target
+resolves.
 ---
  .github/workflows/sigmastar-build.yaml        | 142 ++++++++++++++
  .github/workflows/toolchain-aarch64.yaml      |  17 +-
@@ -608,3 +612,6 @@ index 000000000..4488f5456
 +fi
 +
 +exit $rc
+-- 
+2.43.0
+

@@ -1,9 +1,15 @@
-From d912d51b65d5942d626eb4ddab5730350c6b6e71 Mon Sep 17 00:00:00 2001
+From fddfd67d6a258dbb273d91de6c938e21c031ae99 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 4 Nov 2026 08:19:16 -0500
-Subject: [PATCH 17/21] thingino-sysupgrade: ship thingino-update, fence
+Date: Wed, 11 Nov 2026 17:09:54 -0500
+Subject: [PATCH 17/22] thingino-sysupgrade: ship thingino-update, fence
  sysupgrade; dirty build-id
 
+thingino-update updates and reverts units that run the OEM U-Boot and flash
+layout: it writes the kernel and rootfs only, never the boot partition or the
+overlay, with a model and SoC guard, and takes the .bin the stock web uploader
+takes. sysupgrade -f and -b are fenced on units with no env, all or upgrade
+partition. rootfs_script.sh marks BUILD_ID and COMMIT_ID -dirty for a tree
+with uncommitted changes.
 ---
  package/thingino-sysupgrade/files/sysupgrade  |  14 ++
  .../thingino-sysupgrade/files/thingino-update | 173 ++++++++++++++++++
@@ -13,7 +19,7 @@ Subject: [PATCH 17/21] thingino-sysupgrade: ship thingino-update, fence
  create mode 100644 package/thingino-sysupgrade/files/thingino-update
 
 diff --git a/package/thingino-sysupgrade/files/sysupgrade b/package/thingino-sysupgrade/files/sysupgrade
-index 89b243a82..a3b77a74a 100644
+index 89b243a82..73a8c9e04 100644
 --- a/package/thingino-sysupgrade/files/sysupgrade
 +++ b/package/thingino-sysupgrade/files/sysupgrade
 @@ -3,6 +3,20 @@
@@ -29,7 +35,7 @@ index 89b243a82..a3b77a74a 100644
 +    *" -h "*|*" --help "*) : ;;
 +    *)
 +      echo "This camera uses OEM U-Boot + ANJOY888 images."
-+      echo "Use:  thingino-update <image.anjoy888|URL>   (thingino-update -h)"
++      echo "Use:  thingino-update <image.bin|URL>   (thingino-update -h)"
 +      exit 1 ;;
 +  esac
 +fi
@@ -39,7 +45,7 @@ index 89b243a82..a3b77a74a 100644
  RUBICON="1768337345" # 2026-01-13
 diff --git a/package/thingino-sysupgrade/files/thingino-update b/package/thingino-sysupgrade/files/thingino-update
 new file mode 100644
-index 000000000..2777cb97e
+index 000000000..1c4a2e5b2
 --- /dev/null
 +++ b/package/thingino-sysupgrade/files/thingino-update
 @@ -0,0 +1,173 @@
@@ -69,7 +75,7 @@ index 000000000..2777cb97e
 +# (we keep OEM U-Boot and a file-backed env). "Full" here means kernel+rootfs.
 +#
 +# Usage (on the camera, over ssh):
-+#   thingino-update [-n] [-y] <image.anjoy888 | http://host/image.anjoy888>
++#   thingino-update [-n] [-y] <image.bin | http://host/image.bin>
 +#     -n   dry run: fetch, parse, extract, size-check, then STOP (no flash)
 +#     -y   skip the confirmation prompt (non-interactive)
 +#
@@ -91,13 +97,13 @@ index 000000000..2777cb97e
 +		*) break ;;
 +	esac
 +done
-+[ $# -eq 1 ] || { echo "usage: thingino-update [-n] [-y] <image.anjoy888|URL>" >&2; exit 2; }
++[ $# -eq 1 ] || { echo "usage: thingino-update [-n] [-y] <image.bin|URL>" >&2; exit 2; }
 +SRC="$1"
 +
 +die() { echo "thingino-update: $*" >&2; exit 1; }
 +
 +# --- obtain the image -------------------------------------------------------
-+IMG=/tmp/thingino-update.anjoy888
++IMG=/tmp/thingino-update.bin
 +case "$SRC" in
 +	http://*|https://*)
 +		echo "[*] fetching $SRC"
@@ -259,3 +265,6 @@ index e833ba5b8..1fa0b66b4 100755
  IMAGE_ID=${IMAGE_ID}
  IMAGE_NAME=\"${IMAGE_NAME}\"
  BUILD_ID=\"${BUILD_ID}\"
+-- 
+2.43.0
+

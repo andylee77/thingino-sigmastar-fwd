@@ -1,30 +1,99 @@
-From 095b25485f0ecc93ece927c65e22a9ce8346c803 Mon Sep 17 00:00:00 2001
+From d6e4c36b143bb6e5d95de31f4a9db3ac5085f962 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 4 Nov 2026 08:19:16 -0500
-Subject: [PATCH 20/21] cameras: Anpviz IPC-B8A63WD-S / UVision MC-F46D
+Date: Wed, 11 Nov 2026 17:09:54 -0500
+Subject: [PATCH 20/22] cameras: Anpviz IPC-B8A63WD-S / UVision MC-F46D
  (ymf46d_ssc377d_gc4653)
 
+SSC377D + GC4653, 2560x1440 + 960x540: orientation, the mic, IR and white
+lights, GPIO IR-cut, microSD automount. Its own board DTS includes the wiring
+it shares with the JL12D2 and adds its model string and lights, so a JL12D2
+board change does not reach it. It boots under the stock OEM U-Boot and flash
+layout, with the U-Boot env kept in a file. The RAPTOR_* keys are in
+raptor.config. The OEM sensor tuning (gc4653.bin) is a vendor file and is not
+included.
 ---
+ ...dts-infinity6c-add-the-YMF46D-module.patch |  62 ++++++
  .../cameras/ymf46d_ssc377d_gc4653/.gitignore  |   3 +
- .../overlay/etc/fw_env.config                 |  12 +
- .../overlay/etc/fw_env.dat                    | Bin 0 -> 65536 bytes
- .../overlay/etc/init.d/S30light               |  19 ++
  .../overlay/etc/modules.d/sdcard              |   5 +
- .../overlay/etc/timezone                      |   1 +
- .../overlay/usr/sbin/light                    | 156 ++++++++++++
- .../ymf46d_ssc377d_gc4653.kernel.config       |  35 +++
- .../ymf46d_ssc377d_gc4653_defconfig           | 223 ++++++++++++++++++
- 9 files changed, 454 insertions(+)
+ .../ymf46d_ssc377d_gc4653/raptor.config       |  38 ++++
+ .../ymf46d_ssc377d_gc4653.kernel.config       |  36 ++++
+ .../ymf46d_ssc377d_gc4653_defconfig           | 196 ++++++++++++++++++
+ 6 files changed, 340 insertions(+)
+ create mode 100644 board/sigmastar/infinity6c/patches/linux/0004-ARM-dts-infinity6c-add-the-YMF46D-module.patch
  create mode 100644 configs/cameras/ymf46d_ssc377d_gc4653/.gitignore
- create mode 100755 configs/cameras/ymf46d_ssc377d_gc4653/overlay/etc/fw_env.config
- create mode 100755 configs/cameras/ymf46d_ssc377d_gc4653/overlay/etc/fw_env.dat
- create mode 100755 configs/cameras/ymf46d_ssc377d_gc4653/overlay/etc/init.d/S30light
  create mode 100644 configs/cameras/ymf46d_ssc377d_gc4653/overlay/etc/modules.d/sdcard
- create mode 100644 configs/cameras/ymf46d_ssc377d_gc4653/overlay/etc/timezone
- create mode 100755 configs/cameras/ymf46d_ssc377d_gc4653/overlay/usr/sbin/light
+ create mode 100644 configs/cameras/ymf46d_ssc377d_gc4653/raptor.config
  create mode 100644 configs/cameras/ymf46d_ssc377d_gc4653/ymf46d_ssc377d_gc4653.kernel.config
  create mode 100644 configs/cameras/ymf46d_ssc377d_gc4653/ymf46d_ssc377d_gc4653_defconfig
 
+diff --git a/board/sigmastar/infinity6c/patches/linux/0004-ARM-dts-infinity6c-add-the-YMF46D-module.patch b/board/sigmastar/infinity6c/patches/linux/0004-ARM-dts-infinity6c-add-the-YMF46D-module.patch
+new file mode 100644
+index 000000000..a9b937e8f
+--- /dev/null
++++ b/board/sigmastar/infinity6c/patches/linux/0004-ARM-dts-infinity6c-add-the-YMF46D-module.patch
+@@ -0,0 +1,62 @@
++From: Andy <andylee77@users.noreply.github.com>
++Subject: [PATCH] ARM: dts: infinity6c: add the Anjvision YMF46D / Anpviz IPC-B8A63WD-S module
++
++Generated from infinity6c-ssc377d-ymf46d.dts by gen-board-dts-patch.sh (auto hunk count).
++
++---
++--- /dev/null
+++++ b/arch/arm/boot/dts/infinity6c-ssc377d-ymf46d.dts
++@@ -0,0 +1,53 @@
+++/*
+++ * infinity6c-ssc377d-ymf46d.dts - Anjvision YMF46D / Anpviz IPC-B8A63WD-S
+++ *
+++ * SigmaStar SSC377D (Infinity6C) + GalaxyCore GC4653 (MIPI), 16 MB SPI NOR,
+++ * 128 MB DDR. A fixed-lens bullet with an IR and a white LED bank and a
+++ * microSD slot; the module is UVision's MC-F46D (OEM device type MCF46D).
+++ *
+++ * This program is free software; you can redistribute it and/or modify it
+++ * under the terms of the GNU General Public License version 2, as published
+++ * by the Free Software Foundation.
+++ *
+++ * The board wiring it shares with the JL12D2 (FUART, sensor MIPI and I2C,
+++ * microSD) is in infinity6c-ssc377d-anjvision.dtsi: this unit's OEM device
+++ * tree has the same padmux triplets and csi/vif sr0 properties. This file has
+++ * the model string and the lights, from the same OEM tree:
+++ *   - PAD_SPI0_CZ on PWM4: the IR bank;
+++ *   - PAD_PWM0 on PWM0: the white bank. As on the JL12D2, the sensor's
+++ *     frame-sync wave moves off PWM0 to the unconnected PWM2 (&vif below);
+++ *   - PAD_PWM1 as ETH1_LED: the Ethernet activity LED.
+++ * Bench check (2026-10-25), each bank lit alone at full duty: the PWM4 bank
+++ * moves the AE only with the IR-cut filter out, the PAD_PWM0 bank cuts the
+++ * total gain ~20% with it in.
+++ *
+++ * The OEM firmware also drives seven GPIOs from user space. Its GPIO table
+++ * for this board names their roles: 12 the speaker amp enable (high while
+++ * audio plays), 60 the reset button (active low), 10 and 61 alarm outputs,
+++ * 44 an alarm input, 74 a Wi-Fi power enable. It also sets 30 (PAD_PM_GPIO4)
+++ * high when it raises the CPU to 1 GHz (see the include's core_power note).
+++ * None is bench-checked yet, so none is mapped here.
+++ */
+++
+++#include "infinity6c-ssc377d-anjvision.dtsi"
+++
+++/ {
+++	model = "Anjvision YMF46D / Anpviz IPC-B8A63WD-S (SSC377D + GC4653)";
+++
+++	soc {
+++		padmux {
+++			schematic =
+++				<GPIO_NR         PINMUX_FOR_UNKNOWN_MODE       MDRV_PUSE_NA>,
+++				/* LED banks; PAD_PWM0 on PWM0 (OEM routing); frame-sync moved off PWM0 in &vif */
+++				<PAD_PWM0        PINMUX_FOR_PWM0_MODE_1        MDRV_PUSE_PWM0>,
+++				<PAD_SPI0_CZ     PINMUX_FOR_PWM4_MODE_2        MDRV_PUSE_PWM4>,
+++				/* Ethernet activity LED */
+++				<PAD_PWM1        PINMUX_FOR_LED1_MODE_2        MDRV_PUSE_ETH1_LED>,
+++				ANJV_SSC377D_PADMUX;
+++		};
+++	};
+++};
+++
+++&vif {
+++	vif_ds_rt_pwm_pin = <0x02>;	/* frame-sync off PWM0 -> unconnected PWM2, freeing PWM0 for the white LED */
+++};
 diff --git a/configs/cameras/ymf46d_ssc377d_gc4653/.gitignore b/configs/cameras/ymf46d_ssc377d_gc4653/.gitignore
 new file mode 100644
 index 000000000..f8a999c5d
@@ -34,64 +103,6 @@ index 000000000..f8a999c5d
 +# OEM tuning (proprietary), copied from the stock rootfs into the build tree
 +# only: /config/iqfile/gc4023_day.bin from the YMF46D V3.4.2.2 image.
 +gc4653.bin
-diff --git a/configs/cameras/ymf46d_ssc377d_gc4653/overlay/etc/fw_env.config b/configs/cameras/ymf46d_ssc377d_gc4653/overlay/etc/fw_env.config
-new file mode 100755
-index 000000000..33fe75773
---- /dev/null
-+++ b/configs/cameras/ymf46d_ssc377d_gc4653/overlay/etc/fw_env.config
-@@ -0,0 +1,12 @@
-+# U-Boot environment location on the JL12D2 / MCL12D2 (OEM LX510 U-Boot).
-+#
-+# Deliberately a FILE, not flash -- the same fix as the MC-A85. This OEM U-Boot
-+# keeps its saveenv copy at flash 0x30000, the first block of the kernel
-+# partition (mtd1), and thingino's default "/dev/mtd1 0x0" pointed straight at
-+# it: S97sysupgrade's "mark sysupgrade complete" on the first boot after a
-+# flash wrote an env block over the uImage header, and the next power-on found
-+# no kernel. U-Boot boots from its built-in bootargs, so nothing needs to reach
-+# its env from Linux; fw_setenv/fw_printenv work against this scratch file.
-+#
-+# <device> <offset> <env size>
-+/etc/fw_env.dat 0x0 0x10000
-diff --git a/configs/cameras/ymf46d_ssc377d_gc4653/overlay/etc/fw_env.dat b/configs/cameras/ymf46d_ssc377d_gc4653/overlay/etc/fw_env.dat
-new file mode 100755
-index 0000000000000000000000000000000000000000..c97c12f9b0a24bfc19c74a2b265a97c924137775
-GIT binary patch
-literal 65536
-zcmeIufdBvi0Dz$VsTV1P3IhfV7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd
-z0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd0RsjM7%*VKfB^#r3>YwA
-zz<>b*1`HT5V8DO@0|pEjFkrxd0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEj
-zFkrxd0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd0RsjM7%*VKfB^#r
-z3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@
-u0|pEjFkrxd0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFi-;k4*&rG
-
-literal 0
-HcmV?d00001
-
-diff --git a/configs/cameras/ymf46d_ssc377d_gc4653/overlay/etc/init.d/S30light b/configs/cameras/ymf46d_ssc377d_gc4653/overlay/etc/init.d/S30light
-new file mode 100755
-index 000000000..8df13c705
---- /dev/null
-+++ b/configs/cameras/ymf46d_ssc377d_gc4653/overlay/etc/init.d/S30light
-@@ -0,0 +1,19 @@
-+#!/bin/sh
-+# S30light -- set up the YMF46D LED PWM channels and leave both banks off.
-+# Runs before S31raptor so ric's irled_cmd hook finds the channels ready.
-+
-+case "$1" in
-+	start | restart | reload)
-+		printf "Starting light: "
-+		if /usr/sbin/light init; then echo "OK"; else echo "FAIL"; fi
-+		;;
-+	stop)
-+		/usr/sbin/light ir off 2>/dev/null
-+		/usr/sbin/light white off 2>/dev/null
-+		;;
-+	*)
-+		echo "Usage: $0 {start|stop|restart}"
-+		exit 1
-+		;;
-+esac
-+exit 0
 diff --git a/configs/cameras/ymf46d_ssc377d_gc4653/overlay/etc/modules.d/sdcard b/configs/cameras/ymf46d_ssc377d_gc4653/overlay/etc/modules.d/sdcard
 new file mode 100644
 index 000000000..4f75b6c17
@@ -103,190 +114,65 @@ index 000000000..4f75b6c17
 +kdrv_sdmmc
 +mmc_block
 +exfat
-diff --git a/configs/cameras/ymf46d_ssc377d_gc4653/overlay/etc/timezone b/configs/cameras/ymf46d_ssc377d_gc4653/overlay/etc/timezone
+diff --git a/configs/cameras/ymf46d_ssc377d_gc4653/raptor.config b/configs/cameras/ymf46d_ssc377d_gc4653/raptor.config
 new file mode 100644
-index 000000000..3eeea8cc9
+index 000000000..96c0cc3ae
 --- /dev/null
-+++ b/configs/cameras/ymf46d_ssc377d_gc4653/overlay/etc/timezone
-@@ -0,0 +1 @@
-+America/New York
-diff --git a/configs/cameras/ymf46d_ssc377d_gc4653/overlay/usr/sbin/light b/configs/cameras/ymf46d_ssc377d_gc4653/overlay/usr/sbin/light
-new file mode 100755
-index 000000000..94576ee6a
---- /dev/null
-+++ b/configs/cameras/ymf46d_ssc377d_gc4653/overlay/usr/sbin/light
-@@ -0,0 +1,156 @@
-+#!/bin/sh
-+# light -- IR and white LED control for the Anjvision YMF46D / Anpviz
-+# IPC-B8A63WD-S (UVision MC-F46D, SSC377D)
-+#
-+#   light <ir|ir850|white|flood> <on|off|toggle|read|1|0|~>
-+#   light <ir|ir850|white|flood> on <0-100>
-+#   light <ir|ir850|white|flood> brightness [0-100]
-+#   light init | status
-+#
-+# Same command line as thingino's GPIO light script (the web UI's light
-+# buttons call "light <type> <0|1|~>"), but both banks here are PWM-dimmed.
-+# The OEM firmware runs PWM0 and PWM4 at a 50 us period; the board device
-+# tree (infinity6c-ssc377d-jl12d2, the same wiring) muxes the two pads as:
-+#
-+#   PAD_SPI0_CZ -> IR bank, driven by PWM4
-+#   PAD_PWM0    -> white bank, driven by PWM0 (PINMUX_FOR_PWM0_MODE_1, the OEM
-+#                  routing; the DTB moves the sensor's frame-sync wave to the
-+#                  unconnected PWM2, which used to strobe this bank on PWM0)
-+#
-+# Which bank is which was measured on the bench unit (2026-10-25) from the
-+# AE: with the IR-cut filter in, PWM4 changes nothing and the white bank (then PWM9) drops the
-+# total gain ~20%; with the filter out, both do.
-+#
-+# PWM9 rather than the OEM's PWM0 so the white bank cannot pick up mi.ko's
-+# dual-sensor frame-sync wave, which it drives on PWM0 (see the MC-A85).
-+#
-+# Brightness persists in /etc/light.conf. "on <percent>" lights the bank at
-+# that level once without saving it: ric's IR level ladder steps the IR bank
-+# that way, and must not rewrite flash at every step. Off is duty 0 with the
-+# channel left enabled, so switching does not re-export.
-+
-+CONF=/etc/light.conf
-+PWM=/sys/class/pwm/pwmchip0
-+PERIOD=50000 # ns, 20 kHz -- the OEM's period for this board family
-+
-+IR_CH=4
-+WHITE_CH=0
-+# The level for a plain "on" (web UI buttons, manual use). ric's automatic
-+# night picks its own level from [ircut] ir_levels.
-+IR_BRIGHTNESS=40
-+WHITE_BRIGHTNESS=100
-+[ -f "$CONF" ] && . "$CONF"
-+
-+die() {
-+	echo "light: $*" >&2
-+	exit 1
-+}
-+
-+usage() {
-+	echo "Usage: light <ir|ir850|white|flood> <on|off|toggle|read|brightness [0-100]>
-+       light init | status" >&2
-+	exit 1
-+}
-+
-+save_conf() {
-+	cat >"$CONF" <<EOF
-+IR_BRIGHTNESS=$IR_BRIGHTNESS
-+WHITE_BRIGHTNESS=$WHITE_BRIGHTNESS
-+EOF
-+}
-+
-+ch_setup() {
-+	local ch=$1
-+	[ -d $PWM/pwm$ch ] || echo "$ch" >$PWM/export || return 1
-+	echo 0 >$PWM/pwm$ch/duty_cycle 2>/dev/null
-+	echo $PERIOD >$PWM/pwm$ch/period
-+	echo 0 >$PWM/pwm$ch/duty_cycle
-+	echo 1 >$PWM/pwm$ch/enable
-+}
-+
-+init() {
-+	ch_setup $IR_CH || die "cannot set up pwm$IR_CH"
-+	ch_setup $WHITE_CH || die "cannot set up pwm$WHITE_CH"
-+}
-+
-+ready() {
-+	[ -f $PWM/pwm$IR_CH/duty_cycle ] && [ -f $PWM/pwm$WHITE_CH/duty_cycle ] || init
-+}
-+
-+duty_of() { cat $PWM/pwm$1/duty_cycle 2>/dev/null || echo 0; }
-+
-+set_level() { # set_level <ch> <percent>
-+	echo $((PERIOD * $2 / 100)) >$PWM/pwm$1/duty_cycle
-+}
-+
-+state() { [ "$(duty_of "$1")" -gt 0 ] && echo 1 || echo 0; }
-+
-+case "$1" in
-+	init)
-+		init
-+		exit 0
-+		;;
-+	status)
-+		ready
-+		echo "{\"ir\":$(state $IR_CH),\"ir_brightness\":$IR_BRIGHTNESS,\"white\":$(state $WHITE_CH),\"white_brightness\":$WHITE_BRIGHTNESS}"
-+		exit 0
-+		;;
-+	ir | ir850)
-+		CH=$IR_CH
-+		VAR=IR_BRIGHTNESS
-+		;;
-+	white | flood)
-+		CH=$WHITE_CH
-+		VAR=WHITE_BRIGHTNESS
-+		;;
-+	ir940)
-+		die "this board has no 940 nm bank"
-+		;;
-+	*)
-+		usage
-+		;;
-+esac
-+
-+ready
-+eval "LEVEL=\$$VAR"
-+
-+case "${2:-read}" in
-+	1 | on)
-+		if [ -n "$3" ]; then
-+			case "$3" in
-+				*[!0-9]*) die "level must be 0-100" ;;
-+			esac
-+			[ "$3" -le 100 ] || die "level must be 0-100"
-+			set_level $CH "$3"
-+		else
-+			set_level $CH "$LEVEL"
-+		fi
-+		;;
-+	0 | off)
-+		set_level $CH 0
-+		;;
-+	~ | toggle)
-+		if [ "$(state $CH)" = 1 ]; then set_level $CH 0; else set_level $CH "$LEVEL"; fi
-+		;;
-+	\? | read)
-+		echo -n "$(state $CH)"
-+		;;
-+	brightness)
-+		if [ -z "$3" ]; then
-+			echo "$LEVEL"
-+			exit 0
-+		fi
-+		case "$3" in
-+			*[!0-9]* | "") die "brightness must be 0-100" ;;
-+		esac
-+		[ "$3" -le 100 ] || die "brightness must be 0-100"
-+		eval "$VAR=$3"
-+		save_conf
-+		# a bank that is on follows the new level at once
-+		[ "$(state $CH)" = 1 ] && set_level $CH "$3"
-+		;;
-+	*)
-+		usage
-+		;;
-+esac
-+exit 0
++++ b/configs/cameras/ymf46d_ssc377d_gc4653/raptor.config
+@@ -0,0 +1,38 @@
++RAPTOR_SENSOR_ANTIFLICKER="2"
++RAPTOR_SENSOR_NAME="gc4653"
++RAPTOR_SENSOR_I2C_ADDR="0x29"
++RAPTOR_STREAM0_WIDTH="2560"
++RAPTOR_STREAM0_HEIGHT="1440"
++RAPTOR_STREAM0_JPEG_FALSE=y
++RAPTOR_STREAM1_ENABLED_TRUE=y
++RAPTOR_STREAM1_WIDTH="960"
++RAPTOR_STREAM1_HEIGHT="540"
++RAPTOR_STREAM0_RC_MODE="vbr"
++RAPTOR_STREAM0_BITRATE="3000000"
++RAPTOR_STREAM0_MAX_BITRATE="4000000"
++RAPTOR_STREAM1_RC_MODE="vbr"
++RAPTOR_STREAM1_BITRATE="1500000"
++RAPTOR_STREAM1_MAX_BITRATE="2000000"
++RAPTOR_SENSOR_FPS="25"
++RAPTOR_STREAM0_FPS="25"
++RAPTOR_STREAM0_GOP="25"
++RAPTOR_STREAM1_FPS="25"
++RAPTOR_STREAM1_GOP="25"
++RAPTOR_RTSP_MAX_CLIENTS="8"
++RAPTOR_OSD_ENABLED_TRUE=y
++RAPTOR_OSD_TIMESTAMP_VISIBLE_TRUE=y
++RAPTOR_OSD_UPTIME_VISIBLE_FALSE=y
++RAPTOR_OSD_CAMERA_VISIBLE_FALSE=y
++RAPTOR_OSD_LOGO_VISIBLE_FALSE=y
++RAPTOR_IMAGE_HFLIP="1"
++RAPTOR_IMAGE_VFLIP="1"
++RAPTOR_AUDIO_DEVICE="0"
++RAPTOR_AUDIO_ENABLED_FALSE=y
++RAPTOR_IRCUT_GPIO_IRCUT="80"
++RAPTOR_IRCUT_GPIO_IRCUT2="11"
++RAPTOR_IRCUT_PULSE_MS="250"
++RAPTOR_IRCUT_TRIGGER="luma"
++RAPTOR_IRCUT_NIGHT_GAIN="40000"
++RAPTOR_IRCUT_IR_LEVELS="10,20,40,70,100"
++RAPTOR_IRCUT_IR_STEP_GAIN="16000"
++RAPTOR_IRCUT_IRLED_CMD="/usr/sbin/light ir"
 diff --git a/configs/cameras/ymf46d_ssc377d_gc4653/ymf46d_ssc377d_gc4653.kernel.config b/configs/cameras/ymf46d_ssc377d_gc4653/ymf46d_ssc377d_gc4653.kernel.config
 new file mode 100644
-index 000000000..31346ff04
+index 000000000..3a7fc8e1d
 --- /dev/null
 +++ b/configs/cameras/ymf46d_ssc377d_gc4653/ymf46d_ssc377d_gc4653.kernel.config
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,36 @@
 +# Kernel config fragment for the Anjvision YMF46D / Anpviz IPC-B8A63WD-S
 +# (ymf46d_ssc377d_gc4653), merged over
 +# board/sigmastar/infinity6c/kernel/5.10/infinity6c.config.
 +#
 +# Same approach as the JL12D2 and MC-A85 fragments: boot under the OEM U-Boot
-+# (the .anjoy888 install keeps it) and force the kernel command line.
++# (the ANJOY888 .bin install keeps it) and force the kernel command line.
 +#
 +# The memory split is THIS board's, read from the running OEM kernel
-+# (from the OEM kernel's /proc/cmdline): LX_MEM=0x8000000 (128 MB)
++# (/proc/cmdline on the bench unit, 2026-10-25): LX_MEM=0x8000000 (128 MB)
 +# and a 70 MB MMA (sz=0x4600000; the JL12D2 runs 0x4750000). Partition
 +# offsets are identical to the JL12D2 and MC-A85:
 +#   nor0:0x30000(BOOT),0x200000(kernel),0xCD0000(rootfs),0x100000(DATA)
@@ -295,16 +181,17 @@ index 000000000..31346ff04
 +# CONFIG_CMDLINE_FROM_BOOTLOADER is not set
 +# CONFIG_CMDLINE_EXTEND is not set
 +
-+# The JL12D2 board DTB, reused as is. Decoded from this unit's OEM device
-+# tree, the board wiring matches the JL12D2's exactly: the same padmux
++# This board's own DTB (board DTS patch 0004). Decoded from this unit's OEM
++# device tree, the board wiring matches the JL12D2's exactly: the same padmux
 +# schematic triplets (only reordered), and byte-identical csi/vif sr0 MIPI
 +# properties (lane_pn_swap all 0, mipi_rst_mode 3, mipi_pdn_mode 0,
 +# lane_num 4, lane_select 3 1 2 4 5). Everything else that differs is the
 +# older BSP (2023-06 vs 2024-12): clock nodes, i2c node names, sdmmc property
-+# names. The FUART pads the JL12D2 uses for its lens board are muxed the same
-+# way here. A board DTS of its own (model string, LED naming) can follow once
-+# the lights are mapped.
-+CONFIG_SS_DTB_NAME="infinity6c-ssc377d-jl12d2"
++# names. So the shared wiring is one include, infinity6c-ssc377d-anjvision.dtsi
++# (patch 0002), and this board's .dts adds only its model string and its
++# lights (the same pads as the JL12D2 today, but its own lines), so a JL12D2
++# board change no longer reaches this camera.
++CONFIG_SS_DTB_NAME="infinity6c-ssc377d-ymf46d"
 +
 +# microSD (one slot on SDIO IP 1). Modules, not built in, as the OEM loads
 +# kdrv_sdmmc.ko: a probe that goes wrong then cannot stop the boot or the
@@ -315,10 +202,10 @@ index 000000000..31346ff04
 +CONFIG_EXFAT_FS=m
 diff --git a/configs/cameras/ymf46d_ssc377d_gc4653/ymf46d_ssc377d_gc4653_defconfig b/configs/cameras/ymf46d_ssc377d_gc4653/ymf46d_ssc377d_gc4653_defconfig
 new file mode 100644
-index 000000000..26dea78fe
+index 000000000..152c5694d
 --- /dev/null
 +++ b/configs/cameras/ymf46d_ssc377d_gc4653/ymf46d_ssc377d_gc4653_defconfig
-@@ -0,0 +1,223 @@
+@@ -0,0 +1,196 @@
 +# NAME: Anjvision YMF46D / Anpviz IPC-B8A63WD-S (UVision MC-F46D) — SSC377D, Infinity6C, GC4653
 +#
 +# Anpviz U-Series metal bullet, dual light. OEM firmware
@@ -330,7 +217,8 @@ index 000000000..26dea78fe
 +#         The OEM device tree's board wiring (padmux schematic, csi/vif sr0
 +#         MIPI properties) is identical to the JL12D2's -- only BSP-version
 +#         renames differ (clock tree, i2c node names, sdmmc property names) --
-+#         so the JL12D2 board DTB is reused as is. See the kernel fragment.
++#         so its board DTB shares the JL12D2's include and adds its own model
++#         string and lights. See the kernel fragment.
 +# Sensor: GalaxyCore GC4653, 2560x1440 (16:9) 10-bit, MIPI 2-lane, 27 MHz
 +#         MCLK, I2C 0x52 (8-bit). The OEM loads its own gc4653_MIPI.ko with
 +#         chmap=1 on sensor pad 0, and mirrors + flips it (pad 0 bmirror=1
@@ -346,8 +234,9 @@ index 000000000..26dea78fe
 +
 +# ---- SENSOR ----
 +# No GC4653 driver ships prebuilt in the 1230 drop (only imx335 + imx307), so
-+# build the family's sensor-src against the 1230-matching headers that
-+# sigmastar-sdk's 0001 patch restores -- the MC-A85's GC8613 path.
++# build the family's sensor-src against the 1230-matching headers from
++# sigmastar-sensor-headers -- the MC-A85's GC8613 path (every board sets
++# BR2_SIGMASTAR_SENSOR_SOURCE, so every image carries the same drivers).
 +# load_sigmastar inserts sensor_gc4653_mipi.ko with chmap=1, as the OEM does.
 +BR2_SENSOR_1_NAME="gc4653"
 +BR2_SIGMASTAR_SENSOR_SOURCE=y
@@ -406,13 +295,10 @@ index 000000000..26dea78fe
 +BR2_SENSOR_1_IQ_FILE="configs/cameras/ymf46d_ssc377d_gc4653/gc4653.bin"
 +
 +# 60 Hz mains (US), as on the MC-A85.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_SENSOR_ANTIFLICKER="2"
 +
 +# ---- SENSOR IDENTITY FOR RVD ----
 +# 7-bit address, raptor.conf's convention (the driver's 8-bit slave is 0x52).
 +# The Infinity6C backend does not use it; rvd will not start without it.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_SENSOR_NAME="gc4653"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_SENSOR_I2C_ADDR="0x29"
 +
 +# ---- STREAMS / OSD: native 16:9 ----
 +# The Infinity6C backend scales the whole frame with no crop, so both streams
@@ -423,31 +309,14 @@ index 000000000..26dea78fe
 +# at 720p the encoder wedged (dynamic SRAM ENOMEM, both streams dead) up to 13
 +# times a day; at 960x540 the same unit ran a full day clean (2026-11-02/03).
 +# Frigate scales its detect frames.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM0_WIDTH="2560"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM0_HEIGHT="1440"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM0_JPEG_FALSE=y
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM1_ENABLED_TRUE=y
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM1_WIDTH="960"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM1_HEIGHT="540"
 +
 +# VBR with the cap written out: with max_bitrate 0 the Infinity6C backend caps
-+# at the bitrate, but nothing in the config says so. Measured on a unit with the whole-
++# at the bitrate, but nothing in the config says so. Measured on a deployed unit with the whole-
 +# frame ring below: main 3.2 Mbit/s under a 4 Mbit/s cap, sub 1.6 under 2,
 +# both at 25 fps. Keyframes are ~330-370 KB in CBR and VBR alike (P frames
 +# 0.5-2 KB); capping them needs the I-frame size knob the HAL does not have.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM0_RC_MODE="vbr"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM0_BITRATE="3000000"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM0_MAX_BITRATE="4000000"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM1_RC_MODE="vbr"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM1_BITRATE="1500000"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM1_MAX_BITRATE="2000000"
 +# The GC4653's 25 fps on the sensor and both streams, 1 s GOPs: what rvd
 +# defaults to here, written out so a profile states its own rates.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_SENSOR_FPS="25"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM0_FPS="25"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM0_GOP="25"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM1_FPS="25"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM1_GOP="25"
 +
 +# A whole-frame SCL->VENC ring (+4 MB MMA). With the HAL's quarter-frame ring
 +# the scaler lapped the main encoder whenever it was busy with the 720p sub or
@@ -476,12 +345,6 @@ index 000000000..26dea78fe
 +# ---- RTSP ----
 +# Four clients is not enough here: Frigate holds two (main + sub), the NVR
 +# two more, and a live view or snapshot client then gets refused.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_RTSP_MAX_CLIENTS="8"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_OSD_ENABLED_TRUE=y
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_OSD_TIMESTAMP_VISIBLE_TRUE=y
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_OSD_UPTIME_VISIBLE_FALSE=y
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_OSD_CAMERA_VISIBLE_FALSE=y
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_OSD_LOGO_VISIBLE_FALSE=y
 +
 +# ---- ORIENTATION ----
 +# With the ISP unflipped the picture is upside down against the stock unit
@@ -489,18 +352,14 @@ index 000000000..26dea78fe
 +# mirrored + flipped too, so its gc4653_MIPI.ko evidently inverts what the
 +# sensor-src driver does. On this backend orientation is fixed when the ISP
 +# channel is created (a live set-hflip is refused), so it belongs here.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IMAGE_HFLIP="1"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IMAGE_VFLIP="1"
 +
 +# ---- AUDIO ----
 +# One AI device on this chip (the analog mic, ADC A/B); rad's default of
 +# device 1 does not exist. Measured on the bench: 16 kHz mono, room level
 +# around -21 dB. The speaker path (ao) does not initialise yet.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_AUDIO_DEVICE="0"
-+# Off by the owner's choice (2026-10-26): the Zosi NVR played the AAC track
++# Off by choice (2026-10-26): the Zosi NVR played the AAC track
 +# crackly, and no audio is wanted on this camera. The streams then carry
 +# video only. Flip to TRUE to use the mic; device 0 above stays correct.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_AUDIO_ENABLED_FALSE=y
 +
 +# ---- DAY / NIGHT ----
 +# IR-cut, from the OEM kernel's own GPIO labels and verified by pulsing each
@@ -510,35 +369,39 @@ index 000000000..26dea78fe
 +# The MC-A85's polarity, so the same ric settings: gpio_ircut is the day
 +# line, gpio_ircut2 the night one. The OEM also has an IRDET photosensor on
 +# gpio 23 (digital, high in daylight); ric has no GPIO trigger, so the
-+# trigger is luma, as tuned on the MC-A85 (DAYNIGHT-TUNING.md). The
++# trigger is luma, as tuned on the MC-A85. The
 +# GC4653's thresholds are the MC-A85's, not yet checked at dusk.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_GPIO_IRCUT="80"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_GPIO_IRCUT2="11"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_PULSE_MS="250"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_TRIGGER="luma"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_NIGHT_GAIN="40000"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IR_LEVELS="10,20,40,70,100"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IR_STEP_GAIN="16000"
 +
 +# ---- LIGHTS ----
 +# Two PWM-dimmed banks at the OEM's 50 us period (OEM: PWM0 + PWM4):
 +#   PAD_SPI0_CZ -> IR bank    -> PWM4
-+#   PAD_PWM0    -> white bank -> PWM9 (PINMUX_FOR_PWM9_MODE_2 in the DTB)
++#   PAD_PWM0    -> white bank -> PWM0 (PINMUX_FOR_PWM0_MODE_1, the OEM routing;
++#                  the board DTB moves the sensor's frame-sync wave to the
++#                  unconnected PWM2, which used to strobe this bank on PWM0)
 +# Told apart on the bench from the AE: with the filter in, PWM4 changes
-+# nothing and PWM9 drops the total gain ~20%; with it out, both do.
-+# overlay/usr/sbin/light (the MC-A85's tool with IR on PWM4) is thingino's
-+# light CLI for the web UI buttons; overlay/etc/init.d/S30light sets the
-+# channels up before raptor. ric drives the IR bank through it.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IRLED_CMD="/usr/sbin/light ir"
++# nothing and the white bank (then on PWM9) drops the total gain ~20%; with
++# it out, both do. sigmastar-light's /usr/sbin/light is thingino's light CLI
++# for the web UI buttons and S30light sets the channels up before raptor.
++# ric drives the IR bank through it.
++BR2_PACKAGE_SIGMASTAR_LIGHT_IR_PWM=4
++BR2_PACKAGE_SIGMASTAR_LIGHT_WHITE_PWM=0
++
++# ---- LENS / PTZ ----
++# Fixed lens, no lens board: lensd is built but does not run.
++BR2_PACKAGE_THINGINO_LENSD_MODE_OFF=y
 +
 +# ---- MICRO SD ----
 +# MMC core, block, the SigmaStar SDIO driver and exFAT are kernel modules
 +# (see the fragment), loaded at S11 from overlay/etc/modules.d/sdcard;
 +# thingino's mdev rule mounts each partition at /mnt/<dev>. The slot is SDIO
 +# IP 1 (the board DTS's sdmmc node, from the OEM tree). The mdev rule's
-+# handler, /lib/mdev/automount (+ S30mdev's boot-time scan), comes from this
-+# option alone. BR2_THINGINO_SDCARD would also select it, but it pulls in
-+# the Ingenic MMC kernel options and U-Boot SD settings, which do not apply
-+# here. Bench, 2026-10-25: a 128 GB SDXC card (FAT32) detected on insertion
-+# and mounted read-write by the handler.
-+BR2_PACKAGE_THINGINO_SYSTEM_AUTOMOUNT=y
++# handler, /lib/mdev/automount (+ S30mdev's boot-time scan), is
++# BR2_PACKAGE_THINGINO_SYSTEM_AUTOMOUNT, which every board ships
++# (core-sigmastar.fragment). BR2_THINGINO_SDCARD would also select it, but it
++# pulls in the Ingenic MMC kernel options and U-Boot SD settings, which do not
++# apply here. Bench, 2026-10-25: a 128 GB SDXC card (FAT32) detected on
++# insertion and mounted read-write by the handler.
++# OVERLAY-HW: etc/modules.d/sdcard the microSD slot's modules, the same on every board with the slot
+-- 
+2.43.0
+

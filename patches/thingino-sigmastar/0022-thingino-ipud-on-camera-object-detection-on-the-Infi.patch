@@ -1,0 +1,3370 @@
+From ba3f9cff96cffae6094fab9562ea8144a163f681 Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 17:09:54 -0500
+Subject: [PATCH 22/22] thingino-ipud: on-camera object detection on the
+ Infinity6C IPU
+
+ipud runs a compiled YOLOv5 model on the SoC's IPU. It takes frames from an
+SCL output port raptor left unused, at the model's input size, into the
+IPU's input tensor without a copy where the frame layout allows; runs the
+model through the drop's libmi_ipu; decodes the boxes with per-class NMS;
+and reports them to a status file (a web UI page and a preview overlay), a
+UNIX socket (/run/ipud.sock, read with ipucat) and MQTT. S35ipud starts it
+from the ipud block of /etc/thingino.json, and a raptor.d hook stops it
+before rvd tears the pipeline down and starts it again after.
+
+Every SigmaStar board ships it, off until enabled. The model and the IPU
+firmware are vendor files and are not included: the model is read from the
+image (when its build staged one), from a folder on the SD card, or from a
+custom path. A report class the model lacks is skipped with a warning.
+---
+ package/thingino-ipud/.gitignore              |   2 +
+ package/thingino-ipud/Config.in               |  19 +
+ package/thingino-ipud/files/README.md         | 148 ++++
+ package/thingino-ipud/files/S35ipud           | 182 ++++
+ package/thingino-ipud/files/ipu_rt.c          | 206 +++++
+ package/thingino-ipud/files/ipu_rt.h          |  63 ++
+ package/thingino-ipud/files/ipucat.c          |  39 +
+ package/thingino-ipud/files/ipud-frigate      |  65 ++
+ package/thingino-ipud/files/ipud-ha           | 126 +++
+ package/thingino-ipud/files/ipud-onvif        |  88 ++
+ package/thingino-ipud/files/ipud-paths        |  89 ++
+ package/thingino-ipud/files/ipud.c            | 799 ++++++++++++++++++
+ package/thingino-ipud/files/ipud.json         |  24 +
+ package/thingino-ipud/files/ipud.webui.json   |  34 +
+ package/thingino-ipud/files/mi_ipu.h          |  67 ++
+ package/thingino-ipud/files/mi_scl_sys.h      |  47 ++
+ package/thingino-ipud/files/raptor-hook       |   5 +
+ package/thingino-ipud/files/scl_src.c         | 158 ++++
+ package/thingino-ipud/files/scl_src.h         |  46 +
+ .../thingino-ipud/files/www/a/config-ipud.js  | 167 ++++
+ .../thingino-ipud/files/www/a/preview-ipud.js | 192 +++++
+ .../thingino-ipud/files/www/config-ipud.html  | 192 +++++
+ .../thingino-ipud/files/www/x/json-ipud.cgi   | 148 ++++
+ package/thingino-ipud/files/yolo.c            | 106 +++
+ package/thingino-ipud/files/yolo.h            |  45 +
+ package/thingino-ipud/thingino-ipud.mk        |  80 ++
+ 26 files changed, 3137 insertions(+)
+ create mode 100644 package/thingino-ipud/.gitignore
+ create mode 100644 package/thingino-ipud/Config.in
+ create mode 100644 package/thingino-ipud/files/README.md
+ create mode 100755 package/thingino-ipud/files/S35ipud
+ create mode 100644 package/thingino-ipud/files/ipu_rt.c
+ create mode 100644 package/thingino-ipud/files/ipu_rt.h
+ create mode 100644 package/thingino-ipud/files/ipucat.c
+ create mode 100755 package/thingino-ipud/files/ipud-frigate
+ create mode 100755 package/thingino-ipud/files/ipud-ha
+ create mode 100755 package/thingino-ipud/files/ipud-onvif
+ create mode 100644 package/thingino-ipud/files/ipud-paths
+ create mode 100644 package/thingino-ipud/files/ipud.c
+ create mode 100644 package/thingino-ipud/files/ipud.json
+ create mode 100644 package/thingino-ipud/files/ipud.webui.json
+ create mode 100644 package/thingino-ipud/files/mi_ipu.h
+ create mode 100644 package/thingino-ipud/files/mi_scl_sys.h
+ create mode 100755 package/thingino-ipud/files/raptor-hook
+ create mode 100644 package/thingino-ipud/files/scl_src.c
+ create mode 100644 package/thingino-ipud/files/scl_src.h
+ create mode 100644 package/thingino-ipud/files/www/a/config-ipud.js
+ create mode 100644 package/thingino-ipud/files/www/a/preview-ipud.js
+ create mode 100644 package/thingino-ipud/files/www/config-ipud.html
+ create mode 100755 package/thingino-ipud/files/www/x/json-ipud.cgi
+ create mode 100644 package/thingino-ipud/files/yolo.c
+ create mode 100644 package/thingino-ipud/files/yolo.h
+ create mode 100644 package/thingino-ipud/thingino-ipud.mk
+
+diff --git a/package/thingino-ipud/.gitignore b/package/thingino-ipud/.gitignore
+new file mode 100644
+index 000000000..278e23770
+--- /dev/null
++++ b/package/thingino-ipud/.gitignore
+@@ -0,0 +1,2 @@
++# The vendor IPU firmware and model, staged by a private build: never committed.
++/vendor/
+diff --git a/package/thingino-ipud/Config.in b/package/thingino-ipud/Config.in
+new file mode 100644
+index 000000000..4078b87db
+--- /dev/null
++++ b/package/thingino-ipud/Config.in
+@@ -0,0 +1,19 @@
++config BR2_PACKAGE_THINGINO_IPUD
++	bool "thingino-ipud"
++	depends on BR2_SOC_VENDOR_SIGMASTAR
++	select BR2_PACKAGE_SIGMASTAR_LIB
++	help
++	  On-camera object detection on the Infinity6C IPU (the SoC's
++	  neural-network unit). ipud takes frames from a spare SCL output
++	  port at the model's input size, runs a compiled SGS YOLOv5 model
++	  through libmi_ipu, and reports the boxes to a status file (the web
++	  UI page and preview overlay), a UNIX socket (/run/ipud.sock, one
++	  JSON line per inference, for local consumers) and MQTT.
++
++	  Every SigmaStar camera ships it, off. It runs only when enabled
++	  in /etc/thingino.json (ipud.enabled) and when the model its source
++	  names is there (ipud.source): built in (/usr/share/ipud, only in
++	  an image whose build staged the vendor files in this package's
++	  vendor/ folder, which is never committed), a model file in a
++	  folder on the SD card, or custom paths. The model must be
++	  compiled for the IPU runtime the image's SigmaStar drop carries.
+diff --git a/package/thingino-ipud/files/README.md b/package/thingino-ipud/files/README.md
+new file mode 100644
+index 000000000..855f929dc
+--- /dev/null
++++ b/package/thingino-ipud/files/README.md
+@@ -0,0 +1,148 @@
++# thingino-ipud
++
++On-camera object detection on the Infinity6C IPU, the SoC's neural-network unit.
++
++## Pipeline
++
++```text
++SCL output port (model size, NV12) -> MI_IPU_Invoke -> YOLOv5 decode + NMS -> sinks
++```
++
++- **Frames.** raptor owns SCL device 0, channel 0, and configures ports 0-3 as
++  its streams need. ipud configures, enables and drains a port raptor left
++  unconfigured (the highest free one), at the model's input size, NV12, no
++  compression. A second process may do this on raptor's channel; the frames
++  arrive at the sensor rate and raptor's own ports are not disturbed. Ports 2
++  and 3 take at most 1920 wide. If raptor restarts, the port goes with its
++  channel; ipud notices and opens it again.
++- **Inference.** `libmi_ipu.so` from the SigmaStar drop, dlopened after its MI
++  dependencies, after `MI_SYS_Init(0)`. `CreateDevice` loads the IPU firmware,
++  `CreateCHN` the compiled model. `DevAttr.maxDynBufSize` must cover the model's
++  variable buffer; ipud reads it from the model header with
++  `MI_IPU_GetOfflineModeStaticInfo` (word 0 of a 92-byte info on this drop). The
++  model must be compiled for the runtime the drop carries: a model from an older
++  SGS release is refused at `CreateCHN` (error 54).
++- **Memory.** With an 800x480 model ipud takes 4.27 MB of the MMA heap at a cap
++  of 12 a second or less, 4.85 MB at full rate, all returned when it exits:
++  the model (913 KB), its variable buffer (1.66 MB), the output tensors
++  (532 KB) and the port's frames (576 KB each, two at depth 1, three at depth 2;
++  `-D`). Check the heap's free space
++  (`/proc/mi_modules/mi_sys_mma/mma_heap_name0`) before enabling it on a unit
++  with a small heap.
++- **Zero copy.** The model's input tensor is one NV12 plane. When the SCL frame is
++  packed (stride equal to the width, UV right after Y), ipud points the input
++  tensor at the frame's own buffer. On the first frame it runs both the copy and
++  the zero-copy path and keeps zero copy only if the outputs are byte-identical.
++  MI allocates the channel's input buffer at `CreateCHN` and keeps it until the
++  channel goes (`PutInputTensors` does not return it), so once zero copy has
++  passed ipud re-creates the channel with input depth 0, which allocates none,
++  checks the new channel on the same frame, and keeps it only if the outputs are
++  again byte-identical (576 KB less). A frame that is not packed later sends it
++  back to the copy path, with the buffer.
++- **Port depth.** One frame queued for ipud (depth 1, two frames in MI) keeps up
++  with a 10 a second cap; at full rate depth 1 holds ipud to about 15 a second,
++  depth 2 (three frames) keeps 24-25. ipud picks 1 for a cap of 12 or less.
++- **Decode.** Anchor-based YOLOv5 heads `[1, 3, H, W, 5 + nc]` of quantised
++  logits (`real = (q - zeroPnt) * scalar`), decoded the v6+ way
++  (`xy = (2s - 0.5 + grid) * stride`, `wh = (2s)^2 * anchor`, score =
++  `sig(obj) * sig(best class)`), the stock YOLOv5 anchors, then per-class NMS.
++
++## Facts found on hardware
++
++- `MI_IPU_Invoke` does not write the input tensor back from the CPU cache. After
++  the CPU fills the input, call `MI_SYS_FlushInvCache` on it before `Invoke`, or
++  the IPU reads part of the previous frame and the same input gives different
++  outputs on every call (`ipu_rt.c`, `cache_mode`).
++- `MI_SYS_ChnOutputPortGetBuf(port*, bufinfo*, handle*)` takes no SoC id and
++  copies out a 488-byte `MI_SYS_BufInfo_t`; `MI_SYS_GetFd(port*, int*)` takes
++  none either, `MI_SYS_SetChnOutputPortDepth` does. The frame fields' offsets in
++  that struct are in `scl_src.c`.
++- The output descriptor's `innerMost` is in bytes (22 for 11 INT16 channels).
++
++## Outputs
++
++Box coordinates are normalised to the full frame.
++
++- **Status file** `/run/ipud/status.json`, rewritten every 500 ms: rate, IPU time,
++  port, the latest objects. The web UI page and the preview overlay read it.
++- **Socket** `/run/ipud.sock`: one JSON line per inference to every client
++  (`ipucat` prints them), with the frame's MI pts, for local consumers that need
++  low latency.
++- **MQTT** (`ipud.mqtt`), with the broker of `/etc/send2.json`:
++  `<topic>/status` online/offline (retained, and the last will),
++  `<topic>/<label>` ON/OFF on presence change (retained, with a hold), and
++  `<topic>/detections` (the socket line) while something is detected, at most
++  every `mqtt_interval_ms`, and one line with no objects when the last one goes.
++  On every (re)connect ipud republishes each reported class's state, and on
++  exit it turns off what was on, so no retained ON outlives a run.
++- **Home Assistant** (`ipud.ha`): `ipud-ha` (in `/usr/libexec/`) publishes MQTT
++  discovery through thingino-ha's library for the camera's own HA device: a
++  `<Class> detected` occupancy sensor per reported class and an "Objects"
++  sensor (the count, the boxes as attributes). ipud then publishes on
++  thingino-ha's broker under `cameras/<hostname>/ipud/`, in place of
++  `ipud.mqtt`'s topic. What was published is listed in `/etc/ipud-ha.list`;
++  turning it off clears exactly that.
++- **Hook** (`ipud -x cmd`): `cmd <label> ON|OFF` on each presence change, with
++  `IPUD_SCORE` and `IPUD_DRAW` (the class's boxes, as Frigate's `draw` object)
++  in its environment.
++- **Frigate events** (`ipud.frigate`, `frigate_url`, `frigate_camera`): the hook
++  `ipud-frigate` opens a Frigate manual event while a class is present (sub
++  label `ipud`, the boxes drawn on its snapshot) and ends it after, through
++  Frigate's API on its internal port 5000.
++- **ONVIF events** (`ipud.onvif`): `ipud-onvif` (installed in `/usr/libexec/`)
++  adds one event per object group to `/etc/onvif.json`, and ipud keeps
++  `/run/motion/ipud_<group>` while any reported class of the group is present
++  (with the presence hold); `onvif_notify_server` raises the event while the
++  file exists. The groups and topics are person (`PeopleDetect`), vehicle
++  (bicycle, car, motorcycle, bus, truck: `VehicleDetect`) and pet (cat, dog:
++  `DogCatDetect`), all under `tns1:RuleEngine/MyRuleDetector/`, the set Home
++  Assistant's ONVIF integration turns into Person, Vehicle and Pet Detection
++  sensors. Only the groups of the reported classes are added. The ONVIF server
++  takes at most 8 events, relays included; a group that does not fit is skipped
++  with a warning rather than break the server's config.
++
++## Settings
++
++The `ipud` block of `/etc/thingino.json` (defaults in `ipud.json`); `S35ipud`
++reads it at start, and the web UI page writes it and restarts ipud.
++
++## Where the model comes from
++
++`ipud.source` picks it; `ipud-paths` (installed in `/usr/libexec/`) resolves it
++for both `S35ipud` and the web UI's CGI:
++
++| `source` | Model | IPU firmware |
++|---|---|---|
++| `builtin` (default) | `/usr/share/ipud/model.img` | `/usr/share/ipud/ipu_firmware.bin` |
++| `sdcard` | `<sd_dir>/<sd_model>`, the first `*.img` there when `sd_model` is empty; `sd_dir` defaults to `/mnt/mmcblk0p1/ipud` | `<sd_dir>/ipu_firmware.bin`, else the built-in one |
++| `custom` | `model` | `firmware`, else the built-in one |
++
++A config from before `source` that names its own `model` counts as `custom`.
++The class names come from a `<model>.labels` file beside the model (one
++comma-separated line) when there is one, else from `labels`, else ipud's
++default, the built-in model's six classes in COCO order:
++`person,bicycle,car,motorcycle,bus,truck`.
++
++The vendor files are never in this repository: no license lets us publish the
++IPU firmware or a vendor model. A private build stages them in this package's
++`vendor/` folder (git-ignored) before it builds, and the package installs them
++to `/usr/share/ipud/`; an image built without them has no built-in model, and
++the web UI page says so. New models, ours or a vendor's, go on the SD card with
++no rebuild: drop the `.img` (and a `.labels`) in the folder and pick it on the
++page.
++
++## Getting the vendor files
++
++An image built without the model can get it from firmware its user already
++has. `tools/ipu-extract/ipu_extract.py` of the SigmaStar forward-port
++repository (<https://github.com/andylee77/thingino-sigmastar-fwd>; MIT, no
++vendor bytes) takes the model out of the JL12D2's stock firmware (a full flash
++read of the camera, or its vendor firmware download) and checks it against the
++md5 ipud is known to run.
++
++No IPU firmware is needed: the runtime never reads the file ipud names (on an
++SSC378DE camera an empty and an all-zero file ran the model the same). ipud
++still checks that the file exists, so the tool writes an empty
++`ipu_firmware.bin` beside `model.img` and `model.labels`: copy the three into
++this package's `vendor/` before a build, or the folder onto the SD card as
++`ipud/` and set the source to `sdcard`.
+diff --git a/package/thingino-ipud/files/S35ipud b/package/thingino-ipud/files/S35ipud
+new file mode 100755
+index 000000000..2ba2ead2e
+--- /dev/null
++++ b/package/thingino-ipud/files/S35ipud
+@@ -0,0 +1,182 @@
++#!/bin/sh
++# S35ipud -- on-camera object detection on the Infinity6C IPU (thingino-ipud).
++# Settings: the "ipud" block of /etc/thingino.json. It starts only when
++# ipud.enabled is true and the model its source names is there: built in
++# (/usr/share/ipud, private images only), on the SD card, or a custom path
++# (/usr/libexec/ipud-paths resolves it). MQTT, when ipud.mqtt is true, uses the
++# broker of /etc/send2.json's "mqtt" block (send2mqtt's) and the topic
++# ipud.mqtt_topic (empty: thingino/<hostname>/ipud). Raptor's init script also
++# stops ipud before rvd goes down and starts it once rvd is back
++# (/etc/raptor.d/ipud). ipud.onvif adds ONVIF object events to /etc/onvif.json
++# (/usr/libexec/ipud-onvif) and has ipud keep their files in /run/motion.
++# ipud.ha puts ipud's entities on the camera's Home Assistant device
++# (/usr/libexec/ipud-ha, thingino-ha's broker) instead of ipud.mqtt's topic.
++# ipud.frigate opens a Frigate event while a class is present
++# (/usr/libexec/ipud-frigate; ipud.frigate_url, ipud.frigate_camera).
++
++DAEMON=/usr/sbin/ipud
++PIDFILE=/run/ipud.pid
++NAME=ipud
++SEND2=/etc/send2.json
++STATUS=/run/ipud/status.json
++ONVIF=/usr/libexec/ipud-onvif
++HA=/usr/libexec/ipud-ha
++FRIGATE=/usr/libexec/ipud-frigate
++EVENT_DIR=/run/motion
++DEFAULT_LABELS=person,bicycle,car,motorcycle,bus,truck
++
++. /usr/libexec/ipud-paths
++get() { ipud_get "$1"; }
++
++# Say why ipud is not running where the web UI looks.
++not_running() {
++	mkdir -p "${STATUS%/*}"
++	printf '{"running":false,"reason":"%s"}\n' "$1" >"$STATUS"
++}
++
++num() {
++	case "$1" in
++	"" | *[!0-9.]*) echo "$2" ;;
++	*) echo "$1" ;;
++	esac
++}
++
++# The ONVIF event groups (ipud-onvif) of the classes ipud reports: ipud.report,
++# or every class of the model when it is empty.
++onvif_groups() {
++	list=",${1:-$2},"
++	g=
++	case "$list" in *,person,*) g="$g person" ;; esac
++	case "$list" in *,bicycle,* | *,car,* | *,motorcycle,* | *,bus,* | *,truck,*) g="$g vehicle" ;; esac
++	case "$list" in *,cat,* | *,dog,*) g="$g pet" ;; esac
++	echo $g
++}
++
++start() {
++	[ -x "$DAEMON" ] || return 0
++	if [ "$(get enabled)" != "true" ]; then
++		[ -x "$ONVIF" ] && "$ONVIF" off
++		[ -x "$HA" ] && "$HA" off >/dev/null 2>&1 &
++		not_running "disabled"
++		return 0
++	fi
++	ipud_resolve
++	if [ -n "$IPUD_MISSING" ]; then
++		echo "$NAME: $IPUD_SOURCE model: $IPUD_MISSING" >&2
++		not_running "$(printf '%s' "$IPUD_MISSING" | tr -d '"\\')"
++		return 1
++	fi
++	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
++		echo "$NAME already running"
++		return 0
++	fi
++
++	set -- -f "$IPUD_FW" -m "$IPUD_MODEL" -Z -I 500 \
++		-c "$(num "$(get score)" 0.4)" -i "$(num "$(get iou)" 0.45)" \
++		-r "$(num "$(get max_fps)" 10)" -H "$(num "$(get hold_ms)" 3000)" \
++		-M "$(num "$(get mqtt_interval_ms)" 500)"
++	[ -n "$IPUD_LABELS" ] && set -- "$@" -L "$IPUD_LABELS"
++	report=$(get report)
++	[ -n "$report" ] && set -- "$@" -k "$report"
++
++	if [ -x "$ONVIF" ]; then
++		if [ "$(get onvif)" = "true" ]; then
++			# shellcheck disable=SC2046
++			"$ONVIF" on $(onvif_groups "$report" "${IPUD_LABELS:-$DEFAULT_LABELS}")
++			set -- "$@" -O "$EVENT_DIR"
++		else
++			"$ONVIF" off
++		fi
++	fi
++
++	# Home Assistant: thingino-ha's broker and the camera's device; it wins
++	# over ipud.mqtt. Discovery goes in the background: at boot S35 runs
++	# before the network, and the retained discovery of an earlier start
++	# stands meanwhile.
++	ha_on=
++	if [ -x "$HA" ] && [ "$(get ha)" = "true" ]; then
++		if ha_env=$("$HA" env) && eval "$ha_env"; then
++			export IPUD_MQTT_HOST IPUD_MQTT_PORT IPUD_MQTT_USER IPUD_MQTT_PASS IPUD_MQTT_CLIENT_ID
++			"$HA" on "$report" "${IPUD_LABELS:-$DEFAULT_LABELS}" >/dev/null 2>&1 &
++			set -- "$@" -q "$IPUD_HA_TOPIC"
++			ha_on=1
++		fi
++	elif [ -x "$HA" ]; then
++		"$HA" off >/dev/null 2>&1 &
++	fi
++
++	# Frigate: a manual event per class while it is present (ipud -x).
++	# The reset ends events a previous run left open (none after a boot:
++	# their ids live in /run).
++	if [ -x "$FRIGATE" ] && [ "$(get frigate)" = "true" ]; then
++		IPUD_FRIGATE_URL=$(get frigate_url)
++		IPUD_FRIGATE_CAMERA=$(get frigate_camera)
++		if [ -n "$IPUD_FRIGATE_URL" ] && [ -n "$IPUD_FRIGATE_CAMERA" ]; then
++			export IPUD_FRIGATE_URL IPUD_FRIGATE_CAMERA
++			"$FRIGATE" reset
++			set -- "$@" -x "$FRIGATE"
++		else
++			echo "$NAME: ipud.frigate is on, but frigate_url or frigate_camera is empty" >&2
++		fi
++	fi
++
++	if [ -z "$ha_on" ] && [ "$(get mqtt)" = "true" ] && [ -f "$SEND2" ]; then
++		IPUD_MQTT_HOST=$(jct "$SEND2" get mqtt.host 2>/dev/null)
++		IPUD_MQTT_PORT=$(jct "$SEND2" get mqtt.port 2>/dev/null)
++		IPUD_MQTT_USER=$(jct "$SEND2" get mqtt.username 2>/dev/null)
++		IPUD_MQTT_PASS=$(jct "$SEND2" get mqtt.password 2>/dev/null)
++		IPUD_MQTT_CLIENT_ID=$(jct "$SEND2" get mqtt.client_id 2>/dev/null)
++		export IPUD_MQTT_HOST IPUD_MQTT_PORT IPUD_MQTT_USER IPUD_MQTT_PASS IPUD_MQTT_CLIENT_ID
++		topic=$(get mqtt_topic)
++		[ -n "$topic" ] || topic="thingino/$(hostname)/ipud"
++		if [ -n "$IPUD_MQTT_HOST" ]; then
++			set -- "$@" -q "$topic"
++		else
++			echo "$NAME: ipud.mqtt is on but $SEND2 names no broker" >&2
++		fi
++	fi
++
++	echo "Starting $NAME..."
++	start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- "$@"
++}
++
++# Waits for the exit: the raptor hook needs ipud off the SCL channel before rvd
++# stops. ipud disables its port and leaves MI on SIGTERM.
++stop() {
++	pid=$(cat "$PIDFILE" 2>/dev/null)
++	[ -n "$pid" ] || pid=$(pidof ipud)
++	rm -f "$PIDFILE"
++	[ -n "$pid" ] || return 0
++	echo "Stopping $NAME..."
++	kill $pid 2>/dev/null
++	i=0
++	while [ $i -lt 30 ] && kill -0 $pid 2>/dev/null; do
++		usleep 100000
++		i=$((i + 1))
++	done
++	if kill -0 $pid 2>/dev/null; then
++		kill -9 $pid 2>/dev/null
++	fi
++	# ipud clears its event files on exit; a killed one leaves them
++	rm -f "$EVENT_DIR/ipud_person" "$EVENT_DIR/ipud_vehicle" "$EVENT_DIR/ipud_pet"
++	return 0
++}
++
++case "$1" in
++	start)
++		start
++		;;
++	stop)
++		stop
++		;;
++	restart)
++		stop
++		start
++		;;
++	*)
++		echo "Usage: $0 {start|stop|restart}" >&2
++		exit 1
++		;;
++esac
++
++exit 0
+diff --git a/package/thingino-ipud/files/ipu_rt.c b/package/thingino-ipud/files/ipu_rt.c
+new file mode 100644
+index 000000000..a8fed3ce1
+--- /dev/null
++++ b/package/thingino-ipud/files/ipu_rt.c
+@@ -0,0 +1,206 @@
++/* ipu_rt.c - MI_IPU runtime wrapper; see ipu_rt.h and README.md. */
++#include <stdio.h>
++#include <string.h>
++#include <dlfcn.h>
++#include <sys/stat.h>
++#include "ipu_rt.h"
++
++/* The lib calls this to pull firmware/model bytes; ctx is the path passed to
++ * CreateDevice/CreateCHN (confirmed on N803, 2026-11-10). */
++static int read_cb(void *data, int offset, int size, char *ctx)
++{
++    FILE *f = fopen(ctx, "rb");
++    if (!f) return -1;
++    if (fseek(f, offset, SEEK_SET)) { fclose(f); return -1; }
++    size_t n = fread(data, 1, (size_t)size, f);
++    fclose(f);
++    return n == (size_t)size ? 0 : -1;
++}
++
++#define SYM(n) do { \
++    rt->n = (fn_MI_IPU_##n) dlsym(rt->h_ipu, "MI_IPU_" #n); \
++    if (!rt->n) { fprintf(stderr, "ipu: dlsym MI_IPU_" #n ": %s\n", dlerror()); return -1; } \
++} while (0)
++
++static int load_libs(ipu_rt *rt)
++{
++    /* libmi_ipu.so resolves against the rest of the MI stack: load its deps
++     * into the global scope first (the order raptor-hal's loader uses). */
++    static const char *deps[] = { "libcam_os_wrapper.so", "libcam_fs_wrapper.so",
++                                  "libmi_common.so", "libmi_sys.so" };
++    for (unsigned i = 0; i < sizeof deps / sizeof *deps; i++) {
++        void *d = dlopen(deps[i], RTLD_NOW | RTLD_GLOBAL);
++        if (!d) { fprintf(stderr, "ipu: dlopen %s: %s\n", deps[i], dlerror()); return -1; }
++        if (!strcmp(deps[i], "libmi_sys.so")) rt->h_sys = d;
++    }
++    rt->h_ipu = dlopen("libmi_ipu.so", RTLD_NOW | RTLD_GLOBAL);
++    if (!rt->h_ipu) { fprintf(stderr, "ipu: dlopen libmi_ipu.so: %s\n", dlerror()); return -1; }
++    SYM(CreateDevice); SYM(DestroyDevice); SYM(CreateCHN); SYM(DestroyCHN);
++    SYM(GetInOutTensorDesc); SYM(GetInputTensors); SYM(PutInputTensors);
++    SYM(GetOutputTensors); SYM(PutOutputTensors); SYM(Invoke);
++    rt->SysInit = (fn_MI_SYS_Init) dlsym(rt->h_sys, "MI_SYS_Init");
++    rt->SysExit = (fn_MI_SYS_Exit) dlsym(rt->h_sys, "MI_SYS_Exit");
++    if (!rt->SysInit || !rt->SysExit) { fprintf(stderr, "ipu: dlsym MI_SYS_Init/Exit\n"); return -1; }
++    *(void **)&rt->FlushInvCache = dlsym(rt->h_sys, "MI_SYS_FlushInvCache");
++    if (!rt->FlushInvCache) { fprintf(stderr, "ipu: dlsym MI_SYS_FlushInvCache\n"); return -1; }
++    return 0;
++}
++
++/* One channel on the model. MI_IPU_ChnAttr's second and third words are the
++ * output and input buffer depths (SigmaStar's u32OutputBufDepth,
++ * u32InputBufDepth; divinus calls them usrDepth and bufDepth). Input depth 0:
++ * MI allocates no input buffer and every Invoke brings its own (zero copy). */
++static int chn_open(ipu_rt *rt, unsigned int in_depth)
++{
++    MI_IPU_ChnAttr ca;
++    int r;
++
++    memset(&ca, 0, sizeof ca);
++    ca.usrDepth = 1; ca.bufDepth = in_depth; ca.maxBatch = 1;
++    if ((r = rt->CreateCHN(&rt->chn, &ca, read_cb, (char *)rt->model))) {
++        /* 54: "Model version doesn't match this platform" (README.md) */
++        fprintf(stderr, "ipu: CreateCHN(%s) = %d\n", rt->model, r); return -1;
++    }
++    rt->chn_ok = 1;
++    rt->in_depth = in_depth;
++
++    if ((r = rt->GetInOutTensorDesc(rt->chn, &rt->desc))) {
++        fprintf(stderr, "ipu: GetInOutTensorDesc = %d\n", r); return -1;
++    }
++    memset(&rt->in, 0, sizeof rt->in);
++    if (in_depth) {
++        if ((r = rt->GetInputTensors(rt->chn, &rt->in))) {
++            fprintf(stderr, "ipu: GetInputTensors = %d\n", r); return -1;
++        }
++        rt->in_ok = 1;
++    } else {
++        rt->in.count = rt->desc.inCnt;
++    }
++    if ((r = rt->GetOutputTensors(rt->chn, &rt->out))) {
++        fprintf(stderr, "ipu: GetOutputTensors = %d\n", r); return -1;
++    }
++    rt->out_ok = 1;
++    return 0;
++}
++
++static void chn_close(ipu_rt *rt)
++{
++    if (rt->in_ok)  rt->PutInputTensors(rt->chn, &rt->in);
++    if (rt->out_ok) rt->PutOutputTensors(rt->chn, &rt->out);
++    if (rt->chn_ok) rt->DestroyCHN(rt->chn);
++    rt->in_ok = rt->out_ok = rt->chn_ok = 0;
++}
++
++int ipu_rt_open(ipu_rt *rt, const char *fw, const char *model, unsigned int dynbuf)
++{
++    struct stat st;
++    int r;
++
++    memset(rt, 0, sizeof *rt);
++    rt->cache_mode = 3;     /* Invoke does not write the input back (README.md) */
++    if (stat(fw, &st)) { perror(fw); return -1; }
++    if (load_libs(rt)) return -1;
++
++    if ((r = rt->SysInit(0))) { fprintf(stderr, "ipu: MI_SYS_Init = %d\n", r); return -1; }
++    rt->sys_ok = 1;
++
++    /* The model's variable buffer sets DevAttr.maxDynBufSize: too small and
++     * Invoke fails (9), too big and it holds MMA for nothing. On drop 1230
++     * GetOfflineModeStaticInfo(readFn, path, info) reads the model header and
++     * fills a 92-byte info; word 0 is the variable buffer (0x196000 for the
++     * JL12D2 model), word 1 the model size. */
++    if (!dynbuf) {
++        int (*static_info)(MI_IPU_ReadFn, char *, unsigned int *) =
++            (int (*)(MI_IPU_ReadFn, char *, unsigned int *))dlsym(rt->h_ipu, "MI_IPU_GetOfflineModeStaticInfo");
++        unsigned int info[64];
++        memset(info, 0, sizeof info);
++        if (static_info && !static_info(read_cb, (char *)model, info) && info[0])
++            dynbuf = info[0];
++    }
++    rt->dynbuf = dynbuf ? dynbuf : 4u << 20;
++
++    MI_IPU_DevAttr dev;
++    memset(&dev, 0, sizeof dev);
++    dev.maxDynBufSize = rt->dynbuf;
++    dev.yuv420Walign = 2; dev.yuv420Halign = 2; dev.rgbWalign = 1;
++    if ((r = rt->CreateDevice(&dev, read_cb, (char *)fw, (unsigned int)st.st_size))) {
++        fprintf(stderr, "ipu: CreateDevice(%s) = %d\n", fw, r); return -1;
++    }
++    rt->dev_ok = 1;
++    rt->model = model;
++    return chn_open(rt, 1);
++}
++
++int ipu_rt_invoke(ipu_rt *rt)
++{
++    if (rt->cache_mode & 1)
++        for (unsigned i = 0; i < rt->desc.inCnt && i < 60; i++)
++            if (rt->in.tensor[i].data[0])
++                rt->FlushInvCache(rt->in.tensor[i].data[0], rt->desc.inDesc[i].bufSize);
++    int r = rt->Invoke(rt->chn, &rt->in, &rt->out);
++    if (!r && (rt->cache_mode & 2))
++        for (unsigned i = 0; i < rt->desc.outCnt && i < 60; i++)
++            if (rt->out.tensor[i].data[0])
++                rt->FlushInvCache(rt->out.tensor[i].data[0], rt->desc.outDesc[i].bufSize);
++    return r;
++}
++
++int ipu_rt_rechannel(ipu_rt *rt, unsigned int in_depth)
++{
++    chn_close(rt);
++    return chn_open(rt, in_depth);
++}
++
++void ipu_rt_close(ipu_rt *rt)
++{
++    chn_close(rt);
++    if (rt->dev_ok) rt->DestroyDevice();
++    if (rt->sys_ok) rt->SysExit(0);
++    if (rt->h_ipu)  dlclose(rt->h_ipu);
++    rt->in_ok = rt->out_ok = rt->chn_ok = rt->dev_ok = rt->sys_ok = 0;
++    rt->h_ipu = NULL;
++}
++
++static void dump1(const char *tag, unsigned i, const MI_IPU_TensorDesc *d)
++{
++    printf("%s[%u] %-28s fmt=%u dim=%u shape=[", tag, i, d->name, d->format, d->dimension);
++    for (unsigned k = 0; k < d->dimension && k < 10; k++)
++        printf(k ? ",%u" : "%u", d->shape[k]);
++    printf("] inner=%u scale=%.8g zp=%lld buf=%u abuf=%d walign=%u halign=%u nchw=%d\n",
++           d->innerMost, (double)d->scalar, d->zeroPnt, d->bufSize, d->alignedBufSize,
++           d->inWalign, d->inHalign, d->nchwModeOn);
++}
++
++void ipu_rt_dump_desc(const ipu_rt *rt)
++{
++    for (unsigned i = 0; i < rt->desc.inCnt && i < 60; i++) dump1("IN ", i, &rt->desc.inDesc[i]);
++    for (unsigned i = 0; i < rt->desc.outCnt && i < 60; i++) dump1("OUT", i, &rt->desc.outDesc[i]);
++}
++
++int ipu_rt_load_nv12(ipu_rt *rt, const unsigned char *nv12, unsigned int w, unsigned int h,
++                     int swap_uv)
++{
++    const MI_IPU_TensorDesc *d = &rt->desc.inDesc[0];
++    unsigned char *dst = rt->in.tensor[0].data[0];
++    if (!rt->desc.inCnt || !dst) return -1;
++
++    /* The input row stride: bufSize = stride * h * 3/2 for NV12. A packed
++     * 800x480 model input has bufSize 576000, so stride == w there. */
++    unsigned int stride = (unsigned int)((unsigned long long)d->bufSize * 2 / 3 / h);
++    if (stride < w) { fprintf(stderr, "ipu: input %ux%u does not fit buf %u\n", w, h, d->bufSize); return -1; }
++
++    for (unsigned y = 0; y < h; y++)
++        memcpy(dst + (size_t)y * stride, nv12 + (size_t)y * w, w);
++    unsigned char *duv = dst + (size_t)stride * h;
++    const unsigned char *suv = nv12 + (size_t)w * h;
++    for (unsigned y = 0; y < h / 2; y++) {
++        if (!swap_uv) {
++            memcpy(duv + (size_t)y * stride, suv + (size_t)y * w, w);
++        } else {
++            const unsigned char *s = suv + (size_t)y * w;
++            unsigned char *o = duv + (size_t)y * stride;
++            for (unsigned x = 0; x < w; x += 2) { o[x] = s[x + 1]; o[x + 1] = s[x]; }
++        }
++    }
++    return 0;
++}
+diff --git a/package/thingino-ipud/files/ipu_rt.h b/package/thingino-ipud/files/ipu_rt.h
+new file mode 100644
+index 000000000..0d0e73c75
+--- /dev/null
++++ b/package/thingino-ipud/files/ipu_rt.h
+@@ -0,0 +1,63 @@
++/* ipu_rt.h - a thin MI_IPU runtime wrapper for Infinity6C (dlopen, one channel).
++ *
++ * Wraps the validated bring-up flow (README.md): the MI deps in global scope,
++ * MI_SYS_Init(0), CreateDevice(firmware), CreateCHN(model), GetInOutTensorDesc,
++ * GetInputTensors / GetOutputTensors once, then Invoke per frame.
++ */
++#ifndef IPU_RT_H
++#define IPU_RT_H
++
++#include "mi_ipu.h"
++
++typedef struct {
++    void *h_ipu, *h_sys;
++    fn_MI_IPU_CreateDevice       CreateDevice;
++    fn_MI_IPU_DestroyDevice      DestroyDevice;
++    fn_MI_IPU_CreateCHN          CreateCHN;
++    fn_MI_IPU_DestroyCHN         DestroyCHN;
++    fn_MI_IPU_GetInOutTensorDesc GetInOutTensorDesc;
++    fn_MI_IPU_GetInputTensors    GetInputTensors;
++    fn_MI_IPU_PutInputTensors    PutInputTensors;
++    fn_MI_IPU_GetOutputTensors   GetOutputTensors;
++    fn_MI_IPU_PutOutputTensors   PutOutputTensors;
++    fn_MI_IPU_Invoke             Invoke;
++    fn_MI_SYS_Init               SysInit;
++    fn_MI_SYS_Exit               SysExit;
++    int (*FlushInvCache)(void *va, unsigned int size);   /* 2 args on 1230 */
++
++    /* Cache maintenance around Invoke (bits): 1 = write the input tensor back
++     * before Invoke, 2 = invalidate the outputs after it. README.md says which
++     * the 1230 runtime needs. */
++    int cache_mode;
++    unsigned int dynbuf;            /* DevAttr.maxDynBufSize as used */
++    const char *model;              /* for CreateCHN's read callback */
++    unsigned int in_depth;          /* the channel's input buffer depth */
++
++    unsigned int chn;
++    MI_IPU_TensorDescSet desc;      /* ~43 KB: keep the struct off the stack */
++    MI_IPU_TensorVector in, out;
++    int sys_ok, dev_ok, chn_ok, in_ok, out_ok;
++} ipu_rt;
++
++/* dynbuf: DevAttr.maxDynBufSize, >= the model's variable buffer (0 = read it
++ * from the model header, else 4 MiB). */
++int  ipu_rt_open(ipu_rt *rt, const char *fw, const char *model, unsigned int dynbuf);
++int  ipu_rt_invoke(ipu_rt *rt);
++void ipu_rt_close(ipu_rt *rt);
++void ipu_rt_dump_desc(const ipu_rt *rt);
++
++/* Copy a packed NV12 frame (w x h, Y then interleaved UV) into input tensor 0,
++ * honouring the tensor's row alignment. swap_uv writes NV21 instead. */
++int  ipu_rt_load_nv12(ipu_rt *rt, const unsigned char *nv12, unsigned int w,
++                      unsigned int h, int swap_uv);
++
++/* Re-create the channel with input buffer depth in_depth. MI allocates the
++ * input buffer (the model's input size in MMA, 576000 B for an 800x480 NV12
++ * model) at CreateCHN, and PutInputTensors does not return it; zero copy points
++ * input tensor 0 at each frame and needs none, so it re-creates the channel
++ * with depth 0 (rt->in then holds the count and NULL buffers). Depth 1 brings
++ * the buffer back for the copy path. The output tensors are new: re-read
++ * rt->out. 0 on success; on failure the channel is gone. */
++int  ipu_rt_rechannel(ipu_rt *rt, unsigned int in_depth);
++
++#endif
+diff --git a/package/thingino-ipud/files/ipucat.c b/package/thingino-ipud/files/ipucat.c
+new file mode 100644
+index 000000000..4987ea3ee
+--- /dev/null
++++ b/package/thingino-ipud/files/ipucat.c
+@@ -0,0 +1,39 @@
++/* ipucat.c - print ipud's detection stream (one JSON line per inference).
++ *
++ *   ipucat [-n lines] [socket]      (default /run/ipud.sock)
++ */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++
++int main(int argc, char **argv)
++{
++    long max = 0;
++    int opt;
++    while ((opt = getopt(argc, argv, "n:")) != -1) {
++        if (opt == 'n') max = atol(optarg);
++        else { fprintf(stderr, "usage: %s [-n lines] [socket]\n", argv[0]); return 2; }
++    }
++    const char *path = optind < argc ? argv[optind] : "/run/ipud.sock";
++    struct sockaddr_un a;
++    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
++    memset(&a, 0, sizeof a);
++    a.sun_family = AF_UNIX;
++    snprintf(a.sun_path, sizeof a.sun_path, "%s", path);
++    if (fd < 0 || connect(fd, (struct sockaddr *)&a, sizeof a)) { perror(path); return 1; }
++
++    char buf[8192];
++    long lines = 0;
++    ssize_t n;
++    while ((n = read(fd, buf, sizeof buf)) > 0) {
++        fwrite(buf, 1, (size_t)n, stdout);
++        fflush(stdout);
++        for (ssize_t i = 0; i < n; i++) lines += buf[i] == '\n';
++        if (max && lines >= max) break;
++    }
++    close(fd);
++    return 0;
++}
+diff --git a/package/thingino-ipud/files/ipud-frigate b/package/thingino-ipud/files/ipud-frigate
+new file mode 100755
+index 000000000..2c1a86302
+--- /dev/null
++++ b/package/thingino-ipud/files/ipud-frigate
+@@ -0,0 +1,65 @@
++#!/bin/sh
++# ipud-frigate -- Frigate events from thingino-ipud (ipud -x).
++#
++#   ipud-frigate LABEL ON    open a Frigate event for LABEL on this camera
++#   ipud-frigate LABEL OFF   end it
++#   ipud-frigate reset       end every event an earlier run left open
++#
++# ipud runs it on each presence change of a reported class. ON creates a
++# manual event through Frigate's API (POST /api/events/<camera>/<label>/create:
++# sub_label "ipud", ipud's score, no duration so it stays open, the recording
++# kept, and the class's boxes of that moment drawn on the event's snapshot,
++# from IPUD_SCORE and IPUD_DRAW); OFF ends it (PUT /api/events/<id>/end).
++# Frigate's internal port (5000) needs no login; the id of each open event is
++# kept in /run/ipud/frigate/<label>.
++#
++# Environment (S35ipud sets them from ipud.frigate_url and ipud.frigate_camera):
++#   IPUD_FRIGATE_URL      http://<frigate-host>:5000
++#   IPUD_FRIGATE_CAMERA   this camera's name in Frigate's config
++
++URL=${IPUD_FRIGATE_URL%/}
++CAM=$IPUD_FRIGATE_CAMERA
++DIR=/run/ipud/frigate
++
++log() { logger -t ipud-frigate "$*"; }
++
++[ -n "$URL" ] && [ -n "$CAM" ] || {
++	log "ipud.frigate_url or ipud.frigate_camera is not set"
++	exit 1
++}
++
++end_event() {
++	id=$(cat "$1" 2>/dev/null)
++	rm -f "$1"
++	[ -n "$id" ] || return 0
++	curl -s -m 5 -X PUT -H 'Content-Type: application/json' -d '{}' \
++		"$URL/api/events/$id/end" >/dev/null || log "ending event $id failed"
++}
++
++case "$1:$2" in
++reset:*)
++	for f in "$DIR"/*; do
++		[ -f "$f" ] && end_event "$f"
++	done
++	;;
++*:ON)
++	mkdir -p "$DIR"
++	[ -f "$DIR/$1" ] && end_event "$DIR/$1"
++	draw=${IPUD_DRAW:-'{}'}
++	body="{\"sub_label\":\"ipud\",\"score\":${IPUD_SCORE:-0},\"duration\":null,\"include_recording\":true,\"draw\":$draw}"
++	r=$(curl -s -m 5 -H 'Content-Type: application/json' -d "$body" "$URL/api/events/$CAM/$1/create")
++	id=$(printf '%s' "$r" | sed -n 's/.*"event_id": *"\([^"]*\)".*/\1/p')
++	if [ -n "$id" ]; then
++		printf '%s\n' "$id" >"$DIR/$1"
++	else
++		log "creating the $1 event failed: $r"
++	fi
++	;;
++*:OFF)
++	end_event "$DIR/$1"
++	;;
++*)
++	echo "usage: $0 LABEL ON|OFF | reset" >&2
++	exit 2
++	;;
++esac
+diff --git a/package/thingino-ipud/files/ipud-ha b/package/thingino-ipud/files/ipud-ha
+new file mode 100755
+index 000000000..9185fd4db
+--- /dev/null
++++ b/package/thingino-ipud/files/ipud-ha
+@@ -0,0 +1,126 @@
++#!/bin/sh
++# shellcheck disable=SC1091,SC2153
++# ipud-ha -- Home Assistant entities for thingino-ipud, on the camera's own
++# HA device.
++#
++#   ipud-ha on REPORT LABELS   publish MQTT discovery: a binary sensor per
++#                              reported class ("Person detected", occupancy)
++#                              and an "Objects" sensor (how many, with the
++#                              boxes as attributes). REPORT and LABELS are
++#                              comma lists: ipud.report (empty: every class)
++#                              and the model's class names.
++#   ipud-ha off                clear what an earlier "on" published
++#   ipud-ha env                the broker and topic for S35ipud, as
++#                              IPUD_MQTT_*= and IPUD_HA_TOPIC= lines for eval
++#
++# It uses thingino-ha's library (/usr/share/ha-common): the camera id, the
++# broker (ha.mqtt, else mqtt_sub) and its publish helpers. The entities join
++# the device thingino-ha registers (identifiers thingino_<id>), and are
++# available while both the camera (cameras/<id>/status) and ipud
++# (cameras/<id>/ipud/status, ipud's will) are online. ipud publishes their
++# state under cameras/<id>/ipud/: <label> ON/OFF (retained) and detections
++# (one JSON line, the socket's).
++#
++# What was published is listed in /etc/ipud-ha.list, so "off" clears exactly
++# that, and a camera that never used it does no MQTT at all.
++
++HA_LIB=/usr/share/ha-common
++LIST="${IPUD_HA_LIST:-/etc/ipud-ha.list}"
++
++[ -f "$HA_LIB" ] || {
++	echo "ipud-ha: thingino-ha is not installed ($HA_LIB)" >&2
++	exit 1
++}
++. "$HA_LIB"
++
++T="cameras/${HA_CAMERA_ID}/ipud"
++
++need_broker() {
++	[ -n "$HA_MQTT_HOST" ] && return 0
++	echo "ipud-ha: no broker (ha.mqtt.host, or mqtt_sub.host)" >&2
++	return 1
++}
++
++in_list() {
++	case ",$1," in *,"$2",*) return 0 ;; esac
++	return 1
++}
++
++# The device as thingino-ha's ha-discovery describes it (name, model,
++# manufacturer from the same settings), so the entities join that device when
++# thingino-ha runs and make a properly named one when it does not.
++device_json() {
++	name=$(ha_cfg device_name)
++	name=${name:-$HA_CAMERA_HOSTNAME}
++	model=$(ha_cfg device_model)
++	[ -n "$model" ] || model=$(grep '^IMAGE_NAME=' /etc/os-release 2>/dev/null | cut -d= -f2- | tr -d '"')
++	model=${model:-Thingino Camera}
++	printf '{"identifiers":["thingino_%s"],"name":"%s","model":"%s","manufacturer":"Thingino"}' \
++		"$HA_CAMERA_ID" "$(ha_json_escape "$name")" "$(ha_json_escape "$model")"
++}
++
++disc_on() {
++	report=$1 labels=$2
++	dev=$(device_json)
++	av="\"availability\":[{\"topic\":\"${HA_AVAIL_TOPIC}\"},{\"topic\":\"${T}/status\"}],\"availability_mode\":\"all\""
++	want=
++	ha_pub_begin
++	for l in $(echo "$labels" | tr ',' ' '); do
++		[ -n "$report" ] && ! in_list "$report" "$l" && continue
++		case "$l" in *[!a-zA-Z0-9_-]* | "") continue ;; esac
++		name=$(printf '%s' "$l" | awk '{print toupper(substr($0, 1, 1)) substr($0, 2)}')
++		ha_pub_disc binary_sensor "ipud_$l" \
++			"{\"name\":\"${name} detected\",\"unique_id\":\"thingino_${HA_CAMERA_ID}_ipud_${l}\",\"state_topic\":\"${T}/${l}\",\"payload_on\":\"ON\",\"payload_off\":\"OFF\",\"device_class\":\"occupancy\",${av},\"device\":${dev}}"
++		want="$want binary_sensor:ipud_$l"
++	done
++	ha_pub_disc sensor ipud_objects \
++		"{\"name\":\"Objects\",\"unique_id\":\"thingino_${HA_CAMERA_ID}_ipud_objects\",\"state_topic\":\"${T}/detections\",\"value_template\":\"{{ value_json.objects | count }}\",\"json_attributes_topic\":\"${T}/detections\",\"json_attributes_template\":\"{{ {'objects': value_json.objects} | tojson }}\",\"state_class\":\"measurement\",\"icon\":\"mdi:shape-outline\",${av},\"device\":${dev}}"
++	want="$want sensor:ipud_objects"
++
++	# entities of an earlier run that are not wanted now (another model, another report)
++	if [ -f "$LIST" ]; then
++		while read -r e; do
++			case " $want " in *" $e "*) ;; *) ha_clear_disc "${e%%:*}" "${e#*:}" ;; esac
++		done <"$LIST"
++	fi
++	ha_pub_flush
++	new=$(echo "$want" | tr ' ' '\n' | sed '/^$/d')
++	[ "$new" = "$(cat "$LIST" 2>/dev/null)" ] || printf '%s\n' "$new" >"$LIST"
++}
++
++disc_off() {
++	[ -f "$LIST" ] || return 0
++	ha_pub_begin
++	while read -r e; do
++		[ -n "$e" ] && ha_clear_disc "${e%%:*}" "${e#*:}"
++	done <"$LIST"
++	ha_pub_flush
++	rm -f "$LIST"
++}
++
++case "$1" in
++on)
++	need_broker || exit 1
++	disc_on "$2" "$3"
++	;;
++off)
++	[ -f "$LIST" ] || exit 0
++	need_broker || exit 1
++	disc_off
++	;;
++env)
++	need_broker || exit 1
++	[ "$HA_MQTT_SSL" = "true" ] &&
++		echo "ipud-ha: the broker uses TLS, which ipud's MQTT client does not support yet" >&2
++	echo "IPUD_MQTT_HOST=$(_sq "$HA_MQTT_HOST")"
++	echo "IPUD_MQTT_PORT=$(_sq "$HA_MQTT_PORT")"
++	echo "IPUD_MQTT_USER=$(_sq "$HA_MQTT_USER")"
++	echo "IPUD_MQTT_PASS=$(_sq "$HA_MQTT_PASS")"
++	echo "IPUD_MQTT_CLIENT_ID=$(_sq "${HA_MQTT_CLIENT_PREFIX}-ipud-${HA_CAMERA_ID}")"
++	echo "IPUD_HA_TOPIC=$(_sq "$T")"
++	;;
++*)
++	echo "usage: $0 on REPORT LABELS | off | env" >&2
++	exit 2
++	;;
++esac
+diff --git a/package/thingino-ipud/files/ipud-onvif b/package/thingino-ipud/files/ipud-onvif
+new file mode 100755
+index 000000000..899ca766d
+--- /dev/null
++++ b/package/thingino-ipud/files/ipud-onvif
+@@ -0,0 +1,88 @@
++#!/bin/sh
++# ipud-onvif -- ONVIF object events for thingino-ipud.
++#
++#   ipud-onvif on GROUP...   one event per group (person, vehicle, pet) in
++#                            /etc/onvif.json; ipud events not named are dropped
++#   ipud-onvif off           drop every ipud event
++#
++# ipud -O /run/motion keeps /run/motion/ipud_<group> while any reported class
++# of the group is present; onvif_notify_server watches /run/motion and raises
++# an event while the file exists. The topics are the ones Home Assistant's
++# ONVIF integration turns into binary sensors (onvif-parsers' MyRuleDetector
++# set): Person, Vehicle and Pet Detection.
++#
++# The server takes at most 8 events, and each relay in onvif.json uses one
++# (MAX_EVENTS in thingino-onvif's utils.h): past that it refuses the whole
++# config and ONVIF stops, so a group that does not fit is skipped with a
++# warning. onvif_notify_server is restarted only when the events changed.
++
++CONF=/etc/onvif.json
++DIR=/run/motion
++MAX_EVENTS=8
++NOTIFY=/etc/init.d/S97onvif_notify
++
++topic() {
++	case "$1" in
++	person) echo "tns1:RuleEngine/MyRuleDetector/PeopleDetect" ;;
++	vehicle) echo "tns1:RuleEngine/MyRuleDetector/VehicleDetect" ;;
++	pet) echo "tns1:RuleEngine/MyRuleDetector/DogCatDetect" ;;
++	esac
++}
++
++# number of entries of a top-level array (jct prints ["$.x[0].k",...])
++count() {
++	jct "$CONF" path "\$.$1[*].$2" --mode paths 2>/dev/null | grep -o "\\\$\\.$1\\[" | wc -l
++}
++
++has() {
++	[ "$(jct "$CONF" path "\$.events[?(@.input_file == \"$DIR/ipud_$1\")]" --mode values 2>/dev/null)" != "[]" ]
++}
++
++drop() {
++	keep=$(jct "$CONF" path "\$.events[?(@.input_file != \"$DIR/ipud_$1\")]" --mode values) || return 1
++	tmp=/tmp/ipud-onvif.$$
++	printf '{"events":%s}\n' "$keep" >"$tmp" && jct "$CONF" import "$tmp" >/dev/null
++	rm -f "$tmp"
++}
++
++add() {
++	n=$(count events topic)
++	r=$(count relays token)
++	if [ $((n + r + 1)) -gt $MAX_EVENTS ]; then
++		echo "ipud-onvif: no room for the $1 event ($n events and $r relays of $MAX_EVENTS)" >&2
++		return 1
++	fi
++	jct "$CONF" set "events.$n.topic" "$(topic "$1")" >/dev/null &&
++		jct "$CONF" set "events.$n.input_file" "$DIR/ipud_$1" >/dev/null &&
++		jct "$CONF" set "events.$n.source_name" Source >/dev/null &&
++		jct "$CONF" set "events.$n.source_type" tt:ReferenceToken >/dev/null &&
++		jct "$CONF" set "events.$n.source_value" VideoSourceToken >/dev/null
++}
++
++[ -f "$CONF" ] || exit 0
++mode=$1
++[ $# -gt 0 ] && shift
++case "$mode" in
++on | off) ;;
++*)
++	echo "usage: $0 on GROUP... | off" >&2
++	exit 2
++	;;
++esac
++
++before=$(jct "$CONF" get events 2>/dev/null | md5sum)
++for g in person vehicle pet; do
++	want=
++	[ "$mode" = on ] && for w in "$@"; do [ "$w" = "$g" ] && want=1; done
++	if [ -n "$want" ]; then
++		has "$g" || add "$g"
++	else
++		has "$g" && drop "$g"
++	fi
++done
++after=$(jct "$CONF" get events 2>/dev/null | md5sum)
++
++if [ "$before" != "$after" ] && pidof onvif_notify_server >/dev/null && [ -x "$NOTIFY" ]; then
++	"$NOTIFY" restart >/dev/null 2>&1
++fi
++exit 0
+diff --git a/package/thingino-ipud/files/ipud-paths b/package/thingino-ipud/files/ipud-paths
+new file mode 100644
+index 000000000..eb847668d
+--- /dev/null
++++ b/package/thingino-ipud/files/ipud-paths
+@@ -0,0 +1,89 @@
++# ipud-paths -- which IPU firmware, model and class names ipud runs with.
++# Sourced by S35ipud and /var/www/x/json-ipud.cgi, so both resolve the same way.
++#
++# ipud.source in /etc/thingino.json picks the model:
++#   builtin  /usr/share/ipud/model.img and ipu_firmware.bin, from the image (a
++#            private build stages them; a public one has none)
++#   sdcard   <ipud.sd_dir>/<ipud.sd_model> on the SD card (the first *.img there
++#            when sd_model is empty); the folder's ipu_firmware.bin if it has
++#            one, else the built-in firmware
++#   custom   the paths ipud.firmware and ipud.model
++# A config from before ipud.source that names its own ipud.model is custom.
++# Class names: a <model>.labels file beside the model (one line, comma-separated)
++# wins over ipud.labels. A key missing from thingino.json takes the package
++# default (45-ipud.json): thingino-core merges defaults only at build time.
++
++IPUD_CONFIG=${IPUD_CONFIG:-/etc/thingino.json}
++IPUD_DEFAULTS=/usr/share/thingino-defaults/45-ipud.json
++IPUD_BUILTIN=/usr/share/ipud
++
++ipud_get() {
++	_v=$(jct "$IPUD_CONFIG" get "ipud.$1" 2>/dev/null)
++	[ -n "$_v" ] || _v=$(jct "$IPUD_DEFAULTS" get "ipud.$1" 2>/dev/null)
++	printf '%s' "$_v"
++}
++
++# The *.img files of a folder, one per line.
++ipud_sd_models() {
++	[ -d "$1" ] && ls "$1" 2>/dev/null | grep '\.img$'
++}
++
++# Sets IPUD_SOURCE, IPUD_FW, IPUD_MODEL, IPUD_LABELS, IPUD_LABELS_FILE (1 when a
++# .labels file named them) and IPUD_MISSING (why it cannot run; empty if it can).
++ipud_resolve() {
++	IPUD_MISSING=
++	IPUD_FW=
++	IPUD_MODEL=
++	IPUD_SOURCE=$(jct "$IPUD_CONFIG" get ipud.source 2>/dev/null)
++	if [ -z "$IPUD_SOURCE" ]; then
++		if [ -n "$(jct "$IPUD_CONFIG" get ipud.model 2>/dev/null)" ]; then
++			IPUD_SOURCE=custom
++		else
++			IPUD_SOURCE=$(ipud_get source)
++		fi
++	fi
++	case "$IPUD_SOURCE" in
++	sdcard)
++		_d=$(ipud_get sd_dir)
++		_m=$(ipud_get sd_model)
++		if [ -z "$_d" ] || [ ! -d "$_d" ]; then
++			IPUD_MISSING="SD card folder ${_d:-(none set)} not found"
++		else
++			[ -n "$_m" ] || _m=$(ipud_sd_models "$_d" | head -n 1)
++			if [ -z "$_m" ]; then
++				IPUD_MISSING="no model (.img) in $_d"
++			else
++				IPUD_MODEL="$_d/$_m"
++			fi
++		fi
++		IPUD_FW="$_d/ipu_firmware.bin"
++		[ -f "$IPUD_FW" ] || IPUD_FW="$IPUD_BUILTIN/ipu_firmware.bin"
++		;;
++	custom)
++		IPUD_FW=$(ipud_get firmware)
++		IPUD_MODEL=$(ipud_get model)
++		[ -n "$IPUD_MODEL" ] || IPUD_MISSING="no model path set"
++		[ -n "$IPUD_FW" ] || IPUD_FW="$IPUD_BUILTIN/ipu_firmware.bin"
++		;;
++	*)
++		IPUD_SOURCE=builtin
++		IPUD_FW="$IPUD_BUILTIN/ipu_firmware.bin"
++		IPUD_MODEL="$IPUD_BUILTIN/model.img"
++		[ -f "$IPUD_MODEL" ] || IPUD_MISSING="this image has no built-in model"
++		;;
++	esac
++	if [ -z "$IPUD_MISSING" ]; then
++		if [ ! -f "$IPUD_MODEL" ]; then
++			IPUD_MISSING="model $IPUD_MODEL not found"
++		elif [ ! -f "$IPUD_FW" ]; then
++			IPUD_MISSING="IPU firmware $IPUD_FW not found"
++		fi
++	fi
++	IPUD_LABELS=
++	IPUD_LABELS_FILE=0
++	if [ -n "$IPUD_MODEL" ] && [ -f "${IPUD_MODEL%.*}.labels" ]; then
++		IPUD_LABELS=$(head -n 1 "${IPUD_MODEL%.*}.labels" | tr -d ' \r')
++		[ -n "$IPUD_LABELS" ] && IPUD_LABELS_FILE=1
++	fi
++	[ -n "$IPUD_LABELS" ] || IPUD_LABELS=$(ipud_get labels)
++}
+diff --git a/package/thingino-ipud/files/ipud.c b/package/thingino-ipud/files/ipud.c
+new file mode 100644
+index 000000000..e03747a90
+--- /dev/null
++++ b/package/thingino-ipud/files/ipud.c
+@@ -0,0 +1,799 @@
++/* ipud.c - on-camera YOLO detection on the Infinity6C IPU.
++ *
++ * Frames come from a spare SCL output port at the model's input size (NV12,
++ * scl_src.c), run through MI_IPU (ipu_rt.c), and are decoded (yolo.c). Results
++ * go to up to four sinks:
++ *   status  a JSON file rewritten at most once a second (the WebUI reads it)
++ *   socket  a UNIX stream socket: one JSON line per inference to every client,
++ *           for low-latency local consumers (a PTZ tracker)
++ *   mqtt    <topic>/status online/offline, <topic>/<label> ON/OFF on presence
++ *           change (retained), <topic>/detections JSON while objects are present
++ *   onvif   (-O dir) one file per object group while present, for
++ *           onvif_notify_server's events (ipud-onvif maps them to topics)
++ * Box coordinates are normalised to the full frame (the SCL port scales the
++ * whole sensor image, so they map onto every stream).
++ *
++ * MQTT broker settings come from the environment (the init script reads them
++ * from /etc/send2.json): IPUD_MQTT_HOST, _PORT, _USER, _PASS, _CLIENT_ID.
++ */
++#define _GNU_SOURCE
++#include <errno.h>
++#include <fcntl.h>
++#include <signal.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <syslog.h>
++#include <time.h>
++#include <unistd.h>
++#include <dlfcn.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/un.h>
++#include "ipu_rt.h"
++#include "scl_src.h"
++#include "yolo.h"
++
++#define MAX_DET     64
++#define MAX_CLASSES 16
++#define MAX_CLIENTS 4
++
++static volatile sig_atomic_t g_stop;
++static int g_verbose, g_foreground;
++
++static void lg(int pri, const char *fmt, ...)
++{
++    va_list ap;
++    if (pri == LOG_DEBUG && !g_verbose) return;
++    va_start(ap, fmt);
++    if (g_foreground) { vfprintf(stderr, fmt, ap); fputc('\n', stderr); }
++    else vsyslog(pri, fmt, ap);
++    va_end(ap);
++}
++
++static double now_ms(void)
++{
++    struct timespec t;
++    clock_gettime(CLOCK_MONOTONIC, &t);
++    return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
++}
++
++static void on_signal(int sig) { (void)sig; g_stop = 1; }
++
++static void write_status(const char *path, const char *json);
++
++/* ---------------------------------------------------------------- config */
++
++typedef struct {
++    const char *fw, *model, *status_path, *sock_path, *topic, *save_frame, *ev_dir, *hook;
++    char labels[MAX_CLASSES][24];
++    int nlabels;
++    unsigned keep;                  /* bitmask of reported classes; 0 = all */
++    float conf, iou, max_fps;
++    int port, max_infer, print, zero_copy, depth;
++    int hold_ms, mqtt_min_ms, status_ms;
++} cfg_t;
++
++static int label_index(const cfg_t *c, const char *name)
++{
++    for (int i = 0; i < c->nlabels; i++) if (!strcmp(c->labels[i], name)) return i;
++    return -1;
++}
++
++static void parse_labels(cfg_t *c, const char *s)
++{
++    c->nlabels = 0;
++    while (*s && c->nlabels < MAX_CLASSES) {
++        size_t n = strcspn(s, ",");
++        snprintf(c->labels[c->nlabels++], sizeof c->labels[0], "%.*s", (int)n, s);
++        s += n + (s[n] == ',');
++    }
++}
++
++/* The classes to report. A name the model does not have is skipped with a
++ * warning (the setting outlives a model swap); none matching reports all. */
++static void parse_keep(cfg_t *c, const char *s);
++
++/* ---------------------------------------------------------------- mqtt (dlopen libmosquitto) */
++
++typedef struct {
++    void *h, *m;
++    int (*lib_init)(void);
++    void *(*new_)(const char *, int, void *);
++    int (*pw)(void *, const char *, const char *);
++    int (*will)(void *, const char *, int, const void *, int, int);
++    int (*connect)(void *, const char *, int, int);
++    int (*reconnect)(void *);
++    int (*publish)(void *, int *, const char *, int, const void *, int, int);
++    int (*loop)(void *, int, int);
++    const char *host;
++    int port, up;
++    double next_try;
++    char topic[128];
++} mqtt_t;
++
++static int mqtt_init(mqtt_t *q, const char *topic)
++{
++    memset(q, 0, sizeof q[0]);
++    q->host = getenv("IPUD_MQTT_HOST");
++    if (!topic || !*topic || !q->host || !*q->host) return 0;
++    q->port = getenv("IPUD_MQTT_PORT") ? atoi(getenv("IPUD_MQTT_PORT")) : 1883;
++    snprintf(q->topic, sizeof q->topic, "%s", topic);
++    if (!(q->h = dlopen("libmosquitto.so.1", RTLD_NOW))) {
++        lg(LOG_WARNING, "mqtt: %s; MQTT off", dlerror());
++        return 0;
++    }
++#define MQ(f, s) if (!(*(void **)&q->f = dlsym(q->h, s))) { lg(LOG_WARNING, "mqtt: no %s", s); return 0; }
++    MQ(lib_init, "mosquitto_lib_init"); MQ(new_, "mosquitto_new");
++    MQ(pw, "mosquitto_username_pw_set"); MQ(will, "mosquitto_will_set");
++    MQ(connect, "mosquitto_connect"); MQ(reconnect, "mosquitto_reconnect");
++    MQ(publish, "mosquitto_publish"); MQ(loop, "mosquitto_loop");
++#undef MQ
++    q->lib_init();
++    const char *id = getenv("IPUD_MQTT_CLIENT_ID");
++    char idbuf[64];
++    if (!id || !*id) {
++        char hn[40] = "cam";
++        gethostname(hn, sizeof hn - 1);
++        snprintf(idbuf, sizeof idbuf, "ipud-%s", hn);
++        id = idbuf;
++    }
++    if (!(q->m = q->new_(id, 1, NULL))) { lg(LOG_WARNING, "mqtt: mosquitto_new failed"); return 0; }
++    const char *u = getenv("IPUD_MQTT_USER"), *p = getenv("IPUD_MQTT_PASS");
++    if (u && *u) q->pw(q->m, u, p && *p ? p : NULL);
++    char t[160];
++    snprintf(t, sizeof t, "%s/status", q->topic);
++    q->will(q->m, t, 7, "offline", 1, 1);
++    return 1;
++}
++
++static void mqtt_pub(mqtt_t *q, const char *sub, const char *payload, int retain)
++{
++    char t[192];
++    if (!q->up) return;
++    snprintf(t, sizeof t, "%s/%s", q->topic, sub);
++    if (q->publish(q->m, NULL, t, (int)strlen(payload), payload, 0, retain)) q->up = 0;
++}
++
++/* 1 when it has just (re)connected: the caller then republishes its state,
++ * which may differ from what a previous run left retained */
++static int mqtt_service(mqtt_t *q, double now)
++{
++    int fresh = 0;
++    if (!q->m) return 0;
++    if (!q->up) {
++        if (now < q->next_try) return 0;
++        int first = q->next_try == 0;
++        int r = first ? q->connect(q->m, q->host, q->port, 30) : q->reconnect(q->m);
++        q->next_try = now + 15000;
++        if (r) { lg(LOG_DEBUG, "mqtt: connect %s:%d = %d", q->host, q->port, r); return 0; }
++        q->up = fresh = 1;
++        lg(LOG_INFO, "mqtt: connected to %s:%d, topic %s", q->host, q->port, q->topic);
++        mqtt_pub(q, "status", "online", 1);
++    }
++    if (q->loop(q->m, 0, 1)) q->up = 0;
++    return fresh;
++}
++
++/* ---------------------------------------------------------------- socket */
++
++typedef struct { int lfd, cfd[MAX_CLIENTS]; } sock_t;
++
++static int sock_init(sock_t *s, const char *path)
++{
++    struct sockaddr_un a;
++    s->lfd = -1;
++    for (int i = 0; i < MAX_CLIENTS; i++) s->cfd[i] = -1;
++    if (!path || !*path) return 0;
++    unlink(path);
++    if ((s->lfd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)) < 0) return -1;
++    memset(&a, 0, sizeof a);
++    a.sun_family = AF_UNIX;
++    snprintf(a.sun_path, sizeof a.sun_path, "%s", path);
++    if (bind(s->lfd, (struct sockaddr *)&a, sizeof a) || listen(s->lfd, MAX_CLIENTS)) {
++        lg(LOG_WARNING, "socket %s: %s", path, strerror(errno));
++        close(s->lfd);
++        s->lfd = -1;
++        return -1;
++    }
++    return 0;
++}
++
++static void sock_send(sock_t *s, const char *line, size_t n)
++{
++    if (s->lfd < 0) return;
++    int c;
++    while ((c = accept4(s->lfd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC)) >= 0) {
++        int i;
++        for (i = 0; i < MAX_CLIENTS && s->cfd[i] >= 0; i++) ;
++        if (i == MAX_CLIENTS) close(c); else s->cfd[i] = c;
++    }
++    for (int i = 0; i < MAX_CLIENTS; i++)
++        if (s->cfd[i] >= 0 && send(s->cfd[i], line, n, MSG_NOSIGNAL) != (ssize_t)n) {
++            close(s->cfd[i]);          /* gone, or too slow to keep up: drop it */
++            s->cfd[i] = -1;
++        }
++}
++
++/* ---------------------------------------------------------------- ONVIF event files */
++
++/* -O dir: one file per object group in dir (/run/motion, which
++ * onvif_notify_server watches), there while any reported class of the group
++ * is present. The server raises an event when a file appears and clears it
++ * when it goes; ipud-onvif maps each file to a topic in /etc/onvif.json. The
++ * file is created empty and never written: a write would send the event
++ * again. */
++static const struct { const char *file, *members; } GROUPS[] = {
++    { "ipud_person",  "person" },
++    { "ipud_vehicle", "bicycle,car,motorcycle,bus,truck" },
++    { "ipud_pet",     "cat,dog" },
++};
++#define NGROUPS (int)(sizeof GROUPS / sizeof GROUPS[0])
++
++typedef struct { const char *dir; unsigned mask[NGROUPS]; int on[NGROUPS]; } evfiles_t;
++
++static int in_list(const char *list, const char *name)
++{
++    size_t n = strlen(name);
++    for (const char *p = list; *p; p += strcspn(p, ",") + (p[strcspn(p, ",")] == ',')) {
++        if (strcspn(p, ",") == n && !strncmp(p, name, n)) return 1;
++    }
++    return 0;
++}
++
++static void evfile_set(const evfiles_t *e, int g, int on)
++{
++    char path[256];
++    snprintf(path, sizeof path, "%s/%s", e->dir, GROUPS[g].file);
++    if (on) {
++        int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
++        if (fd >= 0) close(fd);
++        else if (errno != EEXIST) lg(LOG_WARNING, "event file %s: %s", path, strerror(errno));
++    } else if (unlink(path) && errno != ENOENT) {
++        lg(LOG_WARNING, "event file %s: %s", path, strerror(errno));
++    }
++}
++
++static void evfiles_init(evfiles_t *e, const char *dir, const char labels[][24], int nlabels)
++{
++    memset(e, 0, sizeof *e);
++    e->dir = dir;
++    if (!dir) return;
++    mkdir(dir, 0755);
++    for (int g = 0; g < NGROUPS; g++) {
++        for (int k = 0; k < nlabels; k++)
++            if (in_list(GROUPS[g].members, labels[k])) e->mask[g] |= 1u << k;
++        evfile_set(e, g, 0);                /* a crash may have left one behind */
++    }
++}
++
++/* present: bit k set while class k is present (after the hold) */
++static void evfiles_update(evfiles_t *e, unsigned present)
++{
++    if (!e->dir) return;
++    for (int g = 0; g < NGROUPS; g++) {
++        int on = (present & e->mask[g]) != 0;
++        if (on != e->on[g]) {
++            e->on[g] = on;
++            evfile_set(e, g, on);
++            lg(LOG_INFO, "ONVIF %s %s", GROUPS[g].file + 5, on ? "ON" : "OFF");
++        }
++    }
++}
++
++static void evfiles_clear(evfiles_t *e)
++{
++    if (!e->dir) return;
++    for (int g = 0; g < NGROUPS; g++) evfile_set(e, g, 0);
++}
++
++/* ---------------------------------------------------------------- presence hook */
++
++/* -x cmd: run "cmd <label> ON|OFF" on each presence change of a reported
++ * class, in the background, with IPUD_SCORE (the best score of the class in
++ * this inference, 0-1) and IPUD_DRAW (Frigate's manual-event draw object:
++ * {"boxes":[{"box":[x,y,w,h],"score":<percent>}]}, fractions of the frame)
++ * in its environment. ipud-frigate opens and ends a Frigate event with it. */
++static void run_hook(const char *hook, const char *label, int on, const yolo_det *d, int n,
++                     int cls, float iw, float ih)
++{
++    char score[32], draw[1024];
++    float best = 0;
++    size_t o = (size_t)snprintf(draw, sizeof draw, "{\"boxes\":[");
++    int first = 1;
++    for (int i = 0; i < n && on; i++) {
++        if (d[i].cls != cls) continue;
++        float x0 = d[i].x0 / iw, y0 = d[i].y0 / ih, x1 = d[i].x1 / iw, y1 = d[i].y1 / ih;
++        x0 = x0 < 0 ? 0 : x0; y0 = y0 < 0 ? 0 : y0; x1 = x1 > 1 ? 1 : x1; y1 = y1 > 1 ? 1 : y1;
++        if (d[i].score > best) best = d[i].score;
++        if (o < sizeof draw)
++            o += (size_t)snprintf(draw + o, sizeof draw - o, "%s{\"box\":[%.4f,%.4f,%.4f,%.4f],\"score\":%d}",
++                                  first ? "" : ",", (double)x0, (double)y0, (double)(x1 - x0),
++                                  (double)(y1 - y0), (int)(d[i].score * 100 + 0.5f));
++        first = 0;
++    }
++    if (o + 3 >= sizeof draw) o = (size_t)snprintf(draw, sizeof draw, "{\"boxes\":[");   /* too many: none */
++    snprintf(draw + o, sizeof draw - o, "]}");
++    snprintf(score, sizeof score, "%.3f", (double)best);
++
++    pid_t p = fork();
++    if (p == 0) {
++        setenv("IPUD_SCORE", score, 1);
++        setenv("IPUD_DRAW", draw, 1);
++        execl(hook, hook, label, on ? "ON" : "OFF", (char *)NULL);
++        _exit(127);
++    }
++    if (p < 0) lg(LOG_WARNING, "hook %s: fork: %s", hook, strerror(errno));
++}
++
++/* ---------------------------------------------------------------- output */
++
++static size_t objects_json(char *b, size_t cap, const cfg_t *c, const yolo_det *d, int n,
++                           float iw, float ih)
++{
++    size_t o = 0;
++    o += (size_t)snprintf(b + o, cap - o, "[");
++    for (int i = 0; i < n && o < cap; i++) {
++        float x0 = d[i].x0 / iw, y0 = d[i].y0 / ih, x1 = d[i].x1 / iw, y1 = d[i].y1 / ih;
++        x0 = x0 < 0 ? 0 : x0; y0 = y0 < 0 ? 0 : y0; x1 = x1 > 1 ? 1 : x1; y1 = y1 > 1 ? 1 : y1;
++        o += (size_t)snprintf(b + o, cap - o, "%s{\"label\":\"%s\",\"score\":%.3f,\"box\":[%.4f,%.4f,%.4f,%.4f]}",
++                              i ? "," : "", c->labels[d[i].cls], (double)d[i].score,
++                              (double)x0, (double)y0, (double)x1, (double)y1);
++    }
++    if (o < cap) o += (size_t)snprintf(b + o, cap - o, "]");
++    return o < cap ? o : cap - 1;
++}
++
++static void write_status(const char *path, const char *json)
++{
++    char tmp[256];
++    snprintf(tmp, sizeof tmp, "%s.tmp", path);
++    FILE *f = fopen(tmp, "w");
++    if (!f) return;
++    fputs(json, f);
++    fclose(f);
++    rename(tmp, path);
++}
++
++static void parse_keep(cfg_t *c, const char *s)
++{
++    int matched = 0;
++    c->keep = 0;
++    while (*s) {
++        char name[24];
++        size_t n = strcspn(s, ",");
++        snprintf(name, sizeof name, "%.*s", (int)n, s);
++        int k = label_index(c, name);
++        if (k < 0) {
++            if (*name) lg(LOG_WARNING, "report: the model has no class '%s'; skipped", name);
++        } else {
++            c->keep |= 1u << k;
++            matched++;
++        }
++        s += n + (s[n] == ',');
++    }
++    if (!matched && c->keep == 0) lg(LOG_WARNING, "report: no listed class is in this model; reporting every class");
++}
++
++/* A start-up failure, said where the web UI looks, then the exit code. */
++static int fail(const cfg_t *c, const char *reason)
++{
++    char st[512];
++    lg(LOG_ERR, "%s", reason);
++    if (c->status_path) {
++        snprintf(st, sizeof st, "{\"running\":false,\"reason\":\"%s\"}\n", reason);
++        write_status(c->status_path, st);
++    }
++    return 1;
++}
++
++/* ---------------------------------------------------------------- IPU helpers */
++
++/* The decoder reads the output tensors in place; they move when the channel
++ * is re-created. */
++static void bind_heads(yolo_head *h, int nh, const ipu_rt *rt)
++{
++    for (int k = 0; k < nh; k++) h[k].data = rt->out.tensor[k].data[0];
++}
++
++static size_t out_size(const ipu_rt *rt)
++{
++    size_t n = 0;
++    for (unsigned k = 0; k < rt->desc.outCnt; k++) n += rt->desc.outDesc[k].bufSize;
++    return n;
++}
++
++static void out_copy(const ipu_rt *rt, unsigned char *dst)
++{
++    for (unsigned k = 0; k < rt->desc.outCnt; k++) {
++        memcpy(dst, rt->out.tensor[k].data[0], rt->desc.outDesc[k].bufSize);
++        dst += rt->desc.outDesc[k].bufSize;
++    }
++}
++
++static long out_diff(const ipu_rt *rt, const unsigned char *ref)
++{
++    long diff = 0;
++    if (!ref) return -1;
++    for (unsigned k = 0; k < rt->desc.outCnt; k++) {
++        const unsigned char *o = rt->out.tensor[k].data[0];
++        for (unsigned b = 0; b < rt->desc.outDesc[k].bufSize; b++) diff += ref[b] != o[b];
++        ref += rt->desc.outDesc[k].bufSize;
++    }
++    return diff;
++}
++
++/* Invoke on the SCL frame in place: mode 1 hands the IPU plane 0 only (Y and
++ * UV contiguous), mode 2 both planes. */
++static int invoke_zc(ipu_rt *rt, const scl_frame *fr, int mode)
++{
++    MI_IPU_Tensor keep = rt->in.tensor[0];
++    rt->in.tensor[0].data[0] = fr->y;
++    rt->in.tensor[0].phyAddr[0] = fr->phy_y;
++    if (mode == 2) { rt->in.tensor[0].data[1] = fr->uv; rt->in.tensor[0].phyAddr[1] = fr->phy_uv; }
++    int r = ipu_rt_invoke(rt);
++    rt->in.tensor[0] = keep;
++    return r;
++}
++
++/* ---------------------------------------------------------------- main */
++
++static void usage(const char *a0)
++{
++    fprintf(stderr,
++        "usage: %s -f ipu_firmware.bin -m model.img [options]\n"
++        "  -L labels   class names in model order (person,bicycle,car,motorcycle,bus,truck)\n"
++        "  -k labels   report only these (default all)\n"
++        "  -c score    threshold (0.40)       -i iou      NMS IoU (0.45)\n"
++        "  -r fps      max inferences/s (0 = every frame)\n"
++        "  -p port     SCL output port (-1 = highest free, default)\n"
++        "  -D n        SCL port user depth; MI keeps n+1 frames of the model's size\n"
++        "              (default 1 for a cap of 12/s or less, else 2)\n"
++        "  -s path     status JSON (/run/ipud/status.json)  -S path  socket (/run/ipud.sock)\n"
++        "  -I ms       status rewrite interval (1000)\n"
++        "  -q topic    MQTT base topic (broker from IPUD_MQTT_*)\n"
++        "  -H ms       presence hold before OFF (3000)  -M ms  min MQTT detections interval (500)\n"
++        "  -O dir      ONVIF event files: dir/ipud_person, ipud_vehicle, ipud_pet while present\n"
++        "  -x cmd      run 'cmd LABEL ON|OFF' on each presence change (IPUD_SCORE, IPUD_DRAW)\n"
++        "  -Z          zero-copy: feed the SCL buffer to the IPU directly (self-tested first)\n"
++        "  -n N        stop after N inferences      -t  print each inference\n"
++        "  -o file     save one live NV12 frame (after the 10th inference)\n"
++        "  -F          foreground, log to stderr    -v  verbose\n", a0);
++}
++
++int main(int argc, char **argv)
++{
++    static ipu_rt rt;
++    scl_src src;
++    sock_t sk;
++    mqtt_t mq;
++    cfg_t c;
++    int opt;
++
++    memset(&c, 0, sizeof c);
++    c.conf = 0.40f; c.iou = 0.45f; c.port = -1;
++    c.hold_ms = 3000; c.mqtt_min_ms = 500; c.status_ms = 1000;
++    c.status_path = "/run/ipud/status.json"; c.sock_path = "/run/ipud.sock";
++    parse_labels(&c, "person,bicycle,car,motorcycle,bus,truck");
++    const char *keep = NULL;
++
++    while ((opt = getopt(argc, argv, "f:m:L:k:c:i:r:p:D:s:S:I:q:H:M:O:x:Zn:to:Fvh")) != -1) {
++        switch (opt) {
++        case 'f': c.fw = optarg; break;
++        case 'm': c.model = optarg; break;
++        case 'L': parse_labels(&c, optarg); break;
++        case 'k': keep = optarg; break;
++        case 'c': c.conf = strtof(optarg, NULL); break;
++        case 'i': c.iou = strtof(optarg, NULL); break;
++        case 'r': c.max_fps = strtof(optarg, NULL); break;
++        case 'p': c.port = atoi(optarg); break;
++        case 'D': c.depth = atoi(optarg) < 1 ? 1 : atoi(optarg); break;
++        case 's': c.status_path = optarg; break;
++        case 'S': c.sock_path = optarg; break;
++        case 'I': c.status_ms = atoi(optarg); break;
++        case 'q': c.topic = optarg; break;
++        case 'H': c.hold_ms = atoi(optarg); break;
++        case 'M': c.mqtt_min_ms = atoi(optarg); break;
++        case 'O': c.ev_dir = *optarg ? optarg : NULL; break;
++        case 'x': c.hook = *optarg ? optarg : NULL; break;
++        case 'Z': c.zero_copy = 1; break;
++        case 'n': c.max_infer = atoi(optarg); break;
++        case 't': c.print = 1; break;
++        case 'o': c.save_frame = optarg; break;
++        case 'F': g_foreground = 1; break;
++        case 'v': g_verbose = 1; break;
++        default: usage(argv[0]); return 2;
++        }
++    }
++    if (!c.fw || !c.model) { usage(argv[0]); return 2; }
++    /* Each SCL port frame is the model's input size in MMA (576000 B at
++     * 800x480). Depth 1 (two frames) keeps up with a 10/s cap; full rate
++     * needs depth 2 (three): with one frame held through Invoke and one
++     * queued, depth 1 ran 15/s against 24.7/s (an MC-A85, 2026-11-10). */
++    if (!c.depth) c.depth = c.max_fps > 0 && c.max_fps <= 12 ? 1 : 2;
++    if (c.status_path && !*c.status_path) c.status_path = NULL;     /* -s '' : no status file */
++    if (!g_foreground) openlog("ipud", LOG_PID, LOG_DAEMON);
++    if (c.status_path) {
++        char dir[200];
++        snprintf(dir, sizeof dir, "%s", c.status_path);
++        char *sl = strrchr(dir, '/');
++        if (sl) { *sl = 0; mkdir(dir, 0755); }
++    }
++
++    signal(SIGINT, on_signal);
++    signal(SIGTERM, on_signal);
++    signal(SIGPIPE, SIG_IGN);
++    signal(SIGCHLD, SIG_IGN);           /* hook runs reap themselves */
++
++    if (ipu_rt_open(&rt, c.fw, c.model, 0)) {
++        ipu_rt_close(&rt);
++        return fail(&c, "the IPU refused the firmware or the model (a model built for another SGS release?)");
++    }
++    const MI_IPU_TensorDesc *in = &rt.desc.inDesc[0];
++    unsigned in_h = in->shape[1], in_w = in->shape[2];
++    int nh = (int)rt.desc.outCnt;
++    yolo_head heads[3];
++    if (in->format != 1 || nh < 1 || nh > 3) {
++        lg(LOG_ERR, "model: want an NV12 input and 1-3 anchor-based heads (fmt %u, %d outputs)", in->format, nh);
++        ipu_rt_close(&rt);
++        return fail(&c, "the model is not an NV12 YOLO model with 1-3 heads");
++    }
++    for (int k = 0; k < nh; k++) {
++        const MI_IPU_TensorDesc *d = &rt.desc.outDesc[k];
++        yolo_head *h = &heads[k];
++        memset(h, 0, sizeof *h);
++        if (d->dimension != 5) { ipu_rt_close(&rt); return fail(&c, "the model's heads are not anchor-based [1,na,H,W,5+nc]"); }
++        h->data = rt.out.tensor[k].data[0];
++        h->elem = 2;
++        h->na = (int)d->shape[1]; h->h = (int)d->shape[2]; h->w = (int)d->shape[3]; h->nch = (int)d->shape[4];
++        h->inner = (int)(d->bufSize / (unsigned)(h->na * h->h * h->w * h->elem));
++        h->scale = d->scalar; h->zp = d->zeroPnt;
++        h->stride = (int)in_w / h->w;
++        int lvl = h->stride == 8 ? 0 : h->stride == 16 ? 1 : 2;
++        memcpy(h->anchors, yolo_v5_default_anchors[lvl], sizeof h->anchors);
++        if (h->inner < h->nch || h->nch - 5 > MAX_CLASSES) { ipu_rt_close(&rt); return fail(&c, "the model's head geometry is not supported"); }
++    }
++    for (int k = c.nlabels; k < heads[0].nch - 5; k++) snprintf(c.labels[k], sizeof c.labels[0], "c%d", k);
++    if (c.nlabels < heads[0].nch - 5) c.nlabels = heads[0].nch - 5;
++    if (keep) parse_keep(&c, keep);
++    lg(LOG_INFO, "model %s: %ux%u NV12 in, %d heads, %d classes, variable buffer %u B",
++       c.model, in_w, in_h, nh, heads[0].nch - 5, rt.dynbuf);
++    lg(LOG_DEBUG, "input tensor va %p/%p pa 0x%llx/0x%llx", rt.in.tensor[0].data[0], rt.in.tensor[0].data[1],
++       rt.in.tensor[0].phyAddr[0], rt.in.tensor[0].phyAddr[1]);
++
++    if (scl_src_load(&src)) { ipu_rt_close(&rt); return fail(&c, "the MI SCL library could not be loaded"); }
++    sock_init(&sk, c.sock_path);
++    mqtt_init(&mq, c.topic);
++    evfiles_t ev;
++    evfiles_init(&ev, c.ev_dir, (const char (*)[24])c.labels, c.nlabels);
++
++    const char *fatal = NULL;
++    yolo_params yp = { c.conf, c.iou, 0, 0 };
++    yolo_det det[MAX_DET], rep[MAX_DET];
++    double next_due = 0, last_status = 0, last_mqtt = 0, seen[MAX_CLASSES] = { 0 }, retry_at = 0;
++    int present[MAX_CLASSES] = { 0 }, port = -1, timeouts = 0, zc = 0, zc_tested = 0, mq_had = 0, mq_resync = 0;
++    long n_infer = 0, n_frames = 0, n_drop = 0;
++    double t_inv = 0, t_dec = 0, t_win = now_ms();
++    long win_n = 0;
++    float fps = 0, inv_ms = 0, dec_ms = 0;
++    char line[4096], objs[3500];
++
++    while (!g_stop) {
++        double now = now_ms();
++        if (mqtt_service(&mq, now)) mq_resync = 1;
++
++        if (port < 0) {
++            if (now < retry_at) { usleep(200000); continue; }
++            port = scl_src_open(&src, c.port, in_w, in_h, (unsigned)c.depth);
++            if (port < 0) { retry_at = now + 3000; continue; }
++            lg(LOG_INFO, "frames from SCL port %d, %ux%u NV12", port, in_w, in_h);
++            timeouts = 0;
++        }
++
++        scl_frame fr;
++        int r = scl_src_get(&src, &fr, 1000);
++        if (r && g_stop) break;
++        if (r) {
++            if (r < 0 || ++timeouts >= 5) {
++                lg(LOG_WARNING, "SCL port %d stopped delivering (raptor restart?); reopening", port);
++                scl_src_close(&src);
++                port = -1;
++                retry_at = now_ms() + 2000;
++            }
++            continue;
++        }
++        timeouts = 0;
++        n_frames++;
++        /* A running deadline, not "too soon since the last one": with frames
++         * every 40 ms the latter takes every third frame for a 10/s cap
++         * (8.3/s); the deadline alternates two and three and averages 10. */
++        if (c.max_fps > 0) {
++            double period = 1000.0 / c.max_fps;
++            if (now < next_due - 5) {
++                scl_src_put(&src, &fr);
++                n_drop++;
++                continue;
++            }
++            next_due = next_due + period > now - period ? next_due + period : now + period;
++        }
++
++        if (c.save_frame && n_infer == 10) {
++            FILE *f = fopen(c.save_frame, "wb");
++            if (f) {
++                for (unsigned y = 0; y < in_h; y++) fwrite(fr.y + (size_t)y * fr.stride_y, 1, in_w, f);
++                for (unsigned y = 0; y < in_h / 2; y++) fwrite(fr.uv + (size_t)y * fr.stride_uv, 1, in_w, f);
++                fclose(f);
++                lg(LOG_INFO, "saved frame %ld to %s", n_infer, c.save_frame);
++            }
++        }
++
++        /* Zero-copy needs a packed frame. On the first frame run both paths and
++         * keep zero-copy only if the outputs are byte-identical. */
++        int packed = fr.stride_y == in_w && fr.stride_uv == in_w;
++        int contig = packed && fr.uv == fr.y + (size_t)in_w * in_h &&
++                     fr.phy_uv == fr.phy_y + (unsigned long long)in_w * in_h;
++        double t0 = now_ms();
++        if (c.zero_copy && packed && !zc_tested) {
++            /* mode 1: plane 0 only, the frame's Y and UV contiguous (the model's
++             * input tensor is one plane: data[1] is NULL); mode 2: both planes */
++            zc_tested = 1;
++            size_t tot = out_size(&rt);
++            unsigned char *ref = malloc(tot);
++            ipu_rt_load_nv12(&rt, fr.y, in_w, in_h, 0);   /* fr is packed: plain copy */
++            int r0 = ipu_rt_invoke(&rt);
++            if (ref) out_copy(&rt, ref);
++            for (int mode = 1; mode <= 3 && ref && !r0 && !zc; mode++) {
++                if (mode == 1 && !contig) continue;
++                int r2;
++                if (mode == 3) {                      /* control: the copy path again */
++                    ipu_rt_load_nv12(&rt, fr.y, in_w, in_h, 0);
++                    r2 = ipu_rt_invoke(&rt);
++                } else {
++                    r2 = invoke_zc(&rt, &fr, mode);
++                }
++                long diff = out_diff(&rt, ref);
++                lg(LOG_INFO, "zero-copy self-test mode %d (%s): Invoke=%d, %ld of %zu output bytes differ",
++                   mode, mode == 1 ? "plane 0" : mode == 2 ? "two planes" : "copy control", r2, diff, tot);
++                if (!r2 && !diff && mode < 3) zc = mode;
++            }
++            /* MI allocates the input buffer with the channel and holds it until
++             * the channel goes (PutInputTensors keeps it). Zero copy never uses
++             * it: re-create the channel without one, and check the new channel
++             * on this same frame before trusting it. */
++            if (zc) {
++                long diff = -1;
++                int r2 = ipu_rt_rechannel(&rt, 0);
++                if (!r2) {
++                    bind_heads(heads, nh, &rt);
++                    if (!(r2 = invoke_zc(&rt, &fr, zc))) diff = out_diff(&rt, ref);
++                }
++                lg(LOG_INFO, "zero-copy self-test without an input buffer: Invoke=%d, %ld of %zu output bytes differ",
++                   r2, diff, tot);
++                if (!r2 && !diff) {
++                    lg(LOG_INFO, "input buffer dropped (%u B of MMA)", rt.desc.inDesc[0].bufSize);
++                } else if (ipu_rt_rechannel(&rt, 1)) {
++                    fatal = "the IPU channel could not be re-created";
++                } else {
++                    bind_heads(heads, nh, &rt);
++                }
++            }
++            free(ref);
++            if (fatal) { scl_src_put(&src, &fr); break; }
++            lg(LOG_INFO, "input path: %s", zc ? (zc == 1 ? "zero-copy, plane 0" : "zero-copy, two planes") : "copy");
++        }
++        if (zc && !(packed && (zc == 2 || contig))) {
++            /* the port's layout changed under us: back to the copy path for good */
++            zc = 0;
++            lg(LOG_WARNING, "frame not packed (stride %u/%u); input path: copy", fr.stride_y, fr.stride_uv);
++            if (!rt.in_depth) {
++                if (ipu_rt_rechannel(&rt, 1)) {
++                    fatal = "the IPU channel could not be re-created";
++                    scl_src_put(&src, &fr);
++                    break;
++                }
++                bind_heads(heads, nh, &rt);
++            }
++        }
++        if (zc) {
++            r = invoke_zc(&rt, &fr, zc);
++            scl_src_put(&src, &fr);
++        } else {
++            /* the frame rows may be padded: copy row by row via a packed view */
++            if (packed) {
++                ipu_rt_load_nv12(&rt, fr.y, in_w, in_h, 0);
++            } else {
++                unsigned char *dst = rt.in.tensor[0].data[0];
++                for (unsigned y = 0; y < in_h; y++) memcpy(dst + (size_t)y * in_w, fr.y + (size_t)y * fr.stride_y, in_w);
++                dst += (size_t)in_w * in_h;
++                for (unsigned y = 0; y < in_h / 2; y++) memcpy(dst + (size_t)y * in_w, fr.uv + (size_t)y * fr.stride_uv, in_w);
++            }
++            scl_src_put(&src, &fr);
++            r = ipu_rt_invoke(&rt);
++        }
++        double t1 = now_ms();
++        if (r) { lg(LOG_ERR, "Invoke = %d", r); usleep(100000); continue; }
++        int n = yolo_v5_decode(heads, nh, &yp, det, MAX_DET);
++        double t2 = now_ms();
++        n_infer++; win_n++;
++        t_inv += t1 - t0; t_dec += t2 - t1;
++
++        int nr = 0;
++        for (int i = 0; i < n; i++)
++            if (det[i].cls < c.nlabels && (!c.keep || (c.keep >> det[i].cls) & 1)) rep[nr++] = det[i];
++
++        if (t2 - t_win >= 2000) {
++            fps = (float)(win_n * 1000.0 / (t2 - t_win));
++            inv_ms = (float)(t_inv / win_n); dec_ms = (float)(t_dec / win_n);
++            win_n = 0; t_inv = t_dec = 0; t_win = t2;
++        }
++
++        size_t ol = objects_json(objs, sizeof objs, &c, rep, nr, (float)in_w, (float)in_h);
++        int ll = snprintf(line, sizeof line, "{\"n\":%ld,\"pts\":%llu,\"ms\":%.1f,\"objects\":%.*s}\n",
++                          n_infer, fr.pts, t2 - t0, (int)ol, objs);
++        if (ll > 0 && (size_t)ll < sizeof line) sock_send(&sk, line, (size_t)ll);
++        if (c.print) fputs(line, stdout), fflush(stdout);
++
++        /* presence per label, with a hold so a missed frame does not flap */
++        for (int i = 0; i < nr; i++) seen[rep[i].cls] = t2;
++        unsigned pmask = 0;
++        for (int k = 0; k < c.nlabels; k++) {
++            int on = seen[k] > 0 && t2 - seen[k] < c.hold_ms;
++            if (on != present[k]) {
++                present[k] = on;
++                lg(LOG_INFO, "%s %s", c.labels[k], on ? "ON" : "OFF");
++                mqtt_pub(&mq, c.labels[k], on ? "ON" : "OFF", 1);
++                if (c.hook) run_hook(c.hook, c.labels[k], on, rep, nr, k, (float)in_w, (float)in_h);
++            }
++            if (on) pmask |= 1u << k;
++        }
++        evfiles_update(&ev, pmask);
++        /* after a (re)connect: every reported class's state, retained, over
++         * what an earlier run left; and one detections line on the next
++         * empty frame, so a consumer's count is right too */
++        if (mq_resync && mq.up) {
++            for (int k = 0; k < c.nlabels; k++)
++                if (!c.keep || (c.keep >> k) & 1) mqtt_pub(&mq, c.labels[k], present[k] ? "ON" : "OFF", 1);
++            mq_had = 1;
++            mq_resync = 0;
++        }
++        /* while objects are present at most every mqtt_min_ms, and one line
++         * with no objects once they are gone, so a consumer's count drops */
++        if ((nr && t2 - last_mqtt >= c.mqtt_min_ms) || (!nr && mq_had)) {
++            last_mqtt = t2;
++            mq_had = nr > 0;
++            if (ll > 0 && (size_t)ll < sizeof line) { line[ll - 1] = 0; mqtt_pub(&mq, "detections", line, 0); }
++        }
++
++        if (c.status_path && t2 - last_status >= c.status_ms) {
++            last_status = t2;
++            char st[4096];
++            time_t wall = time(NULL);
++            snprintf(st, sizeof st,
++                     "{\"running\":true,\"time\":%ld,\"model\":\"%s\",\"input\":[%u,%u],\"port\":%d,"
++                     "\"zero_copy\":%s,\"fps\":%.1f,\"invoke_ms\":%.1f,\"decode_ms\":%.2f,"
++                     "\"inferences\":%ld,\"frames\":%ld,\"skipped\":%ld,\"mqtt\":%s,\"objects\":%.*s}\n",
++                     (long)wall, c.model, in_w, in_h, port, zc ? "true" : "false", (double)fps,
++                     (double)inv_ms, (double)dec_ms, n_infer, n_frames, n_drop,
++                     mq.up ? "true" : "false", (int)ol, objs);
++            write_status(c.status_path, st);
++            lg(LOG_DEBUG, "fps %.1f invoke %.1f ms decode %.2f ms objects %d", (double)fps, (double)inv_ms, (double)dec_ms, nr);
++        }
++        if (c.max_infer && n_infer >= c.max_infer) break;
++    }
++
++    lg(LOG_INFO, "stopping after %ld inferences", n_infer);
++    if (c.status_path) write_status(c.status_path, "{\"running\":false}\n");
++    evfiles_clear(&ev);
++    for (int k = 0; k < c.nlabels; k++)
++        if (present[k]) {
++            mqtt_pub(&mq, c.labels[k], "OFF", 1);
++            if (c.hook) run_hook(c.hook, c.labels[k], 0, NULL, 0, k, 1, 1);
++        }
++    mqtt_pub(&mq, "status", "offline", 1);
++    if (mq.up) mq.loop(mq.m, 100, 1);
++    if (port >= 0) scl_src_close(&src);
++    if (sk.lfd >= 0) { close(sk.lfd); unlink(c.sock_path); }
++    ipu_rt_close(&rt);
++    return fatal ? fail(&c, fatal) : 0;
++}
+diff --git a/package/thingino-ipud/files/ipud.json b/package/thingino-ipud/files/ipud.json
+new file mode 100644
+index 000000000..11a5189a9
+--- /dev/null
++++ b/package/thingino-ipud/files/ipud.json
+@@ -0,0 +1,24 @@
++{
++  "ipud": {
++    "enabled": false,
++    "source": "builtin",
++    "sd_dir": "/mnt/mmcblk0p1/ipud",
++    "sd_model": "",
++    "firmware": "",
++    "model": "",
++    "labels": "",
++    "report": "person,car",
++    "score": 0.4,
++    "iou": 0.45,
++    "max_fps": 10,
++    "hold_ms": 3000,
++    "mqtt": false,
++    "mqtt_topic": "",
++    "mqtt_interval_ms": 500,
++    "onvif": false,
++    "ha": false,
++    "frigate": false,
++    "frigate_url": "",
++    "frigate_camera": ""
++  }
++}
+diff --git a/package/thingino-ipud/files/ipud.webui.json b/package/thingino-ipud/files/ipud.webui.json
+new file mode 100644
+index 000000000..7e09f5401
+--- /dev/null
++++ b/package/thingino-ipud/files/ipud.webui.json
+@@ -0,0 +1,34 @@
++{
++  "name": "ipud",
++  "label": "IPU object detection",
++  "apiVersion": 1,
++  "nav": [
++    {
++      "section": "ddSettings",
++      "position": "append",
++      "items": [
++        {
++          "label": "Object detection",
++          "href": "/config-ipud.html"
++        }
++      ]
++    }
++  ],
++  "scripts": [],
++  "styles": [],
++  "preview": {
++    "scripts": [
++      "/a/preview-ipud.js"
++    ],
++    "html": "<canvas id=\"ipud-overlay\" class=\"position-absolute\" style=\"display:none;pointer-events:none\"></canvas>"
++  },
++  "featureFlags": {
++    "ipud": true
++  },
++  "pages": [
++    "/config-ipud.html"
++  ],
++  "cgi": [
++    "/x/json-ipud.cgi"
++  ]
++}
+diff --git a/package/thingino-ipud/files/mi_ipu.h b/package/thingino-ipud/files/mi_ipu.h
+new file mode 100644
+index 000000000..575db7018
+--- /dev/null
++++ b/package/thingino-ipud/files/mi_ipu.h
+@@ -0,0 +1,67 @@
++/* mi_ipu.h - reconstructed SigmaStar MI_IPU API for Infinity6C.
++ *
++ * The 11 MI_IPU_* entry points are the exports of libmi_ipu.so. The struct
++ * layout is reconstructed from OpenIPC divinus src/hal/star/i6c_ipu.h (MIT),
++ * which dlopens the same lib and binds the same symbols. Field names follow
++ * divinus; the exact layout is RECONSTRUCTED - verify it against the
++ * GetInOutTensorDesc output on a new drop or SoC.
++ */
++#ifndef MI_IPU_H
++#define MI_IPU_H
++
++typedef int (*MI_IPU_ReadFn)(void *data, int offset, int size, char *ctx);
++
++typedef enum {
++    MI_IPU_FMT_U8 = 0, MI_IPU_FMT_NV12, MI_IPU_FMT_INT8, MI_IPU_FMT_FP32,
++    MI_IPU_FMT_ARGB8888, MI_IPU_FMT_GRAY, MI_IPU_FMT_COMPLEX64
++} MI_IPU_Fmt;                       /* enum order from divinus; values [U] */
++
++typedef struct {
++    unsigned int maxDynBufSize, yuv420Walign, yuv420Halign, rgbWalign, reserved[8];
++} MI_IPU_DevAttr;
++
++typedef struct {
++    unsigned int subnet, usrDepth, bufDepth, maxBatch, reserved[8];
++} MI_IPU_ChnAttr;
++
++typedef struct {
++    unsigned int dimension;
++    unsigned int format;            /* MI_IPU_Fmt */
++    unsigned int shape[10];
++    char         name[256];
++    unsigned int innerMost;
++    float        scalar;            /* quant scale */
++    long long    zeroPnt;           /* quant zero point */
++    int          alignedBufSize;
++    unsigned int bufSize;
++    unsigned int inWalign, inHalign;
++    int          nchwModeOn;
++    unsigned int reserved[4];
++} MI_IPU_TensorDesc;
++
++typedef struct {
++    unsigned int inCnt, outCnt;
++    MI_IPU_TensorDesc inDesc[60], outDesc[60];
++} MI_IPU_TensorDescSet;
++
++typedef struct { void *data[2]; unsigned long long phyAddr[2]; } MI_IPU_Tensor;
++typedef struct { unsigned int count; MI_IPU_Tensor tensor[60]; } MI_IPU_TensorVector;
++
++/* function-pointer types for the exported symbols (resolved via dlsym) */
++typedef int (*fn_MI_IPU_CreateDevice)(MI_IPU_DevAttr *, MI_IPU_ReadFn, char *, unsigned int);
++typedef int (*fn_MI_IPU_DestroyDevice)(void);
++typedef int (*fn_MI_IPU_CreateCHN)(unsigned int *, MI_IPU_ChnAttr *, MI_IPU_ReadFn, char *);
++typedef int (*fn_MI_IPU_DestroyCHN)(unsigned int);
++typedef int (*fn_MI_IPU_GetInOutTensorDesc)(unsigned int, MI_IPU_TensorDescSet *);
++typedef int (*fn_MI_IPU_GetInputTensors)(unsigned int, MI_IPU_TensorVector *);
++typedef int (*fn_MI_IPU_PutInputTensors)(unsigned int, MI_IPU_TensorVector *);
++typedef int (*fn_MI_IPU_GetOutputTensors)(unsigned int, MI_IPU_TensorVector *);
++typedef int (*fn_MI_IPU_PutOutputTensors)(unsigned int, MI_IPU_TensorVector *);
++typedef int (*fn_MI_IPU_Invoke)(unsigned int, MI_IPU_TensorVector *, MI_IPU_TensorVector *);
++
++/* MI_SYS must be initialised before any MI_IPU call (chip id = 0 on i6c);
++ * signature from divinus src/hal/star/i6c_sys.h. */
++typedef int (*fn_MI_SYS_Init)(unsigned short chip);
++typedef int (*fn_MI_SYS_Exit)(unsigned short chip);
++
++#endif /* MI_IPU_H */
+diff --git a/package/thingino-ipud/files/mi_scl_sys.h b/package/thingino-ipud/files/mi_scl_sys.h
+new file mode 100644
+index 000000000..2f9f4ac27
+--- /dev/null
++++ b/package/thingino-ipud/files/mi_scl_sys.h
+@@ -0,0 +1,47 @@
++/* mi_scl_sys.h - the MI_SCL output-port and MI_SYS frame-fetch ABI on Infinity6C
++ * (drop 1230), as the IPU frame feed uses it.
++ *
++ * Port, bind and enum layouts follow raptor-hal's vendored i6c headers
++ * (sigmastar-headers/infinity6c, from OpenIPC divinus, MIT). The frame-fetch
++ * calls were read off the shipped 1230 libmi_sys.so (2026-11-10, objdump -M
++ * force-thumb), because no header carries them for MI 3:
++ *
++ *   MI_SYS_ChnOutputPortGetBuf(port*, bufinfo*, handle*)   no SoC id; ioctl
++ *       0xc2086913, a 520-byte payload: port 0..15, BufInfo 16..503 (488 B,
++ *       memcpy'd out), handle at 504.
++ *   MI_SYS_ChnOutputPortPutBuf(handle)                     ioctl 0x40046914
++ *   MI_SYS_GetFd(port*, int *fd)                           no SoC id
++ *   MI_SYS_SetChnOutputPortDepth(u16 soc, port*, user, buf)
++ *
++ * MI_SYS_BufInfo_t is kept opaque (488 bytes); the frame fields are read at the
++ * offsets in scl_src.c, which were located on hardware (README.md).
++ */
++#ifndef MI_SCL_SYS_H
++#define MI_SCL_SYS_H
++
++#define MI_MOD_SCL          34      /* i6c_sys_mod: ISP 33, SCL 34 */
++#define MI_PIXFMT_NV12      11      /* I6C_PIXFMT_YUV420SP */
++#define MI_COMPR_NONE       0
++#define MI_BUFINFO_SIZE     488
++
++typedef struct { unsigned int module, device, channel, port; } MI_ChnPort;
++
++typedef struct {
++    unsigned short x, y, width, height;   /* crop; all zero = whole input */
++    unsigned short out_w, out_h;
++    char mirror, flip;
++    unsigned int pixfmt, compress;
++} MI_SclPortAttr;                         /* 24 B, as SetOutputPortParam marshals */
++
++typedef struct { unsigned char raw[MI_BUFINFO_SIZE]; } MI_BufInfo;
++
++typedef int (*fn_MI_SCL_SetOutputPortParam)(unsigned int dev, unsigned int chn, unsigned int port, MI_SclPortAttr *);
++typedef int (*fn_MI_SCL_GetOutputPortParam)(unsigned int dev, unsigned int chn, unsigned int port, MI_SclPortAttr *);
++typedef int (*fn_MI_SCL_PortOp)(unsigned int dev, unsigned int chn, unsigned int port);
++typedef int (*fn_MI_SYS_GetBuf)(MI_ChnPort *, MI_BufInfo *, int *handle);
++typedef int (*fn_MI_SYS_PutBuf)(int handle);
++typedef int (*fn_MI_SYS_GetFd)(MI_ChnPort *, int *fd);
++typedef int (*fn_MI_SYS_CloseFd)(int fd);
++typedef int (*fn_MI_SYS_SetDepth)(unsigned short soc, MI_ChnPort *, unsigned int user, unsigned int buf);
++
++#endif
+diff --git a/package/thingino-ipud/files/raptor-hook b/package/thingino-ipud/files/raptor-hook
+new file mode 100755
+index 000000000..952f7a8d8
+--- /dev/null
++++ b/package/thingino-ipud/files/raptor-hook
+@@ -0,0 +1,5 @@
++#!/bin/sh
++# Raptor runs this with "stop" before any of its daemons go down and with
++# "start" once they are back. ipud drains an SCL output port on rvd's channel;
++# stopping it first keeps it off the channel while rvd tears it down.
++exec /etc/init.d/S35ipud "$1"
+diff --git a/package/thingino-ipud/files/scl_src.c b/package/thingino-ipud/files/scl_src.c
+new file mode 100644
+index 000000000..000d9afda
+--- /dev/null
++++ b/package/thingino-ipud/files/scl_src.c
+@@ -0,0 +1,158 @@
++/* scl_src.c - see scl_src.h. */
++#include <errno.h>
++#include <stdio.h>
++#include <string.h>
++#include <dlfcn.h>
++#include <sys/select.h>
++#include "scl_src.h"
++
++/* MI_SYS_BufInfo_t (488 B) field offsets on drop 1230, read from a GetBuf of an
++ * 800x480 NV12 port on N803 (README.md): bufType 0x10 (1 = frame), then the
++ * frame data: pixfmt 0x24, width/height u16 at 0x38/0x3a, VA[3] at 0x3c,
++ * PA[3] (u64) at 0x48, stride[3] at 0x60, bufSize at 0x6c; pts u64 at 0x00. */
++#define BI_PTS      0x00
++#define BI_TYPE     0x10
++#define BI_PIXFMT   0x24
++#define BI_W        0x38
++#define BI_H        0x3a
++#define BI_VA       0x3c
++#define BI_PA       0x48
++#define BI_STRIDE   0x60
++#define BI_BUFSIZE  0x6c
++
++#define LD(h, var, name) do { \
++    *(void **)&s->var = dlsym(h, name); \
++    if (!s->var) { fprintf(stderr, "scl: dlsym %s: %s\n", name, dlerror()); return -1; } \
++} while (0)
++
++int scl_src_load(scl_src *s)
++{
++    memset(s, 0, sizeof *s);
++    s->fd = -1;
++    s->h_sys = dlopen("libmi_sys.so", RTLD_NOW | RTLD_GLOBAL);
++    s->h_scl = dlopen("libmi_scl.so", RTLD_NOW | RTLD_GLOBAL);
++    if (!s->h_sys || !s->h_scl) { fprintf(stderr, "scl: dlopen: %s\n", dlerror()); return -1; }
++    LD(s->h_scl, SetPort, "MI_SCL_SetOutputPortParam");
++    LD(s->h_scl, GetPort, "MI_SCL_GetOutputPortParam");
++    LD(s->h_scl, Enable, "MI_SCL_EnableOutputPort");
++    LD(s->h_scl, Disable, "MI_SCL_DisableOutputPort");
++    LD(s->h_sys, GetBuf, "MI_SYS_ChnOutputPortGetBuf");
++    LD(s->h_sys, PutBuf, "MI_SYS_ChnOutputPortPutBuf");
++    LD(s->h_sys, GetFd, "MI_SYS_GetFd");
++    LD(s->h_sys, CloseFd, "MI_SYS_CloseFd");
++    LD(s->h_sys, SetDepth, "MI_SYS_SetChnOutputPortDepth");
++    return 0;
++}
++
++/* Free: never configured in this raptor run (0x0), or left configured exactly as
++ * ours by an earlier run of this consumer - a disabled port keeps its param
++ * until raptor destroys the SCL device, and raptor never asks for an
++ * uncompressed NV12 port at the model's size. */
++static int port_free(scl_src *s, int p, unsigned int w, unsigned int h)
++{
++    MI_SclPortAttr pa;
++    memset(&pa, 0, sizeof pa);
++    if (s->GetPort(0, 0, (unsigned)p, &pa)) return -1;      /* no SCL channel: raptor down */
++    if (!pa.out_w && !pa.out_h) return 1;
++    return pa.out_w == w && pa.out_h == h && pa.pixfmt == MI_PIXFMT_NV12 &&
++           pa.compress == MI_COMPR_NONE;
++}
++
++int scl_src_open(scl_src *s, int port, unsigned int w, unsigned int h, unsigned int depth)
++{
++    MI_SclPortAttr pa;
++    int r;
++
++    if (port < 0) {
++        for (int p = 3; p >= 0 && port < 0; p--) {
++            int f = port_free(s, p, w, h);
++            if (f < 0) return -1;
++            if (f) port = p;
++        }
++        if (port < 0) { fprintf(stderr, "scl: no free SCL output port (raptor uses 0-3)\n"); return -1; }
++    } else if (port_free(s, port, w, h) != 1) {
++        fprintf(stderr, "scl: port %d is in use or SCL is down\n", port);
++        return -1;
++    }
++    /* ports 2 and 3 take at most 1920 wide (raptor-hal i6c_fs_port_takes_width) */
++    if (port >= 2 && w > 1920) { fprintf(stderr, "scl: port %d is narrow (<= 1920)\n", port); return -1; }
++
++    memset(&pa, 0, sizeof pa);
++    pa.out_w = (unsigned short)w;
++    pa.out_h = (unsigned short)h;
++    pa.pixfmt = MI_PIXFMT_NV12;
++    pa.compress = MI_COMPR_NONE;
++    if ((r = s->SetPort(0, 0, (unsigned)port, &pa))) { fprintf(stderr, "scl: SetOutputPortParam(%d) = %d\n", port, r); return -1; }
++    if ((r = s->Enable(0, 0, (unsigned)port))) { fprintf(stderr, "scl: EnableOutputPort(%d) = %d\n", port, r); return -1; }
++    s->enabled = 1;
++    s->cp.module = MI_MOD_SCL; s->cp.device = 0; s->cp.channel = 0; s->cp.port = (unsigned)port;
++    s->w = w; s->h = h;
++    if ((r = s->SetDepth(0, &s->cp, depth ? depth : 1, (depth ? depth : 1) + 2)))
++        fprintf(stderr, "scl: SetChnOutputPortDepth = %d\n", r);
++    if ((r = s->GetFd(&s->cp, &s->fd)) || s->fd < 0) {
++        fprintf(stderr, "scl: GetFd = %d\n", r);
++        s->fd = -1;
++        scl_src_close(s);
++        return -1;
++    }
++    return port;
++}
++
++int scl_src_get(scl_src *s, scl_frame *f, int timeout_ms)
++{
++    MI_BufInfo bi;
++    fd_set fds;
++    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
++    int r;
++
++    if (s->fd < 0) return -1;
++    FD_ZERO(&fds);
++    FD_SET(s->fd, &fds);
++    r = select(s->fd + 1, &fds, NULL, NULL, &tv);
++    if (r == 0) return 1;
++    if (r < 0) return errno == EINTR ? 1 : -1;     /* a signal (SIGTERM) is not a dead port */
++
++    memset(&bi, 0, sizeof bi);
++    if ((r = s->GetBuf(&s->cp, &bi, &f->handle))) return r == -1 ? -1 : 1;
++
++    unsigned int type, va[2], st[2];
++    unsigned short w, h;
++    memcpy(&type, bi.raw + BI_TYPE, 4);
++    memcpy(&f->pixfmt, bi.raw + BI_PIXFMT, 4);
++    memcpy(&w, bi.raw + BI_W, 2);
++    memcpy(&h, bi.raw + BI_H, 2);
++    memcpy(va, bi.raw + BI_VA, 8);
++    memcpy(&f->phy_y, bi.raw + BI_PA, 8);
++    memcpy(&f->phy_uv, bi.raw + BI_PA + 8, 8);
++    memcpy(st, bi.raw + BI_STRIDE, 8);
++    memcpy(&f->bufsize, bi.raw + BI_BUFSIZE, 4);
++    memcpy(&f->pts, bi.raw + BI_PTS, 8);
++    f->w = w; f->h = h;
++    f->y = (unsigned char *)(unsigned long)va[0];
++    f->uv = (unsigned char *)(unsigned long)va[1];
++    f->stride_y = st[0]; f->stride_uv = st[1];
++
++    if (type != 1 || f->pixfmt != MI_PIXFMT_NV12 || w != s->w || h != s->h || !f->y || !f->uv) {
++        fprintf(stderr, "scl: unexpected buffer: type %u fmt %u %ux%u va %p/%p\n",
++                type, f->pixfmt, w, h, (void *)f->y, (void *)f->uv);
++        s->PutBuf(f->handle);
++        return 1;
++    }
++    return 0;
++}
++
++void scl_src_put(scl_src *s, scl_frame *f)
++{
++    s->PutBuf(f->handle);
++}
++
++void scl_src_close(scl_src *s)
++{
++    if (s->fd >= 0) { s->CloseFd(s->fd); s->fd = -1; }
++    if (s->enabled) {
++        /* depth back to 0 before the port goes, as the vendor recommends */
++        s->SetDepth(0, &s->cp, 0, 3);
++        s->Disable(0, 0, s->cp.port);
++        s->enabled = 0;
++    }
++}
+diff --git a/package/thingino-ipud/files/scl_src.h b/package/thingino-ipud/files/scl_src.h
+new file mode 100644
+index 000000000..4074a03b2
+--- /dev/null
++++ b/package/thingino-ipud/files/scl_src.h
+@@ -0,0 +1,46 @@
++/* scl_src.h - frames for the IPU from a spare SCL output port (option A).
++ *
++ * raptor owns SCL dev 0 / chn 0 and configures ports 0-3 as its streams need;
++ * a second process may configure, enable and drain an unused one (bench-proven
++ * on N803 2026-11-10: README.md). MI_SYS_Init must already have been called
++ * (ipu_rt_open does it).
++ */
++#ifndef SCL_SRC_H
++#define SCL_SRC_H
++
++#include "mi_scl_sys.h"
++
++typedef struct {
++    void *h_sys, *h_scl;
++    fn_MI_SCL_SetOutputPortParam SetPort;
++    fn_MI_SCL_GetOutputPortParam GetPort;
++    fn_MI_SCL_PortOp Enable, Disable;
++    fn_MI_SYS_GetBuf GetBuf;
++    fn_MI_SYS_PutBuf PutBuf;
++    fn_MI_SYS_GetFd GetFd;
++    fn_MI_SYS_CloseFd CloseFd;
++    fn_MI_SYS_SetDepth SetDepth;
++    MI_ChnPort cp;
++    unsigned int w, h;
++    int fd, enabled;
++} scl_src;
++
++typedef struct {
++    int handle;
++    unsigned char *y, *uv;              /* mapped in this process by GetBuf */
++    unsigned long long phy_y, phy_uv;
++    unsigned int stride_y, stride_uv, w, h, pixfmt, bufsize;
++    unsigned long long pts;             /* MI's frame pts */
++} scl_frame;
++
++/* Resolve the MI_SCL / MI_SYS frame symbols (libs already in global scope). */
++int  scl_src_load(scl_src *s);
++/* port < 0: the highest of 0..3 that raptor has not configured. Returns the
++ * port used, or -1 (none free, or MI refused). */
++int  scl_src_open(scl_src *s, int port, unsigned int w, unsigned int h, unsigned int depth);
++/* 0 = frame, 1 = timeout, -1 = error (the port went away: raptor restarted?) */
++int  scl_src_get(scl_src *s, scl_frame *f, int timeout_ms);
++void scl_src_put(scl_src *s, scl_frame *f);
++void scl_src_close(scl_src *s);
++
++#endif
+diff --git a/package/thingino-ipud/files/www/a/config-ipud.js b/package/thingino-ipud/files/www/a/config-ipud.js
+new file mode 100644
+index 000000000..eae7c3b21
+--- /dev/null
++++ b/package/thingino-ipud/files/www/a/config-ipud.js
+@@ -0,0 +1,167 @@
++/**
++ * Settings and status page for thingino-ipud (IPU object detection).
++ * Reads and writes the "ipud" block of /etc/thingino.json through
++ * /x/json-ipud.cgi, which restarts ipud after a save.
++ *
++ * The model comes from one of three sources (ipud.source): built into the
++ * firmware (/usr/share/ipud), a folder on the SD card (a model picked from the
++ * .img files there), or custom paths. The CGI reports what each source has
++ * (available) and what the saved settings resolve to (resolved); enabling is
++ * locked while the chosen source has no model.
++ */
++(function () {
++  "use strict";
++
++  const ENDPOINT = "/x/json-ipud.cgi";
++  const BOOLS = ["enabled", "mqtt", "onvif", "ha", "frigate"];
++  const NUMBERS = ["score", "iou", "max_fps", "hold_ms", "mqtt_interval_ms"];
++  const TEXTS = ["firmware", "model", "labels", "report", "mqtt_topic", "sd_dir",
++    "frigate_url", "frigate_camera"];
++  const el = (k) => document.getElementById("ipud_" + k);
++  let last = null;
++  let statusTimer = null;
++
++  function alert(variant, message, timeout = 5000) {
++    if (window.showAlert) window.showAlert(variant, message, timeout);
++  }
++
++  function setText(id, text) {
++    const n = document.getElementById(id);
++    if (n) n.textContent = text;
++  }
++
++  function showStatus(s) {
++    if (!s || !s.running) {
++      setText("ipud-state", s && s.reason ? `not running (${s.reason})` : "not running");
++      ["ipud-rate", "ipud-source", "ipud-mqtt", "ipud-objects"].forEach((id) => setText(id, "-"));
++      return;
++    }
++    setText("ipud-state", `running, ${s.inferences} inferences`);
++    setText("ipud-rate", `${s.fps} per second, ${s.invoke_ms} ms on the IPU, ${s.decode_ms} ms decode`);
++    setText("ipud-source", `SCL port ${s.port}, ${s.input[0]}x${s.input[1]}${s.zero_copy ? ", zero-copy" : ""}; model ${s.model}`);
++    setText("ipud-mqtt", s.mqtt ? "connected" : "off or not connected");
++    const objs = (s.objects || []).map((o) => `${o.label} ${Math.round(o.score * 100)}%`);
++    setText("ipud-objects", objs.length ? objs.join(", ") : "nothing");
++  }
++
++  // Can the source picked on the page run? [ok, why not]
++  function sourceReady() {
++    const a = (last && last.available) || {};
++    const src = el("source").value;
++    if (src === "builtin")
++      return a.builtin ? [true, ""] : [false, "This firmware has no built-in model"];
++    if (src === "sdcard") {
++      if (el("sd_dir").value.trim() !== (a.sd_dir || "")) return [true, ""]; // checked after the save
++      if (!a.sd_found) return [false, `The SD card folder ${a.sd_dir || ""} is not there`];
++      if (!(a.sd_models || []).length) return [false, `No model (.img) in ${a.sd_dir}`];
++      if (!a.sd_firmware && !a.builtin) return [false, "No IPU firmware on the card or built in"];
++      return [true, ""];
++    }
++    return [true, ""]; // custom paths: checked when ipud starts
++  }
++
++  function refreshSource() {
++    const src = el("source").value;
++    document.getElementById("ipud-src-sdcard").classList.toggle("d-none", src !== "sdcard");
++    document.getElementById("ipud-src-custom").classList.toggle("d-none", src !== "custom");
++    const a = (last && last.available) || {};
++    let note = "";
++    if (src === "builtin") note = a.builtin ? "The model in this firmware." : "This firmware carries no model.";
++    if (src === "sdcard") {
++      const n = (a.sd_models || []).length;
++      note = a.sd_found ? `${n} model${n === 1 ? "" : "s"} on the card; IPU firmware ${a.sd_firmware ? "from the card" : "built in"}.`
++        : "The card folder is not there (is a card in?).";
++    }
++    if (src === "custom") note = "Any path on the camera; an empty firmware path uses the built-in one.";
++    setText("ipud-source-note", note);
++    const [ok, why] = sourceReady();
++    document.getElementById("ipud-files-alert").classList.toggle("d-none", ok);
++    setText("ipud-files-reason", why || "The selected model is not available");
++    // Locked while the chosen source has no model; an enabled switch can still be turned off.
++    el("enabled").disabled = !ok && !el("enabled").checked;
++  }
++
++  function apply(data) {
++    last = data;
++    const c = data.config || {};
++    const r = data.resolved || {};
++    const a = data.available || {};
++    BOOLS.forEach((k) => { if (el(k)) el(k).checked = c[k] === true; });
++    NUMBERS.forEach((k) => { if (el(k) && c[k] !== undefined) el(k).value = c[k]; });
++    TEXTS.forEach((k) => { if (el(k)) el(k).value = c[k] || ""; });
++    el("source").value = r.source || c.source || "builtin";
++    const sel = el("sd_model");
++    sel.innerHTML = "";
++    const models = a.sd_models || [];
++    if (!models.length) sel.add(new Option("(none on the card)", ""));
++    models.forEach((m) => sel.add(new Option(m, m)));
++    sel.value = models.includes(c.sd_model) ? c.sd_model : models[0] || "";
++    setText("ipud-labels-note", r.labels_file
++      ? `Now taken from ${r.model.replace(/\.[^.]*$/, "")}.labels: ${r.labels}`
++      : "A .labels file beside the model (one comma-separated line) takes precedence.");
++    refreshSource();
++    showStatus(data.status);
++  }
++
++  async function load() {
++    const res = await fetch(ENDPOINT, { cache: "no-store" });
++    if (!res.ok) throw new Error(`HTTP ${res.status}`);
++    apply(await res.json());
++  }
++
++  async function pollStatus() {
++    try {
++      const res = await fetch(ENDPOINT + "?a=status", { cache: "no-store" });
++      if (res.ok) showStatus(await res.json());
++    } catch (e) {
++      /* the next poll retries */
++    }
++  }
++
++  async function save() {
++    const ipud = {};
++    BOOLS.forEach((k) => (ipud[k] = el(k).checked));
++    NUMBERS.forEach((k) => {
++      const v = Number(el(k).value);
++      if (!Number.isNaN(v) && el(k).value !== "") ipud[k] = v;
++    });
++    TEXTS.forEach((k) => (ipud[k] = el(k).value.trim()));
++    ipud.source = el("source").value;
++    ipud.sd_model = el("sd_model").value;
++    const [ok, why] = sourceReady();
++    if (ipud.enabled && !ok) {
++      alert("warning", `${why}: detection stays off.`);
++      ipud.enabled = false;
++    }
++    const btn = document.getElementById("ipud-save");
++    btn.disabled = true;
++    try {
++      const res = await fetch(ENDPOINT, {
++        method: "POST",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({ ipud }),
++      });
++      const data = await res.json();
++      if (!res.ok || data.error) throw new Error((data.error && data.error.message) || `HTTP ${res.status}`);
++      apply(data);
++      alert("success", "Saved; object detection restarts with the new settings.", 3000);
++    } catch (err) {
++      alert("danger", `Could not save: ${err.message || err}`);
++    } finally {
++      btn.disabled = false;
++    }
++  }
++
++  el("source").addEventListener("change", refreshSource);
++  el("sd_dir").addEventListener("input", refreshSource);
++  document.getElementById("ipud-save").addEventListener("click", save);
++  document.getElementById("ipud-reload").addEventListener("click", () =>
++    load().then(() => alert("info", "Reloaded.", 2000)).catch((e) => alert("danger", `Reload failed: ${e.message}`)));
++  document.addEventListener("visibilitychange", () => {
++    clearInterval(statusTimer);
++    statusTimer = document.hidden ? null : setInterval(pollStatus, 1000);
++  });
++
++  load().catch((e) => alert("danger", `Could not read the settings: ${e.message}`));
++  statusTimer = setInterval(pollStatus, 1000);
++})();
+diff --git a/package/thingino-ipud/files/www/a/preview-ipud.js b/package/thingino-ipud/files/www/a/preview-ipud.js
+new file mode 100644
+index 000000000..200d4ba30
+--- /dev/null
++++ b/package/thingino-ipud/files/www/a/preview-ipud.js
+@@ -0,0 +1,192 @@
++/**
++ * Preview-page overlay for thingino-ipud: draws the IPU's latest detections over
++ * the live preview while ipud runs.
++ *
++ * ipud's boxes are normalised to the full frame (its SCL port scales the whole
++ * sensor image), which is what the preview shows, so a box maps onto the
++ * picture by the picture's displayed rectangle alone. The picture is the media
++ * element that shares the canvas's wrapper: raptor's WebRTC <video> on the
++ * raptor preview, the snapshot <img id="preview"> on the plain one. A video is
++ * letterboxed inside its box (object-fit: contain), so the canvas covers the
++ * content rectangle, not the element.
++ *
++ * Off until the viewer turns it on with the Detections button (remembered per
++ * browser). While on, ipud pushes its detections: one server-sent event per
++ * inference from /x/json-ipud.cgi?a=stream, which relays ipud's socket, so the
++ * camera runs no request per update. The stream closes while the tab is hidden
++ * and on the router's page-leave, which also removes every listener this script
++ * added, so the page can be swapped in and out.
++ *
++ * Plugin-owned file: registered via ipud.webui.json `preview.scripts`,
++ * injected into the preview page at build time.
++ */
++(function () {
++  "use strict";
++
++  const ENDPOINT = "/x/json-ipud.cgi?a=stream";
++  const POLL_MS = 500;
++  const COLORS = {
++    person: "#ff4d4d", bicycle: "#ffd24d", car: "#4da6ff",
++    motorcycle: "#ff9f40", bus: "#4dffb8", truck: "#b84dff"
++  };
++
++  const canvas = document.getElementById("ipud-overlay");
++  if (!canvas) return;
++
++  let timer = null;
++
++  function media() {
++    const wrap = canvas.parentElement;
++    return (wrap && wrap.querySelector("video, img#preview")) ||
++      document.getElementById("raptor-webrtc-video") || document.getElementById("preview");
++  }
++
++  // The displayed picture inside el, in el's offset coordinates.
++  function contentRect(el) {
++    const w = el.clientWidth;
++    const h = el.clientHeight;
++    const nw = el.videoWidth || el.naturalWidth || w;
++    const nh = el.videoHeight || el.naturalHeight || h;
++    if (!w || !h || !nw || !nh) return null;
++    const s = Math.min(w / nw, h / nh);
++    const dw = nw * s;
++    const dh = nh * s;
++    return { x: el.offsetLeft + (w - dw) / 2, y: el.offsetTop + (h - dh) / 2, w: dw, h: dh };
++  }
++
++  function place() {
++    const el = media();
++    const r = el && contentRect(el);
++    if (!r) return false;
++    canvas.style.left = r.x + "px";
++    canvas.style.top = r.y + "px";
++    canvas.style.width = r.w + "px";
++    canvas.style.height = r.h + "px";
++    const cw = Math.round(r.w);
++    const ch = Math.round(r.h);
++    if (canvas.width !== cw) canvas.width = cw;
++    if (canvas.height !== ch) canvas.height = ch;
++    return true;
++  }
++
++  function draw(status) {
++    if (!status || !status.running || !place()) {
++      canvas.style.display = "none";
++      return;
++    }
++    canvas.style.display = "";
++    const ctx = canvas.getContext("2d");
++    const w = canvas.width;
++    const h = canvas.height;
++    ctx.clearRect(0, 0, w, h);
++    ctx.lineWidth = 2;
++    ctx.font = "12px sans-serif";
++    (status.objects || []).forEach((o) => {
++      const [x0, y0, x1, y1] = o.box;
++      const color = COLORS[o.label] || "#ffd24d";
++      ctx.strokeStyle = color;
++      ctx.strokeRect(x0 * w, y0 * h, (x1 - x0) * w, (y1 - y0) * h);
++      const text = `${o.label} ${Math.round(o.score * 100)}%`;
++      const tw = ctx.measureText(text).width + 6;
++      ctx.fillStyle = color;
++      ctx.fillRect(x0 * w, Math.max(0, y0 * h - 16), tw, 16);
++      ctx.fillStyle = "#000";
++      ctx.fillText(text, x0 * w + 3, Math.max(12, y0 * h - 4));
++    });
++  }
++
++  // While ipud does not run the stream answers {"running":false} and ends;
++  // ask again after this long rather than at EventSource's own retry.
++  const DOWN_RETRY_MS = 30 * POLL_MS;
++  const STORE_KEY = "thingino.ipudOverlay";
++  let source = null;
++
++  function enabled() {
++    try {
++      return localStorage.getItem(STORE_KEY) === "1";
++    } catch (e) {
++      return false;
++    }
++  }
++
++  function setEnabled(on) {
++    try {
++      if (on) localStorage.setItem(STORE_KEY, "1");
++      else localStorage.removeItem(STORE_KEY);
++    } catch (e) {
++      /* no storage: the button still works for this page */
++    }
++  }
++
++  function open() {
++    clearTimeout(timer);
++    timer = null;
++    if (source || !enabled() || document.hidden) return;
++    source = new EventSource(ENDPOINT);
++    source.onmessage = (ev) => {
++      let status = null;
++      try {
++        status = JSON.parse(ev.data);
++      } catch (e) {
++        return;
++      }
++      if (status.running === false) {
++        close();
++        timer = setTimeout(open, DOWN_RETRY_MS);
++        return;
++      }
++      status.running = true;
++      draw(status);
++    };
++    source.onerror = () => draw(null);
++  }
++
++  function close() {
++    if (source) source.close();
++    source = null;
++    draw(null);
++  }
++
++  const button = document.createElement("button");
++  button.type = "button";
++  button.id = "ipud-overlay-toggle";
++  button.className = "btn btn-outline-secondary";
++  button.title = "Show the IPU's detections over the picture";
++  button.innerHTML = '<i class="bi bi-bounding-box"></i> Detections';
++
++  function render() {
++    const on = enabled();
++    button.classList.toggle("active", on);
++    button.setAttribute("aria-pressed", String(on));
++  }
++
++  button.addEventListener("click", () => {
++    setEnabled(!enabled());
++    render();
++    if (enabled()) open();
++    else close();
++  });
++
++  const bar = document.querySelector(".preview-header-actions");
++  if (bar) bar.appendChild(button);
++  else if (canvas.parentElement) canvas.parentElement.insertAdjacentElement("beforebegin", button);
++
++  function onVisibility() {
++    if (document.hidden) close();
++    else open();
++  }
++
++  function leave() {
++    clearTimeout(timer);
++    timer = null;
++    close();
++    document.removeEventListener("visibilitychange", onVisibility);
++    window.removeEventListener("resize", place);
++  }
++
++  document.addEventListener("visibilitychange", onVisibility);
++  document.addEventListener("thingino:page-leave", leave, { once: true });
++  window.addEventListener("resize", place);
++  render();
++  open();
++})();
+diff --git a/package/thingino-ipud/files/www/config-ipud.html b/package/thingino-ipud/files/www/config-ipud.html
+new file mode 100644
+index 000000000..dd4bfcb18
+--- /dev/null
++++ b/package/thingino-ipud/files/www/config-ipud.html
+@@ -0,0 +1,192 @@
++<!DOCTYPE html>
++<html lang="en" data-bs-theme="dark">
++<head>
++  <meta charset="utf-8">
++  <meta name="viewport" content="width=device-width,initial-scale=1">
++  <title>thingino · Object detection</title>
++  <script src="/a/theme-init.js"></script>
++  <link rel="icon" type="image/svg+xml" href="/a/favicon.svg">
++  <link rel="preconnect" href="https://fonts.googleapis.com">
++  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
++  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap">
++  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css"
++    integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
++  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.13.1/font/bootstrap-icons.min.css">
++  <link rel="stylesheet" href="/a/main.css">
++</head>
++
++<body id="page-config-ipud">
++<nav data-app-nav></nav>
++
++<main class="pb-4">
++  <div class="container" style="min-height:80vh">
++    <div data-app-controls></div>
++
++    <section>
++      <div id="ipud-files-alert" class="alert alert-warning d-none" role="alert">
++        <span id="ipud-files-reason">The selected model is not available</span>, so detection cannot be
++        enabled with this source. Pick another source below, or put the model in place.
++      </div>
++
++      <form id="ipud-form" class="needs-validation" novalidate autocomplete="off">
++        <div class="card mb-3">
++          <div class="card-header">
++            <h2 class="card-title">Object detection</h2>
++            <small>Runs a YOLO model on the SoC's neural-network unit (IPU) and reports what it finds.</small>
++            <button type="button" class="btn btn-outline-secondary" id="ipud-reload" title="Reload values from camera">
++              <i class="bi bi-arrow-clockwise"></i> Reload
++            </button>
++          </div>
++          <div class="card-body">
++            <div class="row row-cols-lg-3 g-4">
++              <div class="col">
++                <h4>Detection</h4>
++                <p class="form-switch">
++                  <input type="checkbox" id="ipud_enabled" role="switch" class="form-check-input">
++                  <label for="ipud_enabled" class="form-check-label">Enable object detection</label>
++                </p>
++                <p>
++                  <label for="ipud_score">Score threshold</label>
++                  <input type="number" id="ipud_score" class="form-control" min="0.05" max="0.95" step="0.05">
++                  <small class="text-secondary">Lower finds more, with more false alarms.</small>
++                </p>
++                <p>
++                  <label for="ipud_max_fps">Inferences per second</label>
++                  <input type="number" id="ipud_max_fps" class="form-control" min="0" max="25" step="1">
++                  <small class="text-secondary">0 runs every frame (about 22 a second).</small>
++                </p>
++                <p>
++                  <label for="ipud_report">Report these classes</label>
++                  <input type="text" id="ipud_report" class="form-control" placeholder="person,car">
++                  <small class="text-secondary">Comma-separated; empty reports every class.</small>
++                </p>
++              </div>
++              <div class="col">
++                <h4>Events</h4>
++                <p class="form-switch">
++                  <input type="checkbox" id="ipud_mqtt" role="switch" class="form-check-input">
++                  <label for="ipud_mqtt" class="form-check-label">Publish to MQTT</label>
++                </p>
++                <small class="text-secondary d-block mb-2">Uses the broker set in Services &gt; Send to MQTT.</small>
++                <p>
++                  <label for="ipud_mqtt_topic">Base topic</label>
++                  <input type="text" id="ipud_mqtt_topic" class="form-control" placeholder="thingino/&lt;hostname&gt;/ipud">
++                </p>
++                <p>
++                  <label for="ipud_mqtt_interval_ms">Detections at most every (ms)</label>
++                  <input type="number" id="ipud_mqtt_interval_ms" class="form-control" min="100" max="10000" step="100">
++                </p>
++                <p class="form-switch">
++                  <input type="checkbox" id="ipud_onvif" role="switch" class="form-check-input">
++                  <label for="ipud_onvif" class="form-check-label">ONVIF events</label>
++                </p>
++                <small class="text-secondary d-block mb-2">Person, Vehicle and Pet Detection (MyRuleDetector topics) for the classes reported.</small>
++                <p class="form-switch">
++                  <input type="checkbox" id="ipud_ha" role="switch" class="form-check-input">
++                  <label for="ipud_ha" class="form-check-label">Home Assistant entities</label>
++                </p>
++                <small class="text-secondary d-block mb-2">A sensor per reported class and an Objects sensor with the boxes, on this camera's device; uses the broker of Services &gt; Home Assistant, in place of the MQTT topic above.</small>
++                <p class="form-switch">
++                  <input type="checkbox" id="ipud_frigate" role="switch" class="form-check-input">
++                  <label for="ipud_frigate" class="form-check-label">Frigate events</label>
++                </p>
++                <small class="text-secondary d-block mb-2">A Frigate event per class while it is present, with its boxes on the snapshot.</small>
++                <p>
++                  <label for="ipud_frigate_url">Frigate URL</label>
++                  <input type="text" id="ipud_frigate_url" class="form-control" placeholder="http://frigate-host:5000">
++                  <small class="text-secondary">Frigate's internal port (5000), which needs no login.</small>
++                </p>
++                <p>
++                  <label for="ipud_frigate_camera">Camera name in Frigate</label>
++                  <input type="text" id="ipud_frigate_camera" class="form-control">
++                </p>
++                <p>
++                  <label for="ipud_hold_ms">Presence hold (ms)</label>
++                  <input type="number" id="ipud_hold_ms" class="form-control" min="0" max="60000" step="500">
++                  <small class="text-secondary">How long a class stays ON after its last detection.</small>
++                </p>
++              </div>
++              <div class="col">
++                <h4>Model</h4>
++                <p>
++                  <label for="ipud_source">Load the model from</label>
++                  <select id="ipud_source" class="form-select">
++                    <option value="builtin">Built in (in the firmware)</option>
++                    <option value="sdcard">SD card</option>
++                    <option value="custom">Custom path</option>
++                  </select>
++                  <small class="text-secondary" id="ipud-source-note"></small>
++                </p>
++                <div id="ipud-src-sdcard" class="d-none">
++                  <p>
++                    <label for="ipud_sd_dir">SD card folder</label>
++                    <input type="text" id="ipud_sd_dir" class="form-control" placeholder="/mnt/mmcblk0p1/ipud">
++                  </p>
++                  <p>
++                    <label for="ipud_sd_model">Model on the card</label>
++                    <select id="ipud_sd_model" class="form-select"></select>
++                    <small class="text-secondary">A model's <code>.img</code> file in the folder; its IPU firmware is
++                      the folder's <code>ipu_firmware.bin</code> if there is one, else the built-in one. Save the
++                      folder to list a new one.</small>
++                  </p>
++                </div>
++                <div id="ipud-src-custom" class="d-none">
++                  <p>
++                    <label for="ipud_model">Model file</label>
++                    <input type="text" id="ipud_model" class="form-control">
++                  </p>
++                  <p>
++                    <label for="ipud_firmware">IPU firmware file</label>
++                    <input type="text" id="ipud_firmware" class="form-control" placeholder="built-in">
++                  </p>
++                </div>
++                <p>
++                  <label for="ipud_labels">Class names, in model order</label>
++                  <input type="text" id="ipud_labels" class="form-control">
++                  <small class="text-secondary" id="ipud-labels-note">A <code>.labels</code> file beside the model
++                    (one comma-separated line) takes precedence.</small>
++                </p>
++                <p>
++                  <label for="ipud_iou">NMS overlap (IoU)</label>
++                  <input type="number" id="ipud_iou" class="form-control" min="0.1" max="0.9" step="0.05">
++                </p>
++              </div>
++            </div>
++          </div>
++        </div>
++
++        <div class="card mb-3">
++          <div class="card-header">
++            <h2 class="card-title">Status</h2>
++          </div>
++          <div class="card-body">
++            <dl class="row mb-0" id="ipud-status">
++              <dt class="col-sm-3">State</dt><dd class="col-sm-9" id="ipud-state">-</dd>
++              <dt class="col-sm-3">Rate</dt><dd class="col-sm-9" id="ipud-rate">-</dd>
++              <dt class="col-sm-3">Source</dt><dd class="col-sm-9" id="ipud-source">-</dd>
++              <dt class="col-sm-3">MQTT</dt><dd class="col-sm-9" id="ipud-mqtt">-</dd>
++              <dt class="col-sm-3">Now detected</dt><dd class="col-sm-9" id="ipud-objects">-</dd>
++            </dl>
++          </div>
++        </div>
++
++        <button type="button" id="ipud-save" class="btn btn-primary">
++          <i class="bi bi-floppy me-1"></i> Save changes
++        </button>
++      </form>
++    </section>
++  </div>
++</main>
++
++<footer data-app-footer></footer>
++
++<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js"
++  integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous"></script>
++<script src="/a/main.js"></script>
++<script src="/a/runtime-config.js"></script>
++<script src="/a/control-bar.js"></script>
++<script src="/a/navigation.js"></script>
++<script src="/a/footer.js"></script>
++<script src="/a/config-ipud.js"></script>
++</body>
++</html>
+diff --git a/package/thingino-ipud/files/www/x/json-ipud.cgi b/package/thingino-ipud/files/www/x/json-ipud.cgi
+new file mode 100755
+index 000000000..b4a429e65
+--- /dev/null
++++ b/package/thingino-ipud/files/www/x/json-ipud.cgi
+@@ -0,0 +1,148 @@
++#!/bin/sh
++# shellcheck disable=SC1091,SC3043
++# json-ipud.cgi -- the web UI's IPU detection (thingino-ipud) settings and status.
++#
++#   GET              {"config":{<ipud block over the defaults>},
++#                     "resolved":{"source","firmware","model","labels","labels_file","missing"},
++#                     "available":{"builtin","sd_dir","sd_found","sd_models":[..],"sd_firmware"},
++#                     "files":{"firmware":b,"model":b},"status":{..}}
++#   GET ?a=status    ipud's status file (/run/ipud/status.json) alone, for the
++#                    preview overlay's poll
++#   POST {"ipud":{..}}   merge into /etc/thingino.json, restart ipud, answer as GET
++#
++# The settings live in the "ipud" block of /etc/thingino.json (defaults from
++# /usr/share/thingino-defaults/45-ipud.json); /usr/libexec/ipud-paths resolves
++# the model source the same way S35ipud does.
++
++. /var/www/x/auth.sh
++require_auth
++
++# The preview overlay's stream and the status read first, and lean: no
++# config, paths or subshells. The stream relays ipud's socket, one
++# server-sent event per inference, until the page or ipud goes away; then
++# {"running":false} tells the overlay to stop asking for a while.
++case "$REQUEST_METHOD:$QUERY_STRING" in
++GET:*a=stream* | :*a=stream*)
++	printf 'Status: 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n\r\nretry: 15000\n\n'
++	[ -S /run/ipud.sock ] && /usr/bin/ipucat 2>/dev/null | awk '{ printf "data: %s\n\n", $0; fflush() }'
++	printf 'data: {"running":false}\n\n'
++	exit 0
++	;;
++GET:*a=status* | :*a=status*)
++	printf 'Status: 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n'
++	if [ -s /run/ipud/status.json ]; then cat /run/ipud/status.json; else printf '{"running":false}\n'; fi
++	exit 0
++	;;
++esac
++
++CONFIG_FILE="${THINGINO_CONFIG:-/etc/thingino.json}"
++DEFAULTS_FILE=/usr/share/thingino-defaults/45-ipud.json
++STATUS=/run/ipud/status.json
++REQ_FILE=""
++MERGED=""
++trap 'rm -f ${REQ_FILE:+"$REQ_FILE"} ${MERGED:+"$MERGED" "$MERGED.in"}' EXIT
++
++IPUD_CONFIG="$CONFIG_FILE"
++. /usr/libexec/ipud-paths
++
++send_json() {
++	printf 'Status: %s\r\n' "${2:-200 OK}"
++	printf 'Content-Type: application/json\r\n'
++	printf 'Cache-Control: no-store\r\n'
++	printf 'Connection: close\r\n'
++	printf '\r\n'
++	printf '%s\n' "$1"
++	exit 0
++}
++
++esc() {
++	printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
++}
++
++status_json() {
++	if [ -s "$STATUS" ]; then
++		cat "$STATUS"
++	else
++		printf '{"running":false}'
++	fi
++}
++
++bool_file() {
++	[ -n "$1" ] && [ -f "$1" ] && printf true || printf false
++}
++
++# The ipud block over the package defaults: an overlay that kept an older
++# thingino.json has no block or only some keys, and the page shows every
++# setting. Merged in a /tmp copy; thingino.json is written only by a save.
++merged_config() {
++	local cfg
++	MERGED=$(mktemp /tmp/ipud-cfg.XXXXXX)
++	if [ -f "$DEFAULTS_FILE" ]; then cp "$DEFAULTS_FILE" "$MERGED"; else echo '{}' >"$MERGED"; fi
++	cfg=$(jct "$CONFIG_FILE" get ipud 2>/dev/null)
++	case "$cfg" in
++	"" | null) ;;
++	*)
++		printf '{"ipud":%s}\n' "$cfg" >"$MERGED.in"
++		jct "$MERGED" import "$MERGED.in" >/dev/null 2>&1
++		rm -f "$MERGED.in"
++		;;
++	esac
++	cfg=$(jct "$MERGED" get ipud 2>/dev/null)
++	rm -f "$MERGED"
++	case "$cfg" in "" | null) cfg='{}' ;; esac
++	printf '%s' "$cfg"
++}
++
++sd_models_json() {
++	ipud_sd_models "$1" | {
++		sep=
++		while read -r n; do
++			printf '%s"%s"' "$sep" "$(esc "$n")"
++			sep=,
++		done
++	}
++}
++
++full_json() {
++	local sd builtin
++	ipud_resolve
++	sd=$(ipud_get sd_dir)
++	builtin=false
++	[ -f "$IPUD_BUILTIN/model.img" ] && [ -f "$IPUD_BUILTIN/ipu_firmware.bin" ] && builtin=true
++	printf '{"config":%s,' "$(merged_config)"
++	printf '"resolved":{"source":"%s","firmware":"%s","model":"%s","labels":"%s","labels_file":%s,"missing":"%s"},' \
++		"$(esc "$IPUD_SOURCE")" "$(esc "$IPUD_FW")" "$(esc "$IPUD_MODEL")" "$(esc "$IPUD_LABELS")" \
++		"$([ "$IPUD_LABELS_FILE" = 1 ] && echo true || echo false)" "$(esc "$IPUD_MISSING")"
++	printf '"available":{"builtin":%s,"sd_dir":"%s","sd_found":%s,"sd_models":[%s],"sd_firmware":%s},' \
++		"$builtin" "$(esc "$sd")" "$([ -n "$sd" ] && [ -d "$sd" ] && echo true || echo false)" \
++		"$(sd_models_json "$sd")" "$(bool_file "$sd/ipu_firmware.bin")"
++	printf '"files":{"firmware":%s,"model":%s},"status":%s}' \
++		"$(bool_file "$IPUD_FW")" "$(bool_file "$IPUD_MODEL")" "$(status_json | tr -d '\n')"
++}
++
++case "$REQUEST_METHOD" in
++GET | "")
++	case "$QUERY_STRING" in
++	*a=status*) send_json "$(status_json | tr -d '\n')" ;;
++	*) send_json "$(full_json)" ;;
++	esac
++	;;
++POST)
++	REQ_FILE=$(mktemp /tmp/ipud-req.XXXXXX)
++	if [ -n "$CONTENT_LENGTH" ] && [ "$CONTENT_LENGTH" -gt 0 ]; then
++		dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null >"$REQ_FILE"
++	else
++		cat >"$REQ_FILE"
++	fi
++	grep -q '"ipud"' "$REQ_FILE" ||
++		send_json '{"error":{"code":400,"message":"expected {\"ipud\":{...}}"}}' "400 Bad Request"
++	jct "$CONFIG_FILE" import "$REQ_FILE" >/dev/null 2>&1 ||
++		send_json '{"error":{"code":500,"message":"could not save /etc/thingino.json"}}' "500 Internal Server Error"
++	# restart in the background: stop waits for ipud to leave the IPU
++	/etc/init.d/S35ipud restart >/dev/null 2>&1 &
++	send_json "$(full_json)"
++	;;
++*)
++	send_json '{"error":{"code":405,"message":"Method not allowed"}}' "405 Method Not Allowed"
++	;;
++esac
+diff --git a/package/thingino-ipud/files/yolo.c b/package/thingino-ipud/files/yolo.c
+new file mode 100644
+index 000000000..4ccb7c5ec
+--- /dev/null
++++ b/package/thingino-ipud/files/yolo.c
+@@ -0,0 +1,106 @@
++/* yolo.c - YOLOv5 decode + NMS; see yolo.h. */
++#include <math.h>
++#include <stdlib.h>
++#include <string.h>
++#include "yolo.h"
++
++const float yolo_v5_default_anchors[3][3][2] = {
++    { { 10, 13 }, { 16, 30 }, { 33, 23 } },        /* P3, stride 8 */
++    { { 30, 61 }, { 62, 45 }, { 59, 119 } },       /* P4, stride 16 */
++    { { 116, 90 }, { 156, 198 }, { 373, 326 } },   /* P5, stride 32 */
++};
++
++static inline float sigm(float x) { return 1.0f / (1.0f + expf(-x)); }
++
++static inline long long qat(const yolo_head *hd, long i)
++{
++    return hd->elem == 2 ? (long long)((const short *)hd->data)[i]
++                         : (long long)((const signed char *)hd->data)[i];
++}
++
++static int by_score(const void *a, const void *b)
++{
++    float sa = ((const yolo_det *)a)->score, sb = ((const yolo_det *)b)->score;
++    return (sa < sb) - (sa > sb);
++}
++
++static float iou(const yolo_det *a, const yolo_det *b)
++{
++    float ix = fminf(a->x1, b->x1) - fmaxf(a->x0, b->x0);
++    float iy = fminf(a->y1, b->y1) - fmaxf(a->y0, b->y0);
++    if (ix <= 0 || iy <= 0) return 0;
++    float in = ix * iy;
++    float ua = (a->x1 - a->x0) * (a->y1 - a->y0) + (b->x1 - b->x0) * (b->y1 - b->y0) - in;
++    return ua > 0 ? in / ua : 0;
++}
++
++int yolo_v5_decode(const yolo_head *heads, int nh, const yolo_params *p, yolo_det *out, int max)
++{
++    int cap = p->max_cand > 0 ? p->max_cand : 4096, n = 0;
++    yolo_det *cand;
++
++    if (!heads || nh <= 0 || !p || p->conf <= 0 || p->conf >= 1) return -1;
++    cand = malloc(sizeof *cand * (size_t)cap);
++    if (!cand) return -1;
++
++    /* sig(obj) * sig(cls) >= conf needs sig(obj) >= conf, so a cell whose
++     * objectness logit is below logit(conf) cannot pass: test that in the
++     * quantised domain before any float work. */
++    float lconf = logf(p->conf / (1.0f - p->conf));
++
++    for (int k = 0; k < nh; k++) {
++        const yolo_head *hd = &heads[k];
++        int nc = hd->nch - 5;
++        if (nc < 1 || hd->inner < hd->nch || hd->scale <= 0) { free(cand); return -1; }
++        long long qthr = (long long)ceilf(lconf / hd->scale) + hd->zp;
++
++        for (int a = 0; a < hd->na; a++)
++            for (int gy = 0; gy < hd->h; gy++)
++                for (int gx = 0; gx < hd->w; gx++) {
++                    long base = ((long)(a * hd->h + gy) * hd->w + gx) * hd->inner;
++                    if (qat(hd, base + 4) < qthr) continue;
++
++                    long long qbest = qat(hd, base + 5);
++                    int cbest = 0;
++                    for (int c = 1; c < nc; c++) {
++                        long long q = qat(hd, base + 5 + c);
++                        if (q > qbest) { qbest = q; cbest = c; }
++                    }
++                    float obj = sigm((float)(qat(hd, base + 4) - hd->zp) * hd->scale);
++                    float score = obj * sigm((float)(qbest - hd->zp) * hd->scale);
++                    if (score < p->conf) continue;
++
++                    float tx = sigm((float)(qat(hd, base + 0) - hd->zp) * hd->scale);
++                    float ty = sigm((float)(qat(hd, base + 1) - hd->zp) * hd->scale);
++                    float tw = sigm((float)(qat(hd, base + 2) - hd->zp) * hd->scale);
++                    float th = sigm((float)(qat(hd, base + 3) - hd->zp) * hd->scale);
++                    float cx = (tx * 2.0f - 0.5f + (float)gx) * (float)hd->stride;
++                    float cy = (ty * 2.0f - 0.5f + (float)gy) * (float)hd->stride;
++                    float bw = (tw * 2.0f) * (tw * 2.0f) * hd->anchors[a][0];
++                    float bh = (th * 2.0f) * (th * 2.0f) * hd->anchors[a][1];
++
++                    yolo_det d = { cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2, score, cbest };
++                    if (n < cap) {
++                        cand[n++] = d;
++                    } else {            /* full: replace the weakest */
++                        int lo = 0;
++                        for (int i = 1; i < n; i++) if (cand[i].score < cand[lo].score) lo = i;
++                        if (d.score > cand[lo].score) cand[lo] = d;
++                    }
++                }
++    }
++
++    qsort(cand, (size_t)n, sizeof *cand, by_score);
++    int kept = 0;
++    for (int i = 0; i < n && kept < max; i++) {
++        int drop = 0;
++        for (int j = 0; j < kept; j++)
++            if ((p->agnostic || out[j].cls == cand[i].cls) && iou(&out[j], &cand[i]) > p->iou) {
++                drop = 1;
++                break;
++            }
++        if (!drop) out[kept++] = cand[i];
++    }
++    free(cand);
++    return kept;
++}
+diff --git a/package/thingino-ipud/files/yolo.h b/package/thingino-ipud/files/yolo.h
+new file mode 100644
+index 000000000..94b1b0b10
+--- /dev/null
++++ b/package/thingino-ipud/files/yolo.h
+@@ -0,0 +1,45 @@
++/* yolo.h - YOLOv5 (anchor-based, v6+ head) decode + NMS for SGS IPU outputs.
++ *
++ * Each head is one IPU output tensor [1, na, H, W, 5+nc] of quantised logits
++ * (INT16 on the OEM models): real = (q - zp) * scale. The v6+
++ * decode (SPPF era, which the OEM models are) is
++ *   xy = (2*sig(t) - 0.5 + grid) * stride,  wh = (2*sig(t))^2 * anchor,
++ *   score = sig(obj) * sig(best class).
++ * No MI dependency: builds and tests on the host.
++ */
++#ifndef YOLO_H
++#define YOLO_H
++
++typedef struct {
++    float x0, y0, x1, y1;   /* model-input pixels */
++    float score;
++    int   cls;
++} yolo_det;
++
++typedef struct {
++    const void *data;       /* the head tensor as the IPU returned it */
++    int   elem;             /* bytes per element: 2 (INT16) or 1 (INT8) */
++    int   na, h, w, nch;    /* anchors, grid rows, grid cols, 5 + nc */
++    int   inner;            /* elements from one cell to the next (>= nch) */
++    float scale;            /* dequant scale */
++    long long zp;           /* dequant zero point */
++    int   stride;           /* input pixels per grid cell */
++    float anchors[3][2];    /* anchor w,h in input pixels */
++} yolo_head;
++
++typedef struct {
++    float conf;             /* keep sig(obj)*sig(cls) >= conf */
++    float iou;              /* NMS IoU threshold */
++    int   agnostic;         /* 1: NMS across classes */
++    int   max_cand;         /* candidate cap before NMS (0 = 4096) */
++} yolo_params;
++
++/* The stock YOLOv5 anchors for strides 8, 16, 32 (pixels). */
++extern const float yolo_v5_default_anchors[3][3][2];
++
++/* Decode nh heads, run NMS, write at most max boxes (best first) to out.
++ * Returns the number written, or -1 on bad input. */
++int yolo_v5_decode(const yolo_head *heads, int nh, const yolo_params *p,
++                   yolo_det *out, int max);
++
++#endif
+diff --git a/package/thingino-ipud/thingino-ipud.mk b/package/thingino-ipud/thingino-ipud.mk
+new file mode 100644
+index 000000000..2ae9d915e
+--- /dev/null
++++ b/package/thingino-ipud/thingino-ipud.mk
+@@ -0,0 +1,80 @@
++################################################################################
++#
++# thingino-ipud
++#
++################################################################################
++
++THINGINO_IPUD_VERSION = 0.1
++THINGINO_IPUD_SITE_METHOD = local
++THINGINO_IPUD_SITE = $(THINGINO_IPUD_PKGDIR)/files
++THINGINO_IPUD_LICENSE = MIT
++
++THINGINO_IPUD_DEPENDENCIES = sigmastar-lib thingino-core thingino-jct
++
++# The MI libraries (libmi_ipu, libmi_scl, libmi_sys and their deps) and
++# libmosquitto are dlopened at run time, so nothing links against the drop.
++define THINGINO_IPUD_BUILD_CMDS
++	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -Os -s -Wall -Wextra \
++		-o $(@D)/ipud $(@D)/ipud.c $(@D)/ipu_rt.c $(@D)/scl_src.c \
++		$(@D)/yolo.c -ldl -lm
++	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -Os -s -Wall -Wextra \
++		-o $(@D)/ipucat $(@D)/ipucat.c
++endef
++
++ifeq ($(BR2_PACKAGE_THINGINO_WEBUI),y)
++THINGINO_IPUD_DEPENDENCIES += thingino-webui
++define THINGINO_IPUD_INSTALL_WWW_CMDS
++	$(INSTALL) -d $(TARGET_DIR)/var/www/a
++	$(INSTALL) -d $(TARGET_DIR)/var/www/x
++	$(INSTALL) -d $(TARGET_DIR)/var/www/a/plugins
++	$(INSTALL) -D -m 0644 $(@D)/www/config-ipud.html \
++		$(TARGET_DIR)/var/www/config-ipud.html
++	$(INSTALL) -D -m 0644 $(@D)/www/a/config-ipud.js \
++		$(TARGET_DIR)/var/www/a/config-ipud.js
++	$(INSTALL) -D -m 0644 $(@D)/www/a/preview-ipud.js \
++		$(TARGET_DIR)/var/www/a/preview-ipud.js
++	$(INSTALL) -D -m 0755 $(@D)/www/x/json-ipud.cgi \
++		$(TARGET_DIR)/var/www/x/json-ipud.cgi
++	$(INSTALL) -D -m 0644 $(@D)/ipud.webui.json \
++		$(TARGET_DIR)/var/www/a/plugins/ipud.webui.json
++endef
++endif
++
++# The built-in model: the IPU firmware and the model are vendor files that no
++# license lets us publish, so they are never in the repository (vendor/ is
++# git-ignored). A private build stages them in vendor/ first, with
++# model.labels; whatever is there goes to /usr/share/ipud/. Without them the
++# image has no built-in model, and ipud runs from the SD card or a custom path.
++THINGINO_IPUD_VENDOR_DIR = $(THINGINO_IPUD_PKGDIR)/vendor
++define THINGINO_IPUD_INSTALL_VENDOR_CMDS
++	for f in ipu_firmware.bin model.img model.labels; do \
++		if [ -f $(THINGINO_IPUD_VENDOR_DIR)/$$f ]; then \
++			$(INSTALL) -D -m 0644 $(THINGINO_IPUD_VENDOR_DIR)/$$f \
++				$(TARGET_DIR)/usr/share/ipud/$$f || exit 1; \
++		fi; \
++	done
++endef
++
++# /etc/raptor.d/ipud has raptor stop ipud before its daemons go down and start
++# it once they are back; ipud also reopens its port by itself if raptor
++# restarts under it. Defaults go to the thingino.json merge (thingino-core).
++# /usr/libexec/ipud-paths resolves the model source for S35ipud and the CGI;
++# /usr/libexec/ipud-onvif adds or drops the ONVIF object events (ipud.onvif);
++# /usr/libexec/ipud-ha publishes or clears the Home Assistant entities
++# (ipud.ha) through thingino-ha's library, when that package is in the image.
++define THINGINO_IPUD_INSTALL_TARGET_CMDS
++	$(INSTALL) -D -m 0755 $(@D)/ipud $(TARGET_DIR)/usr/sbin/ipud
++	$(INSTALL) -D -m 0755 $(@D)/ipucat $(TARGET_DIR)/usr/bin/ipucat
++	$(INSTALL) -D -m 0755 $(@D)/S35ipud $(TARGET_DIR)/etc/init.d/S35ipud
++	$(INSTALL) -D -m 0755 $(@D)/raptor-hook $(TARGET_DIR)/etc/raptor.d/ipud
++	$(INSTALL) -D -m 0644 $(@D)/ipud-paths $(TARGET_DIR)/usr/libexec/ipud-paths
++	$(INSTALL) -D -m 0755 $(@D)/ipud-onvif $(TARGET_DIR)/usr/libexec/ipud-onvif
++	$(INSTALL) -D -m 0755 $(@D)/ipud-ha $(TARGET_DIR)/usr/libexec/ipud-ha
++	$(INSTALL) -D -m 0755 $(@D)/ipud-frigate $(TARGET_DIR)/usr/libexec/ipud-frigate
++	$(INSTALL) -D -m 0644 $(@D)/ipud.json \
++		$(TARGET_DIR)/usr/share/thingino-defaults/45-ipud.json
++	$(THINGINO_IPUD_INSTALL_VENDOR_CMDS)
++	$(THINGINO_IPUD_INSTALL_WWW_CMDS)
++endef
++
++$(eval $(generic-package))
+-- 
+2.43.0
+

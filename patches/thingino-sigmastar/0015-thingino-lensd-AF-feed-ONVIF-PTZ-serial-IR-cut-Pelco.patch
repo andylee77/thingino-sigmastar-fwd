@@ -1,21 +1,43 @@
-From 1969dfa06deea4d1769052a1bfd7ac529b671daa Mon Sep 17 00:00:00 2001
+From 5dc93e463bf41f35c3ff15ec3339740bfecd1f43 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 4 Nov 2026 08:19:16 -0500
-Subject: [PATCH 15/21] thingino-lensd: AF feed, ONVIF PTZ, serial IR-cut,
+Date: Wed, 11 Nov 2026 17:09:54 -0500
+Subject: [PATCH 15/22] thingino-lensd: AF feed, ONVIF PTZ, serial IR-cut,
  Pelco-D (lensd -P)
 
+For PTZ cameras built around a serial lens/PTZ board. lensd feeds the AF
+board two focus values a frame from the ISP's AF statistics, with the
+vendor's AF window and filter; lensctl is the ONVIF PTZ backend (continuous
+pan/tilt/zoom, presets, home); the lens head's IR-cut is switched over serial,
+following ric's day/night pins (read from raptor.conf) from ric's state at
+start; and -P speaks plain Pelco-D to heads with no AF feed.
+
+The heads have no pan/tilt position feedback, so RelativeMove is a timed
+move: lensctl rel times each axis from the head's measured speed at each
+Pelco-D level (heads/<head>.conf; the JL12D2's head is measured), one axis
+after the other, and lensd holds "moving" from the first frame to the stop,
+which is what Frigate's autotracking waits on. A head with no calibration
+gets no RelativeMove.
+
+Every SigmaStar board builds it. A choice, BR2_PACKAGE_THINGINO_LENSD_MODE
+(off, af or pelco), is written to /etc/default/lensd, with the head's name
+(BR2_PACKAGE_THINGINO_LENSD_HEAD); in off lensd does not run, and the ONVIF
+PTZ files, the head files and the web UI plugin are not installed.
 ---
- package/thingino-lensd/Config.in            |  21 +
- package/thingino-lensd/files/S33lensd       |  72 +++
- package/thingino-lensd/files/lensctl        | 204 ++++++
- package/thingino-lensd/files/lensd.c        | 676 ++++++++++++++++++++
- package/thingino-lensd/files/onvif-ptz.json |  25 +
- package/thingino-lensd/files/raptor-hook    |   6 +
- package/thingino-lensd/files/stock_af.h     |  53 ++
- package/thingino-lensd/thingino-lensd.mk    |  56 ++
- 8 files changed, 1113 insertions(+)
+ package/thingino-lensd/Config.in              |   85 +
+ package/thingino-lensd/files/S33lensd         |  154 ++
+ package/thingino-lensd/files/heads/hs5x.conf  |   19 +
+ package/thingino-lensd/files/heads/ys183.conf |   78 +
+ package/thingino-lensd/files/lensctl          |  524 +++++
+ package/thingino-lensd/files/lensd.c          | 1755 +++++++++++++++++
+ package/thingino-lensd/files/onvif-ptz.json   |   33 +
+ package/thingino-lensd/files/raptor-hook      |    6 +
+ package/thingino-lensd/files/stock_af.h       |   53 +
+ package/thingino-lensd/thingino-lensd.mk      |   85 +
+ 10 files changed, 2792 insertions(+)
  create mode 100644 package/thingino-lensd/Config.in
  create mode 100755 package/thingino-lensd/files/S33lensd
+ create mode 100644 package/thingino-lensd/files/heads/hs5x.conf
+ create mode 100644 package/thingino-lensd/files/heads/ys183.conf
  create mode 100755 package/thingino-lensd/files/lensctl
  create mode 100644 package/thingino-lensd/files/lensd.c
  create mode 100644 package/thingino-lensd/files/onvif-ptz.json
@@ -25,10 +47,10 @@ Subject: [PATCH 15/21] thingino-lensd: AF feed, ONVIF PTZ, serial IR-cut,
 
 diff --git a/package/thingino-lensd/Config.in b/package/thingino-lensd/Config.in
 new file mode 100644
-index 000000000..418ad5922
+index 000000000..0024897fc
 --- /dev/null
 +++ b/package/thingino-lensd/Config.in
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,85 @@
 +config BR2_PACKAGE_THINGINO_LENSD
 +	bool "thingino-lensd"
 +	depends on BR2_SOC_VENDOR_SIGMASTAR
@@ -37,67 +59,213 @@ index 000000000..418ad5922
 +	depends on !BR2_PACKAGE_THINGINO_MOTORS
 +	select BR2_PACKAGE_SIGMASTAR_LIB
 +	help
-+	  Daemon for SigmaStar PTZ modules whose zoom/focus board runs its
-+	  own focus search (the JL12D2's CAM-YS183, Pelco-D at 57600 on
-+	  the FUART, /dev/ttyS2). The board only focuses if the SoC
-+	  streams it two focus values from the ISP's AF statistics once
-+	  per frame, as the vendor firmware does; lensd applies the
-+	  vendor's AF window and filter config, streams those values, and
-+	  passes zoom, focus, pan, tilt and preset commands to the board.
++	  Daemon for SigmaStar PTZ modules whose zoom/focus board is a
++	  Pelco-D board on the FUART (/dev/ttyS2). Every SigmaStar camera
++	  builds it; the mode below says whether this camera has such a
++	  board and which kind.
++
++	  An autofocus board (the JL12D2's CAM-YS183, 57600 baud) runs its
++	  own focus search, but only if the SoC streams it two focus values
++	  from the ISP's AF statistics once per frame, as the vendor
++	  firmware does; lensd applies the vendor's AF window and filter
++	  config, streams those values with the day/night state that moves
++	  the board's IR-cut filter, and passes zoom, focus, pan, tilt and
++	  preset commands to the board.
 +
 +	  lensctl is its command line and the backend of the ONVIF
 +	  server's PTZ section: continuous pan/tilt/zoom, stop, zoom
 +	  position, and presets the board stores itself. There is no
-+	  pan/tilt position feedback, so absolute and relative moves are
-+	  not offered.
++	  pan/tilt position feedback, so a relative move is a timed one,
++	  offered only for a head with a calibration (below), and an
++	  absolute move is a zoom only, steered by the board's zoom
++	  readout, offered only for a head with a zoom calibration.
++
++if BR2_PACKAGE_THINGINO_LENSD
++
++choice
++	prompt "Lens/PTZ board"
++	default BR2_PACKAGE_THINGINO_LENSD_MODE_OFF
++	help
++	  Written to /etc/default/lensd as LENSD_MODE; S33lensd starts
++	  lensd only when it is not "off". The ONVIF PTZ files and the
++	  web UI's PTZ plugin are installed only when it is not "off".
++
++config BR2_PACKAGE_THINGINO_LENSD_MODE_OFF
++	bool "none (off)"
++	help
++	  No lens/PTZ board. lensd is installed but not started, and
++	  ONVIF and the web UI offer no PTZ.
++
++config BR2_PACKAGE_THINGINO_LENSD_MODE_AF
++	bool "autofocus board (af)"
++	help
++	  An autofocus head fed per-frame AF data, such as the JL12D2's
++	  CAM-YS183. lensd mirrors ric's day/night pins (raptor.conf
++	  [ircut] gpio_ircut, gpio_ircut2) into the AF frame's day/night
++	  byte, which is what moves the head's IR-cut filter.
++
++config BR2_PACKAGE_THINGINO_LENSD_MODE_PELCO
++	bool "Pelco-D only (pelco)"
++	help
++	  A manual-focus Pelco-D head with no SoC-fed autofocus, such as
++	  the N803-HS5X: lensd -P passes commands only.
++
++endchoice
++
++config BR2_PACKAGE_THINGINO_LENSD_MODE
++	string
++	default "af" if BR2_PACKAGE_THINGINO_LENSD_MODE_AF
++	default "pelco" if BR2_PACKAGE_THINGINO_LENSD_MODE_PELCO
++	default "off"
++
++config BR2_PACKAGE_THINGINO_LENSD_HEAD
++	string "Head calibration"
++	depends on !BR2_PACKAGE_THINGINO_LENSD_MODE_OFF
++	help
++	  The head's measured motion: a file of
++	  package/thingino-lensd/files/heads/ without its .conf (ys183
++	  for the JL12D2's head, hs5x for the N803's). Every head file
++	  is installed in /usr/share/lensd/heads/ and this names one as
++	  LENSD_HEAD in /etc/default/lensd.
++
++	  It gives the field of view and the pan and tilt speed at each
++	  Pelco-D speed level, from which lensctl times an ONVIF
++	  RelativeMove (Frigate's autotracking uses the FOV space).
++	  Empty, or a head file without those numbers: RelativeMove is
++	  refused. Its zoom speed (HEAD_ZOOM_UPS) turns on ONVIF
++	  AbsoluteMove of the zoom (Frigate's zooming: absolute).
++
++endif
 diff --git a/package/thingino-lensd/files/S33lensd b/package/thingino-lensd/files/S33lensd
 new file mode 100755
-index 000000000..4476d19b1
+index 000000000..42335536d
 --- /dev/null
 +++ b/package/thingino-lensd/files/S33lensd
-@@ -0,0 +1,72 @@
+@@ -0,0 +1,154 @@
 +#!/bin/sh
-+# S33lensd -- feed the lens board its per-frame AF data and pass it PTZ
-+# commands from /run/lensd.cmd (JL12D2 / CAM-YS183 on /dev/ttyS2). Raptor's
-+# init script also stops it before rvd goes down and starts it once rvd is
-+# back (/etc/raptor.d/lensd).
++# S33lensd -- the lens/PTZ board daemon. /etc/default/lensd, written at build
++# time from BR2_PACKAGE_THINGINO_LENSD_MODE, says which head the camera has:
++#   off    none: lensd is not started
++#   af     an autofocus head lensd feeds per-frame AF data and day/night
++#          (the JL12D2's CAM-YS183 on /dev/ttyS2)
++#   pelco  a manual-focus Pelco-D head (the N803-HS5X): lensd -P
++# and LENSD_HEAD the head's calibration (/usr/share/lensd/heads, see lensctl).
++# lensd gets commands from /run/lensd.cmd. Raptor's init script also stops it
++# before rvd goes down and starts it once rvd is back (/etc/raptor.d/lensd).
 +
 +DAEMON=/usr/sbin/lensd
 +PIDFILE=/run/lensd.pid
 +NAME=lensd
-+LENSD_ARGS=""
-+# per-camera args (e.g. -P for the N803 pelco-only head)
++LENSD_MODE=off
++LENSD_ARGS="" # extra arguments, after the ones the mode implies
 +[ -r /etc/default/lensd ] && . /etc/default/lensd
 +ONVIF_CONFIG=/etc/onvif.json
 +ONVIF_PTZ=/usr/share/lensd/onvif-ptz.json
 +
-+# Point the ONVIF server's ptz section at lensctl. With no position feedback,
-+# absolute and relative moves are refused rather than faked.
++# Point the ONVIF server's ptz section at lensctl. A relative move is a timed
++# one (lensctl rel), so it is offered only when the head's measured speeds are
++# known (LENSD_HEAD; lensctl head), and the FOV space gets the head's
++# wide-end FOV as fov_pan/fov_tilt. There is no pan/tilt position, so an
++# absolute move is a zoom only (lensctl abs: zoom_to, steered by the board's
++# zoom readout), offered only for a head with a zoom calibration (lensctl
++# head zoom).
 +onvif_ptz() {
++	local fov
 +	[ -f "$ONVIF_CONFIG" ] && [ -f "$ONVIF_PTZ" ] || return 0
 +	jct "$ONVIF_CONFIG" import "$ONVIF_PTZ" >/dev/null 2>&1
-+	jct "$ONVIF_CONFIG" del ptz.jump_to_abs >/dev/null 2>&1
-+	jct "$ONVIF_CONFIG" del ptz.jump_to_rel >/dev/null 2>&1
++	if ! /usr/sbin/lensctl head zoom >/dev/null 2>&1; then
++		jct "$ONVIF_CONFIG" del ptz.jump_to_abs >/dev/null 2>&1
++		jct "$ONVIF_CONFIG" del ptz.jump_to_abs_speed >/dev/null 2>&1
++	fi
++	if fov=$(/usr/sbin/lensctl head 2>/dev/null); then
++		# shellcheck disable=SC2086 # two numbers, checked by lensctl
++		printf '{"ptz":{"fov_pan":%s,"fov_tilt":%s}}\n' $fov >/run/lensd-fov.json
++		jct "$ONVIF_CONFIG" import /run/lensd-fov.json >/dev/null 2>&1
++		rm -f /run/lensd-fov.json
++	else
++		jct "$ONVIF_CONFIG" del ptz.jump_to_rel >/dev/null 2>&1
++		jct "$ONVIF_CONFIG" del ptz.jump_to_rel_speed >/dev/null 2>&1
++	fi
++}
++
++# ric pulses gpio_ircut for day and gpio_ircut2 for night. An af head moves
++# its IR-cut filter from the day/night byte of the AF frame, so lensd watches
++# the same two pins (-d, -n). Read from the file, the way raptorctl falls back
++# to it (rss_config.c): '#'/';' comment lines, an inline '#' comment after a
++# blank, names without case, the last duplicate wins.
++RAPTOR_CONF=/etc/raptor.conf
++ric_pin() {
++	v=$(awk -v want="$1" '
++		function trim(s) { sub(/^[ \t\r]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
++		{ line = trim($0) }
++		line == "" || line ~ /^[#;]/ { next }
++		substr(line, 1, 1) == "[" { e = index(line, "]"); sec = tolower(trim(substr(line, 2, e - 2))); next }
++		sec == "ircut" && index(line, "=") {
++			e = index(line, "=")
++			if (tolower(trim(substr(line, 1, e - 1))) != want) next
++			val = trim(substr(line, e + 1))
++			sub(/[ \t]+#.*$/, "", val)
++		}
++		END { print val }' "$RAPTOR_CONF" 2>/dev/null | tr -d '"')
++	case "$v" in
++	"" | *[!0-9]*) return 1 ;;
++	esac
++	echo "$v"
++}
++
++# ric's current state, day or night, if it answers. The pins only pulse on a
++# change, so a lensd started after dark would keep the filter in until the
++# next one. After a raptor restart ric is not up yet, but then its first
++# decision pulses a pin, and lensd is running to see it.
++ric_state() {
++	raptorctl ric status 2>/dev/null | grep -o '"state":"[a-z]*"' | sed 's/.*:"//; s/"//'
++}
++
++# MODE_ARGS: the lensd arguments the mode implies.
++mode_args() {
++	MODE_ARGS=
++	case "$LENSD_MODE" in
++	af)
++		d=$(ric_pin gpio_ircut) && MODE_ARGS="-d $d"
++		n=$(ric_pin gpio_ircut2) && MODE_ARGS="$MODE_ARGS -n $n"
++		s=$(ric_state)
++		case "$s" in
++		day | night) MODE_ARGS="$MODE_ARGS -m $s" ;;
++		esac
++		;;
++	pelco)
++		MODE_ARGS="-P"
++		;;
++	esac
 +}
 +
 +start() {
++	case "$LENSD_MODE" in
++	af | pelco) ;;
++	off) return 0 ;;
++	*)
++		echo "$NAME: unknown LENSD_MODE '$LENSD_MODE' in /etc/default/lensd" >&2
++		return 1
++		;;
++	esac
 +	[ -x "$DAEMON" ] || return 0
 +	onvif_ptz
 +	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
 +		echo "$NAME already running"
 +		return 0
 +	fi
-+	echo "Starting $NAME..."
-+	start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $LENSD_ARGS
++	mode_args
++	echo "Starting $NAME ($LENSD_MODE $MODE_ARGS)..."
++	start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- $MODE_ARGS $LENSD_ARGS
 +}
 +
 +# Waits for the exit: the raptor hook needs lensd gone before rvd stops.
 +stop() {
-+	echo "Stopping $NAME..."
 +	pid=$(cat "$PIDFILE" 2>/dev/null)
 +	[ -n "$pid" ] || pid=$(pidof lensd)
 +	rm -f "$PIDFILE"
 +	[ -n "$pid" ] || return 0
++	echo "Stopping $NAME..."
 +	kill $pid 2>/dev/null
 +	i=0
 +	while [ $i -lt 30 ] && kill -0 $pid 2>/dev/null; do
@@ -128,12 +296,121 @@ index 000000000..4476d19b1
 +esac
 +
 +exit 0
+diff --git a/package/thingino-lensd/files/heads/hs5x.conf b/package/thingino-lensd/files/heads/hs5x.conf
+new file mode 100644
+index 000000000..a2ed516d0
+--- /dev/null
++++ b/package/thingino-lensd/files/heads/hs5x.conf
+@@ -0,0 +1,19 @@
++# The N803-HS5X Pelco-D head (mode pelco; STM32 board, 5x zoom). Read by
++# lensctl; the keys are described in its header.
++#
++# Not measured yet (FOV and speeds), so ONVIF RelativeMove stays off. The
++# STM32's status stream carries the zoom and focus encoder positions, not pan
++# or tilt, so a move is timed, as on the JL12D2.
++HEAD_FOV=""
++HEAD_PAN_DPS=""
++HEAD_PAN_DEAD_MS=""
++HEAD_PAN_RAMP_MS=""
++HEAD_TILT_DPS=""
++HEAD_TILT_DEAD_MS=""
++HEAD_TILT_RAMP_MS=""
++HEAD_SETTLE_MS=0
++HEAD_PRESET_MS=0
++HEAD_ZOOM_FOV=""
++# No zoom to a position (ONVIF AbsoluteMove stays off): lensd -P does not read
++# this board's zoom encoder yet.
++HEAD_ZOOM_UPS=""
+diff --git a/package/thingino-lensd/files/heads/ys183.conf b/package/thingino-lensd/files/heads/ys183.conf
+new file mode 100644
+index 000000000..6edc8e353
+--- /dev/null
++++ b/package/thingino-lensd/files/heads/ys183.conf
+@@ -0,0 +1,78 @@
++# The JL12D2's CAM-YS183 autofocus/zoom head (mode af). Read by lensctl; the
++# keys are described in its header.
++#
++# Measured 2026-11-06 on a bench unit at the wide end, from the camera's own
++# image: timed moves out and back at each level, the image shift between
++# snapshots, and a full pan turn of identical steps for true degrees.
++#
++# FOV: degrees linear in the frame (as the ONVIF FOV space is), the pan from
++# the full turn; the tilt from the 4:3 frame, which the i6c backend scales
++# whole (no crop). An older estimate on stock with a level gave 44.5 across.
++HEAD_FOV="48.1 36.1"
++# Top speed (deg/s), dead time and ramp (ms) at Pelco-D speed levels 1-10;
++# fit rms 0.01-0.13 deg over 4-5 moves a level, up to ~18 deg (pan) and
++# ~14 deg (tilt); level 10, the one Frigate uses, also at 400-600 ms, inside
++# the ramp (rms 0.12). A level-10 pan ramps for ~0.6 s. Tilt runs on past its
++# stop (dead < 0). Levels 1-4 were measured past their ramp only, so their
++# dead time and ramp are pinned down only as a sum. The bench scene was near
++# (a few metres); a second unit with a far scene agreed within ~4 % on pan at
++# every level and ~5 % on tilt at levels 1-9.
++HEAD_PAN_DPS="1.30 1.65 2.53 4.18 5.75 8.17 12.58 17.08 20.37 24.76"
++HEAD_PAN_DEAD_MS="-300 -300 -300 -300 0 10 30 50 70 120"
++HEAD_PAN_RAMP_MS="800 880 800 800 300 400 540 620 640 620"
++HEAD_TILT_DPS="1.58 1.98 2.93 4.57 5.92 7.80 10.89 13.36 14.86 16.77"
++HEAD_TILT_DEAD_MS="-300 -300 -300 -300 -280 -220 -210 -180 -160 -140"
++HEAD_TILT_RAMP_MS="300 360 460 560 640 680 920 1020 1060 1140"
++# lensd's stop already holds "moving" ~0.26 s (five stop frames); the board
++# raises no flag of its own past that. 100 ms more covered the tilt's run-on,
++# but Frigate sees each frame ~0.5 s after capture and ends its move window
++# (camera-motion estimate, motion background reset) at the first IDLE. On
++# a JL12D2 (2026-11-08, recording matched to Frigate's frames) the picture
++# was still moving after the window in 14 of 23 moves at 100 ms (median end
++# +0.39 s), and in 2 of 22 at 650 ms, by one frame each (median -0.10 s).
++# Frigate's movement_weights intercept goes with this value: 1.38 at 650 ms
++# (moves ran +0.32 s over its prediction at 1.1), 1.1 at 100 ms.
++HEAD_SETTLE_MS=650
++# A recall turns all axes at once (a JL12D2, 2026-11-08, timed on the
++# video, from the ONVIF call less ~0.35 s of call and stream): ~0.4 s to
++# start, then the pan at ~24 deg/s (1500 ms away at level 10: 1.9 s; 4500:
++# 5.15 s; 7500, ~185 deg: 8.15 s), the tilt at ~18 (1500 ms: 1.9 s), the zoom
++# about as HEAD_ZOOM_UPS has it (30459: 1.9 s; 65535: 5.4 s); pan + zoom or
++# pan + tilt in the time of the slower. lensd holds base + the slowest axis's
++# way back + margin when it knows the way (what it sent since the last recall
++# of that preset), HEAD_PRESET_MS (the longest, 180 deg) when it does not.
++# Checked against the video for 12 returns: the hold ended 0.7-0.8 s after the
++# head stopped (the call and the polling included), once 0.1 s before it (out
++# and back: no way back by the sums, but the board still moved ~0.9 s): so at
++# least 1200 ms once anything has been sent since the last recall. Margin and
++# floor then carry the same +550 ms as HEAD_SETTLE_MS for Frigate's frame lag:
++# 850 and 1750 (JL12D2, 2026-11-08). HEAD_PRESET_MS, the unknown-way case, is
++# the 180 deg recall and is left as measured.
++HEAD_PRESET_MS=8800
++HEAD_RECALL="400 23.5 17 850 1750"
++# The FOV against the zoom position, on the far-scene unit: the same small
++# pan at each zoom, against the wide end (good to ~13 %, the wide end's own
++# spread); ~10.6x narrower at 62071.
++HEAD_ZOOM_FOV="0:48.1 6683:46.8 14279:37.6 19851:31.2 31071:20.1 39071:14.6 45771:10.1 62071:4.5"
++# Zoom to a position (lensctl zoom_to, ONVIF AbsoluteMove): timed zooms, each
++# read back. Measured on a JL12D2 (2026-11-07), timed zooms of 100 ms to
++# 3 s both ways. The board moves the zoom in 50 ms ticks: a zoom command of
++# 130 + 50k ms (the middle of the lengths that do it) moves ~52 units and k
++# ticks, the same both ways (150 ms and less: just the ~52); now and then a
++# tick more (it took a later stop frame), or nothing (ignored). The speed is
++# 20.2 units/ms to ~44000 and falls toward tele, to ~4.5 at the end; the
++# points are 6-tick steps in and out, averaged.
++# TOL 300 is 0.005 of ONVIF's 0-1 zoom; half a tick (~565 units at 20.2/ms)
++# is as near as the board gets. Frigate reads the zoom to 0.01.
++# MAX: a full tele-to-wide move takes ~7.5 s; Frigate warns of a MOVING
++# that lasts 10 s.
++HEAD_ZOOM_UPS="0:20200 44000:20000 46500:16000 49000:13000 52300:9000 55000:7800 57400:7200 59400:5700 61000:5300 63000:5600 64800:4500"
++HEAD_ZOOM_DEAD_MS=130
++HEAD_ZOOM_TICK_MS=50
++HEAD_ZOOM_TOL=300
++HEAD_ZOOM_MAX_MS=9500
++# A relative zoom in (Frigate's zooming: relative) narrows the view at most
++# 1.5x a move: Frigate asks for most of the range as soon as its area test
++# passes, and one such move lost a walker (2026-11-07). From the wide end
++# that is 48 to 32 deg (~19000 units), then 32 to 21 (~30400) and so on.
++HEAD_ZOOM_STEP=1.5
 diff --git a/package/thingino-lensd/files/lensctl b/package/thingino-lensd/files/lensctl
 new file mode 100755
-index 000000000..054a653ef
+index 000000000..4e07d6056
 --- /dev/null
 +++ b/package/thingino-lensd/files/lensctl
-@@ -0,0 +1,204 @@
+@@ -0,0 +1,524 @@
 +#!/bin/sh
 +# lensctl -- drive lensd (the JL12D2's Pelco-D lens/PTZ board) from the shell.
 +# It is also the backend the ONVIF server's ptz section runs
@@ -145,6 +422,23 @@ index 000000000..054a653ef
 +#   lensctl pan <x> | tilt <y> | pantilt <x> <y>
 +#                        ONVIF continuous moves: the sign picks the direction,
 +#                        the size the speed (stock's floor(10|v|) + 1)
++#   lensctl rel <pan_deg> <tilt_deg> [zoom] [speed 0-1]
++#                        ONVIF RelativeMove: a timed move from the head's
++#                        measured speeds (see below); a zoom term (units,
++#                        the translation times 65535) zooms by that much
++#                        after the pan and tilt legs, through zoom_to
++#   lensctl zoom_to <0-65535>
++#                        zoom to a position: lensd steers the zoom by the
++#                        board's zoom readout until it stands within
++#                        HEAD_ZOOM_TOL of it (below); returns once lensd has
++#                        taken it, and `moving` says 1 until it is there
++#   lensctl abs <pan> <tilt> <zoom> [pt_speed] [zoom_speed]
++#                        ONVIF AbsoluteMove: zoom_to the zoom; pan and tilt
++#                        have no position and are ignored (see below)
++#   lensctl head         the head's wide-end FOV "<h> <v>" in degrees, or exit 2
++#                        when it has no complete calibration
++#   lensctl head zoom    the head's zoom_to tuning as lensd's arguments, or
++#                        exit 2 when it has none (no absolute zoom)
 +#   lensctl position     0,0,<zoom 0-65535> (pan and tilt have no feedback)
 +#   lensctl moving       1 or 0
 +#   lensctl status       lensd's status file
@@ -161,14 +455,69 @@ index 000000000..054a653ef
 +# board preset does nothing, so `home` refuses (exit 2) until home_set has
 +# stored one; $HOME_SET records which board preset holds it, and a marker
 +# for any other preset (an older lensctl used the ignored 33) does not count.
++#
++# The head has no pan/tilt position feedback, so a relative move is a timed
++# one. LENSD_HEAD in /etc/default/lensd names the head's calibration file,
++# /usr/share/lensd/heads/<head>.conf, which sets:
++#   HEAD_FOV        "<h> <v>": the field of view at the wide end, degrees
++#   HEAD_PAN_DPS    pan top speed, degrees per second, at speed levels 1-10
++#   HEAD_PAN_DEAD_MS  ten times (ms) from the frame to the first motion; < 0
++#                   when the head runs on past the stop. Default all 0.
++#   HEAD_PAN_RAMP_MS  ten times (ms) to reach the top speed at an even
++#                   acceleration. Default all 0.
++#   HEAD_TILT_DPS, HEAD_TILT_DEAD_MS, HEAD_TILT_RAMP_MS  the same for tilt
++#   HEAD_SETTLE_MS  "moving" this long after a relative move's stop
++#   HEAD_PRESET_MS  "moving" this long after a preset call (the board sends
++#                   no moving flag for one): the longest recall measured
++#   HEAD_RECALL     "<base_ms> <pan_dps> <tilt_dps> <margin_ms> [min_ms]": how the
++#                   board recalls (all axes at once, at these speeds; the
++#                   zoom by HEAD_ZOOM_UPS). With it lensd holds a recall only
++#                   for the way back from where it sent the head, when it
++#                   knows that (never under min_ms); HEAD_PRESET_MS otherwise.
++#   HEAD_ZOOM_FOV   "<zoom>:<h> ...", the horizontal FOV at zoom positions
++#                   (0-65535, rising); a relative move is scaled by it.
++#                   Empty: the wide-end FOV at every zoom.
++# A move of d degrees at top speed v, dead time L and ramp R then takes
++# L + R/2 + d/v, or L + the square root of 2dR/v when it ends inside the ramp;
++# never under 40 ms. Without the FOV and both speed lists, rel refuses and
++# S33lensd leaves ONVIF RelativeMove off.
++#
++# zoom_to needs a board that reports its zoom position (the position query)
++# and the head file's zoom keys:
++#   HEAD_ZOOM_UPS     the zoom's speed in position units per second, one
++#                     number or "<pos>:<ups> ..." (pos rising) for a speed
++#                     that changes along the range. Without it zoom_to refuses
++#                     and S33lensd leaves ONVIF AbsoluteMove off.
++#   HEAD_ZOOM_DEAD_MS how much longer a zoom command runs than the zoom moves
++#   HEAD_ZOOM_TICK_MS the board moves the zoom in ticks this long: a target
++#                     within half a tick (at the speed there) is done
++#   HEAD_ZOOM_TOL     done within this many units of the target
++#   HEAD_ZOOM_MAX_MS  give up (stop) after this long
++#   HEAD_ZOOM_STEP    a relative zoom in (a RelativeMove's zoom term) narrows
++#                     the view (HEAD_ZOOM_FOV) at most this many times, e.g.
++#                     1.5; empty: as far as asked
++# Whole numbers; lensd has defaults for the last four. Each move is a timed
++# zoom from these, then a reading (~0.6 s: the board answers the position
++# query that late), then the next move if it is not there yet.
++# HEAD_SETTLE_MS holds "moving" past the end, as for rel.
++#
++# ONVIF AbsoluteMove (abs): the server passes pan and tilt in machine units
++# and the zoom as 0-65535, and fills an axis the request leaves out with 0.
++# Frigate's zoom-only request arrives as "0 0 <zoom>". With no pan/tilt
++# position, pan and tilt are ignored; a request with a pan or tilt but zoom 0
++# is taken for a pan/tilt-only one, which leaves the zoom alone, and does
++# nothing (exit 2).
 +
 +FIFO=/run/lensd.cmd
 +STATUS=/run/lensd.status
 +NAMES=/etc/lensd/presets
 +HOME_SET=/etc/lensd/home
++HEADS=/usr/share/lensd/heads
 +SLOTS=31
 +HOME_PRESET=32
 +SPEED=5
++LENSD_HEAD=
++[ -r /etc/default/lensd ] && . /etc/default/lensd
 +
 +send() {
 +	if ! pidof lensd >/dev/null; then
@@ -209,6 +558,139 @@ index 000000000..054a653ef
 +	l=$((${i:-0} * 10 + f + 1))
 +	[ $l -gt 10 ] && l=10
 +	echo $l
++}
++
++# The head's calibration; 0 when it has the FOV and ten positive speeds per
++# axis, and any dead-time or ramp list has ten whole numbers.
++head_load() {
++	HEAD_FOV='' HEAD_PAN_DPS='' HEAD_TILT_DPS='' HEAD_ZOOM_FOV=''
++	HEAD_PAN_DEAD_MS='' HEAD_PAN_RAMP_MS='' HEAD_TILT_DEAD_MS='' HEAD_TILT_RAMP_MS=''
++	HEAD_SETTLE_MS=0 HEAD_PRESET_MS=0 HEAD_RECALL=''
++	HEAD_ZOOM_UPS='' HEAD_ZOOM_TOL='' HEAD_ZOOM_DEAD_MS='' HEAD_ZOOM_TICK_MS='' HEAD_ZOOM_MAX_MS='' HEAD_ZOOM_STEP=''
++	[ -n "$LENSD_HEAD" ] && [ -r "$HEADS/$LENSD_HEAD.conf" ] || return 1
++	. "$HEADS/$LENSD_HEAD.conf"
++	awk -v f="$HEAD_FOV" -v p="$HEAD_PAN_DPS" -v t="$HEAD_TILT_DPS" \
++		-v pd="$HEAD_PAN_DEAD_MS" -v pr="$HEAD_PAN_RAMP_MS" -v td="$HEAD_TILT_DEAD_MS" -v tr="$HEAD_TILT_RAMP_MS" '
++		function ok(s, n,   a, i) {
++			if (split(s, a, " ") != n) return 0
++			for (i = 1; i <= n; i++) if (a[i] !~ /^[0-9]+(\.[0-9]+)?$/ || a[i] + 0 <= 0) return 0
++			return 1
++		}
++		function ms(s, neg,   a, i, n) {
++			if (s == "") return 1
++			if (split(s, a, " ") != 10) return 0
++			for (i = 1; i <= 10; i++) if (a[i] !~ (neg ? /^-?[0-9]+$/ : /^[0-9]+$/)) return 0
++			return 1
++		}
++		BEGIN { exit !(ok(f, 2) && ok(p, 10) && ok(t, 10) && ms(pd, 1) && ms(pr, 0) && ms(td, 1) && ms(tr, 0)) }'
++}
++
++# A whole number of ms, or 0.
++ms_or_0() {
++	case "$1" in
++	'' | *[!0-9]*) echo 0 ;;
++	*) echo "$1" ;;
++	esac
++}
++
++# " key=value" for lensd when the value is a whole number; nothing otherwise
++# (lensd's default).
++kv() {
++	case "$2" in
++	'' | *[!0-9]*) ;;
++	*) printf ' %s=%s' "$1" "$2" ;;
++	esac
++}
++
++# The head's zoom_to tuning as lensd's arguments (the speed table with commas
++# for spaces); 1 when the head file has no zoom speed (HEAD_ZOOM_UPS).
++zoom_args() {
++	head_load
++	case "$HEAD_ZOOM_UPS" in
++	*[1-9]*) ;;
++	*) return 1 ;;
++	esac
++	case "$HEAD_ZOOM_UPS" in
++	*[!0-9:\ ]*) return 1 ;;
++	esac
++	# shellcheck disable=SC2086 # split on blanks, joined with commas
++	printf '%s' "ups=$(echo $HEAD_ZOOM_UPS | tr ' ' ,)$(kv dead "$HEAD_ZOOM_DEAD_MS")$(kv tick "$HEAD_ZOOM_TICK_MS")$(kv tol "$HEAD_ZOOM_TOL")$(kv max "$HEAD_ZOOM_MAX_MS")$(kv settle "$HEAD_SETTLE_MS")"
++	# the cap on a relative zoom in: the FOV table and the step
++	case "$HEAD_ZOOM_STEP" in
++	'' | *[!0-9.]* | *.*.*) ;;
++	*)
++		case "$HEAD_ZOOM_FOV" in
++		*[1-9]* ) case "$HEAD_ZOOM_FOV" in *[!0-9:.\ ]*) ;; *)
++			# shellcheck disable=SC2086
++			printf ' fov=%s zstep=%s' "$(echo $HEAD_ZOOM_FOV | tr ' ' ,)" "$HEAD_ZOOM_STEP" ;; esac ;;
++		esac
++		;;
++	esac
++	echo
++}
++
++# zoom_to <position>: a position as the ONVIF server prints it (%f), rounded;
++# 0-65535.
++zoom_to() {
++	local za z id
++	if ! za=$(zoom_args); then
++		echo "lensctl: no zoom calibration (HEAD_ZOOM_UPS, LENSD_HEAD=\"$LENSD_HEAD\"), no zoom to a position" >&2
++		exit 2
++	fi
++	if ! z=$(awk -v z="$1" 'BEGIN {
++		if (z !~ /^-?[0-9]+(\.[0-9]*)?$/ || z + 0 < -0.5) exit 1
++		z = int(z + 0.5); if (z > 65535) exit 1
++		print z }'); then
++		echo "lensctl: zoom_to: a position 0-65535 expected, not '$1'" >&2
++		exit 1
++	fi
++	id="z$$"
++	# shellcheck disable=SC2086 # key=value words
++	send zoom_to "$z" $za id="$id"
++	ack_wait "$id"
++}
++
++# Wait (up to 0.5 s) until lensd has taken the command sent with id=$1. The
++# ONVIF server answers once lensctl returns, and Frigate's next GetStatus
++# must already see MOVING, not the idle state from before the command.
++ack_wait() {
++	local i=0
++	while [ $i -lt 25 ] && [ "$(status_get move_id)" != "$1" ]; do
++		usleep 20000
++		i=$((i + 1))
++	done
++}
++
++# The recall model as lensd's keys (speed lists with commas for spaces);
++# nothing when the head file lacks HEAD_RECALL or the lists it needs.
++recall_args() {
++	# shellcheck disable=SC2086 # split on blanks
++	set -- $HEAD_RECALL
++	[ $# -eq 4 ] || [ $# -eq 5 ] || return 0
++	case "$1$4${5:-0}" in '' | *[!0-9]*) return 0 ;; esac
++	case "$2$3" in *[!0-9.]*) return 0 ;; esac
++	case "$HEAD_ZOOM_UPS" in '' | *[!0-9:\ ]*) return 0 ;; esac
++	# shellcheck disable=SC2086
++	printf ' rbase=%s rpan=%s rtilt=%s rmargin=%s pdps=%s tdps=%s ups=%s' "$1" "$2" "$3" "$4" \
++		"$(echo $HEAD_PAN_DPS | tr ' ' ,)" "$(echo $HEAD_TILT_DPS | tr ' ' ,)" "$(echo $HEAD_ZOOM_UPS | tr ' ' ,)"
++	[ -n "${5:-}" ] && printf ' rmin=%s' "$5"
++	return 0
++}
++
++# Call board preset $1; with HEAD_PRESET_MS, lensd holds "moving" that long,
++# or, with HEAD_RECALL, for the way back when it knows it.
++goto() {
++	local hold id ra=''
++	head_load && ra=$(recall_args)
++	hold=$(ms_or_0 "$HEAD_PRESET_MS")
++	if [ "$hold" -gt 0 ]; then
++		id="g$$"
++		# shellcheck disable=SC2086 # key=value words
++		send preset_goto "$1" ms="$hold" id="$id" $ra
++		ack_wait "$id"
++	else
++		send preset_goto "$1"
++	fi
 +}
 +
 +slot() {
@@ -266,6 +748,121 @@ index 000000000..054a653ef
 +	*) send stop ;;
 +	esac
 +	;;
++rel)
++	# The ONVIF server's units are degrees here (onvif-ptz.json maps them
++	# 1:1; a FOV translation x arrives as x * fov_pan / 2). Its speed is 0-1,
++	# default 1 (the profile's DefaultPTZSpeed), and picks the level as for a
++	# continuous move. The zoom term (Frigate's zooming: relative) is the
++	# zoom's translation (-1..1) times 65535: lensd zooms by it once the legs
++	# are done (the FOV the legs are timed by is the zoom's before it), from
++	# the zoom it reads then, clamped to 0-65535.
++	if ! head_load; then
++		echo "lensctl: no head calibration (LENSD_HEAD=\"$LENSD_HEAD\"), no relative moves" >&2
++		exit 2
++	fi
++	zr='' za=''
++	if [ "$(sign "${4:-0}")" != 0 ]; then
++		if za=$(zoom_args); then
++			# whole units, signed (lensd's zoom_to +N / -N)
++			zr=$(awk -v d="$4" 'BEGIN {
++				if (d !~ /^-?[0-9]+(\.[0-9]*)?$/) exit 1
++				r = d < 0 ? -int(-d + 0.5) : int(d + 0.5)
++				if (r > 65535) r = 65535; if (r < -65535) r = -65535
++				if (r) printf "%s%d\n", (r > 0 ? "+" : ""), r }') || zr=''
++		else
++			echo "lensctl: rel: no zoom calibration, the zoom term is ignored" >&2
++		fi
++	fi
++	z=$(status_get zoom)
++	# shellcheck disable=SC2046 # three numbers
++	set -- $(awk -v dx="${2:-0}" -v dy="${3:-0}" -v sp="${5:-1}" -v zoom="${z:--1}" \
++		-v fov="$HEAD_FOV" -v zfov="$HEAD_ZOOM_FOV" -v pan="$HEAD_PAN_DPS" -v tilt="$HEAD_TILT_DPS" \
++		-v pdead="$HEAD_PAN_DEAD_MS" -v pramp="$HEAD_PAN_RAMP_MS" \
++		-v tdead="$HEAD_TILT_DEAD_MS" -v tramp="$HEAD_TILT_RAMP_MS" '
++		function abs(v) { return v < 0 ? -v : v }
++		# busybox awk has no sqrt (no libm): Newton steps
++		function root(x,   r, i) {
++			if (x <= 0) return 0
++			r = x > 1 ? x : 1
++			for (i = 0; i < 60; i++) r = (r + x / r) / 2
++			return r
++		}
++		# ms to turn deg at top speed v (deg/s), dead time L and ramp R (ms)
++		function t(deg, v, L, R,   d, m) {
++			d = abs(deg)
++			if (d < 0.005) return 0
++			if (R > 0 && d < v * R / 2000) m = L + 1000 * root(2 * d * R / 1000 / v)
++			else m = L + R / 2 + 1000 * d / v
++			return m < 40 ? 40 : int(m + 0.5)
++		}
++		# FOV at this zoom over FOV at the wide end, from the "<zoom>:<h>" points
++		function zscale(   n, a, i, z0, h0, z1, h1, w) {
++			n = split(zfov, a, " ")
++			split(fov, w, " ")
++			if (n < 1 || zoom < 0) return 1
++			split(a[1], p, ":"); z0 = p[1]; h0 = p[2]
++			if (zoom <= z0) return h0 / w[1]
++			for (i = 2; i <= n; i++) {
++				split(a[i], p, ":"); z1 = p[1]; h1 = p[2]
++				if (zoom <= z1) return (h0 + (h1 - h0) * (zoom - z0) / (z1 - z0)) / w[1]
++				z0 = z1; h0 = h1
++			}
++			return h0 / w[1]
++		}
++		BEGIN {
++			split(pan, P, " "); split(tilt, T, " ")
++			split(pdead, PL, " "); split(pramp, PR, " "); split(tdead, TL, " "); split(tramp, TR, " ")
++			s = abs(sp + 0); if (s > 1) s = 1
++			l = int(10 * s) + 1; if (l > 10) l = 10
++			k = zscale(); dx *= k; dy *= k
++			pm = t(dx, P[l], PL[l] + 0, PR[l] + 0)
++			tm = t(dy, T[l], TL[l] + 0, TR[l] + 0)
++			printf "%d %d %d\n", dx < 0 ? -pm : pm, dy < 0 ? -tm : tm, l
++		}')
++	case "$1 $2 $3" in
++	*[!0-9\ -]* | '  ')
++		echo "lensctl: rel: no move times from '$*'" >&2
++		exit 1
++		;;
++	esac
++	if [ "$1" = 0 ] && [ "$2" = 0 ]; then
++		[ -n "$zr" ] || exit 0
++		id="z$$"	# a zoom only
++		# shellcheck disable=SC2086 # key=value words
++		send zoom_to "$zr" $za id="$id"
++		ack_wait "$id"
++		exit 0
++	fi
++	id="r$$"
++	# shellcheck disable=SC2086 # key=value words
++	send rel "$1" "$2" "$3" "$3" settle="$(ms_or_0 "$HEAD_SETTLE_MS")" id="$id" ${zr:+zoom=$zr $za}
++	ack_wait "$id"
++	;;
++zoom_to)
++	zoom_to "$2"
++	;;
++abs)
++	# ONVIF AbsoluteMove: see the header. sign() reads "-0.000000" as 0.
++	if [ "$(sign "$2")$(sign "$3")" != 00 ] && [ "$(sign "$4")" = 0 ]; then
++		echo "lensctl: abs: no pan/tilt position; a pan/tilt-only move does nothing" >&2
++		exit 2
++	fi
++	zoom_to "$4"
++	;;
++head)
++	if [ "$2" = zoom ]; then
++		if ! zoom_args; then
++			echo "lensctl: no zoom calibration (HEAD_ZOOM_UPS, LENSD_HEAD=\"$LENSD_HEAD\")" >&2
++			exit 2
++		fi
++		exit 0
++	fi
++	if ! head_load; then
++		echo "lensctl: no head calibration (LENSD_HEAD=\"$LENSD_HEAD\")" >&2
++		exit 2
++	fi
++	echo "$HEAD_FOV"
++	;;
 +position)
 +	z=$(status_get zoom)
 +	[ "${z:--1}" -ge 0 ] 2>/dev/null || z=0
@@ -298,7 +895,7 @@ index 000000000..054a653ef
 +	;;
 +preset_goto)
 +	slot "$2"
-+	send preset_goto $(($2 + 1))
++	goto $(($2 + 1))
 +	;;
 +preset_clear)
 +	slot "$2"
@@ -326,7 +923,7 @@ index 000000000..054a653ef
 +		echo "lensctl: no home position stored yet (lensctl home_set)" >&2
 +		exit 2
 +	fi
-+	send preset_goto $HOME_PRESET
++	goto $HOME_PRESET
 +	;;
 +home_set)
 +	send preset_set $HOME_PRESET
@@ -340,10 +937,10 @@ index 000000000..054a653ef
 +esac
 diff --git a/package/thingino-lensd/files/lensd.c b/package/thingino-lensd/files/lensd.c
 new file mode 100644
-index 000000000..84ce6db25
+index 000000000..96fe01ff4
 --- /dev/null
 +++ b/package/thingino-lensd/files/lensd.c
-@@ -0,0 +1,676 @@
+@@ -0,0 +1,1755 @@
 +/*
 + * lensd -- feed the JL12D2 lens board (CAM-YS183 MCU on /dev/ttyS2) the way
 + * the stock firmware does, so its autofocus works, and pass zoom/focus/PTZ
@@ -371,17 +968,51 @@ index 000000000..84ce6db25
 + *   zoom_in | zoom_out | focus_near | focus_far [ms=N]
 + *   left | right | up | down | up_left | up_right | down_left | down_right
 + *       [speed 1-10, default 5, stock's scale] [ms=N]
-+ *   stop | query | preset_set N | preset_goto N | preset_clear N
++ *   rel <pan_ms> <tilt_ms> <pan_speed> <tilt_speed> [settle=N] [gap=N] [id=X] [zoom=+-N zoom_to keys]
++ *   zoom_to <0-65535 | +N | -N> [tol=N] [dead=N] [tick=N] [ups=TABLE] [max=N] [settle=N]
++ *           [fov=TABLE zstep=X] [id=X]
++ *   stop | query | preset_set N | preset_goto N [ms=N] [id=X] | preset_clear N
 + *   trace [secs] | raw <hex bytes...>
 + *
 + * A move runs until "stop", for ms=N if given (repeating the same move
 + * restarts that clock without resending it), and never past MAX_MOVE_MS.
++ * "rel" is a timed move of each axis, + right / up and - left / down, which is
++ * what lensctl makes of an ONVIF RelativeMove: the pan leg, a stop, then the
++ * tilt leg, and "moving" holds from the first frame to the last stop plus
++ * settle ms; with zoom=+-N (an ONVIF RelativeMove's zoom term) a relative
++ * zoom_to follows the last leg, and "moving" holds through it (not when the
++ * lens is known to stand at that end already). preset_goto ms=N holds
++ * "moving" for N ms and stops nothing at the end: the board moves to a preset
++ * with no moving flag of its own. With the recall model keys (rbase= rpan=
++ * rtilt= rmargin= pdps= tdps= ups=, from the head file) the hold is what the
++ * way back takes, when lensd knows the way: the travel since the last finished
++ * recall of that preset (the recall section). A recall of the preset the last
++ * finished recall reached, with nothing sent since that could move the head,
++ * is over at once. id=X comes back as move_id once the command is taken, so a
++ * caller can wait for it.
++ * zoom_to steers the zoom to a position by the board's zoom readout (the
++ * position query), which is what lensctl makes of an ONVIF AbsoluteMove zoom:
++ * timed zooms, each followed by one reading (the zoom_to section). "moving"
++ * holds from the command until the zoom stands within tol of the target,
++ * plus settle ms; after max ms it gives up. The board refocuses by itself
++ * once the zoom stops, from the AF frames.
 + * State goes to the status file (default /run/lensd.status), key=value:
 + * moving (0/1), motion (the running move or "none"), zoom (0 wide .. 65535
 + * tele, from the position query; -1 until the first reply), zoom_step (the
-+ * board's own 1-30 zoom number; -1 until it first zooms).
++ * board's own 1-30 zoom number; -1 until it first zooms), level (the running
++ * move's pan/tilt speed level, 0 for none), move_id.
 + *
 + *   lensd [-p /dev/ttyS2] [-f /run/lensd.cmd] [-s /run/lensd.status] [-r 25] [-v] [-P]
++ *         [-d day_gpio -n night_gpio] [-m day|night]
++ *
++ * -d/-n: the two GPIOs ric pulses on a day/night change (raptor.conf [ircut]
++ * gpio_ircut and gpio_ircut2; S33lensd passes them). On the JL12D2 they reach
++ * no IR-cut coil (its D5 header is unpopulated), but they are a clean day/night
++ * signal: lensd reads them and mirrors the mode into DN, which is what moves the
++ * head's filter. Without them DN changes only with the "day" / "night" commands.
++ * The pins only pulse on a change, so -m gives the mode to start in (S33lensd
++ * asks ric): without it a lensd started after dark keeps the filter in, and
++ * the night picture goes dark, until the next change.
 + *
 + * -P (pelco-only): for a manual-focus Pelco-D head like the N803-HS5X, where
 + * the board takes Pelco-D zoom/focus/PTZ commands but has no SoC-fed autofocus.
@@ -447,19 +1078,19 @@ index 000000000..84ce6db25
 +	       (uint64_t)p[3] << 24 | (uint64_t)p[4] << 32;
 +}
 +
-+/* ric still pulses gpio 80 (day) / 11 (night) on each day/night transition
-+ * (vestigial for the filter -- D5 is unwired -- but a clean day/night signal).
-+ * Read them: 80 high = day, 11 high = night, both low (rest) = hold last mode.
-+ * We mirror that into AF-frame byte 11, which is what actually moves the
-+ * physical IR-cut filter in the head. */
-+#define IRCUT_DAY_GPIO   80
-+#define IRCUT_NIGHT_GPIO 11
++/* ric pulses its day pin (-d) or its night pin (-n) on each day/night change.
++ * Read them: day pin high = day, night pin high = night, both low (rest) =
++ * hold the last mode. The mode goes out as AF-frame byte 11, which is what
++ * moves the physical IR-cut filter in the head. -1: no pin, nothing read. */
++static int day_gpio = -1, night_gpio = -1;
 +
 +static int gpio_val(int pin)
 +{
 +	char path[64], c = 0;
 +	int fd, r;
 +
++	if (pin < 0)
++		return -1;
 +	snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/value", pin);
 +	fd = open(path, O_RDONLY);
 +	if (fd < 0)
@@ -516,8 +1147,73 @@ index 000000000..84ce6db25
 +
 +/* Pelco-D, address 1, with the speed bytes the stock comm_server sends: the
 + * board ignores a zoom whose speed bytes are both zero. */
++static int stops_left;		/* trailing stop frames of a move that has ended */
++static long fifo_after;		/* no command is read before then (stop_soon) */
++static long next_stop_at;
++static int at_preset;		/* the preset a finished recall left the head at, while no frame
++				 * that could move it has gone out since (0: none) */
++static long chain_t0;		/* a rel's command time, for the zoom_to it chains to */
++
++/* Stock's pan/tilt speed 1..10 (web UI and /cgi-bin/ptz_ctrl, default 5) as
++ * the data byte it sends; ONVIF velocity v uses level floor(10v)+1, capped at
++ * 10. Zoom has no speed: stock sends 01 01 at every level. */
++static const unsigned char pt_speed[10] = {0x01, 0x04, 0x0a, 0x12, 0x19, 0x20, 0x27, 0x2e, 0x35, 0x3f};
++
++/* Where the head is against the preset it last reached. The board reports no
++ * pan or tilt, but every frame that turns the head goes out through pelco(),
++ * so lensd adds up how long each axis ran at each level since a recall
++ * finished (a segment is one frame's run, ended by the next frame). A recall
++ * of that preset then holds "moving" for the way back, not the longest one. */
++static struct {
++	int known;		/* the travel since that recall is known */
++	int ref;		/* the preset */
++	long pan[10], tilt[10];	/* ms run at each level: + right / up */
++	int zoomed;		/* a zoom frame has gone out since */
++	long ref_zoom;		/* the zoom read there, standing (-1: not yet) */
++} trv;
++static struct {
++	unsigned char c2, d1, d2;	/* the frame turning the head (c2 0: none) */
++	long t0;
++} seg;
++
++/* The level a speed byte stands for (turbo 0x40 and up: 10). */
++static int level_of(unsigned char b)
++{
++	int i;
++
++	for (i = 9; i > 0 && b < pt_speed[i]; i--)
++		;
++	return i;	/* 0-9 */
++}
++
++static void seg_close(void)
++{
++	long el = now_ms() - seg.t0;
++
++	if (seg.c2 & 0x06)
++		trv.pan[level_of(seg.d1)] += seg.c2 & 0x02 ? el : -el;
++	if (seg.c2 & 0x18)
++		trv.tilt[level_of(seg.d2)] += seg.c2 & 0x08 ? el : -el;
++	seg.c2 = 0;
++}
++
 +static void pelco(int fd, unsigned char c1, unsigned char c2, unsigned char d1, unsigned char d2)
 +{
++	if (c1 || c2 || d1 || d2) {
++		stops_left = 0;	/* a new move: the last one's trailing stops are moot */
++		at_preset = 0;	/* and the head may leave the preset (any frame but a stop) */
++	}
++	seg_close();
++	/* not an extended command (those have bit 0 of c2): a zoom frame, a
++	 * pan/tilt frame */
++	if (!c1 && !(c2 & 0x01) && (c2 & 0x60))
++		trv.zoomed = 1;
++	if (!c1 && !(c2 & 0x01) && (c2 & 0x1e)) {
++		seg.c2 = c2;
++		seg.d1 = d1;
++		seg.d2 = d2;
++		seg.t0 = now_ms();
++	}
 +	unsigned char f[7] = {0xff, 0x01, c1, c2, d1, d2, 0};
 +
 +	f[6] = (unsigned char)(f[1] + f[2] + f[3] + f[4] + f[5]);
@@ -526,20 +1222,56 @@ index 000000000..84ce6db25
 +
 +/* Answered with 51 01 04 78 90 06 <pan16> <tilt16> <zoom16> <ck>; pan and
 + * tilt are always 0 (the head has no position feedback), zoom runs 0x0000 at
-+ * the wide end to 0xffff at the tele end. */
++ * the wide end to 0xffff at the tele end (a JL12D2 reached ~59500).
++ * The answer comes ~0.56-0.6 s after the query and gives the zoom as it is
++ * ~0.46 s after it; a query before then restarts that wait, so of queries
++ * closer together only the last is answered (a JL12D2, 2026-11-07). */
 +static const unsigned char query9a[7] = {0xff, 0x01, 0x9a, 0x00, 0x00, 0x00, 0x9b};
++static long query_sent;		/* when the last position query went out */
 +
-+static void stop_all(int fd)
++static void send_query(int fd)
++{
++	put(fd, query9a, sizeof(query9a));
++	query_sent = now_ms();
++}
++
++/* stock: a position query, then the stop five times, ~50 ms apart; n of
++ * them, blocking (between a rel's legs, and before a move that replaces a
++ * running one: a head can keep an axis a later frame leaves out) */
++static void stop_n(int fd, int n)
 +{
 +	int i;
 +
-+	/* stock: a position query, then the stop five times, ~50 ms apart */
-+	put(fd, query9a, sizeof(query9a));
++	send_query(fd);
 +	usleep(10000);
-+	for (i = 0; i < 5; i++) {
++	for (i = 0; i < n; i++) {
 +		pelco(fd, 0x00, 0x00, 0x00, 0x00);
 +		usleep(50000);
 +	}
++}
++
++static void stop_all(int fd)
++{
++	stop_n(fd, 5);
++}
++
++/* The end of a move: the same frames, but only the first blocks; the head
++ * stops at it, and the other four go out from motion_tick 50 ms apart. The
++ * move counts as over at the first, which tells the caller ~0.25 s sooner
++ * (JL12D2, 2026-11-07: a pan-only RelativeMove's IDLE came 0.26 s after its leg
++ * plus settle), so Frigate's next decision overlaps the rest. The board keeps
++ * the old spacing, though: no command is read from the FIFO until the five
++ * frames and the settle are over (main loop), as when stop_all() blocked. A
++ * move sooner after the stop moved the head elsewhere on the bench: ~0.1 s
++ * after the first frame, back-to-back diagonals drifted 11 deg in five
++ * cycles; ~0.2 s after, 1.4-5.9 deg. */
++static void stop_soon(int fd)
++{
++	send_query(fd);
++	usleep(10000);
++	pelco(fd, 0x00, 0x00, 0x00, 0x00);
++	stops_left = 4;
++	next_stop_at = now_ms() + 50;
 +}
 +
 +/* ---- state ------------------------------------------------------------- */
@@ -547,15 +1279,71 @@ index 000000000..84ce6db25
 +/* The longest a move runs without a stop: what a lost Stop (a closed browser
 + * tab, a dropped ONVIF request) can cost. Pan has no end stop to save it. */
 +#define MAX_MOVE_MS 30000
++/* The longest the board's own moving flag may hold "moving" once no move of
++ * ours runs: a lost "stopped" frame must not leave MoveStatus at MOVING. */
++#define BOARD_FLAG_MS 5000
++#define MAX_SETTLE_MS 5000
++/* The zoom position runs 0 (wide) to 65535 (tele). */
++#define ZOOM_MAX 65535
++#define ZT_TOL 300		/* units: zoom_to's default (the zoom_to section) */
 +
 +static const char *status_path = "/run/lensd.status";
++static const char zoom_to_verb[] = "zoom_to";
++#define ZT_PTS 12		/* points in zoom_to's speed table */
++enum { ZT_READ, ZT_PULSE };	/* zoom_to's phases */
 +static struct {
 +	const char *verb;	/* the running move, NULL when idle */
 +	unsigned char d1, d2;
-+	long until;
++	int level;		/* pan/tilt speed level, 0 for none */
++	int zooms;		/* it moves the zoom (zoom_in/out, a recall, a zoom_to pulse) */
++	long until;		/* the stop; for a hold, just the end */
++	int hold;		/* a preset recall: "moving" until then, no stop */
++	long leg2_ms;		/* rel: the tilt leg still to run after the pan leg (0: none) */
++	unsigned char lc2, ld2;	/* rel: its direction and speed byte */
++	int l2level;
++	long settle;		/* rel, zoom_to: "moving" this long after the stop */
++	char then[512];		/* rel: the zoom_to to run after its legs ("": none) */
++	long t0;		/* when its command came (a rel's, through its zoom) */
++	int gap;		/* rel: stop frames between its legs (gap=N, default 5) */
++	int preset;		/* a recall (hold): its preset */
++	struct zt {		/* zoom_to; see the zoom_to section */
++		int rel;	/* zoom_to +-N: the target is the zoom plus delta, */
++		long delta;	/* read when it starts */
++		long target, tol;
++		long dead;	/* ms of a zoom command that moves nothing */
++		long tick;	/* the board moves the zoom in ticks of this many ms */
++		int npts;	/* the speed table: units per ms from pos[i] on */
++		long pos[ZT_PTS];
++		double ups[ZT_PTS];
++		double scale;	/* how far the moves went against the table's prediction */
++		int nfov;	/* fov=: the horizontal FOV (deg) at zoom positions */
++		long fpos[ZT_PTS];
++		double fdeg[ZT_PTS];
++		double zstep;	/* zstep=: a +N narrows the view at most this many times */
++		int end;	/* the target is an end of the range: zoom into it */
++		long start, deadline;
++		int phase, dir, moves, stuck, retries, end_move;
++		long from;	/* the reading the last move started from */
++		long pulse;	/* its length, ms */
++		long ticks;	/* the ticks it asked for (0: an end move) */
++		double upt;	/* units a tick moved, measured near upt_at (0: none) */
++		long upt_at;
++		long until;	/* its stop */
++		long q_at;	/* when the reading's query went out */
++		long seq;	/* zoom_seq when it went out */
++	} zt;
 +} motion;
++static long settle_until;	/* a rel's stop plus its settle; 0 when over */
 +static int board_moving;	/* the board's own flag: 51 01 04 78 88 02 01 xx */
++static long flag_since;		/* the flag's rise or the end of our move, the later */
++static char move_id[16];	/* the id= of the last command that had one */
 +static long zoom_pos = -1;
++static long zoom_seq;		/* position replies so far */
++static long zoom_at;		/* when the last one came */
++static long zoom_still_at;	/* when the zoom last stopped (or will have) */
++static int zoom_fresh;		/* zoom_pos was read with the zoom standing still since */
++static long tele_end = -1;	/* the tele end, once a zoom_to has run into it */
++static long query_at[2];	/* position queries after a zoom ends (0: none) */
 +static int zoom_report = -1;
 +static int night_mode;		/* 0 day (filter in) / 1 night (filter out); byte 11 to the head */
 +
@@ -568,10 +1356,22 @@ index 000000000..84ce6db25
 +	f = fopen(tmp, "w");
 +	if (!f)
 +		return;
-+	fprintf(f, "moving=%d\nmotion=%s\nzoom=%ld\nzoom_step=%d\n", motion.verb || board_moving,
-+		motion.verb ? motion.verb : "none", zoom_pos, zoom_report);
++	fprintf(f, "moving=%d\nmotion=%s\nzoom=%ld\nzoom_step=%d\nlevel=%d\nmove_id=%s\n",
++		motion.verb || settle_until || board_moving, motion.verb ? motion.verb : "none", zoom_pos,
++		zoom_report, motion.verb ? motion.level : 0, move_id);
 +	fclose(f);
 +	rename(tmp, status_path);
++}
++
++/* id=X, kept to [0-9a-z-] so the status file stays one key=value a line */
++static void set_move_id(const char *id)
++{
++	size_t i;
++
++	for (i = 0; id[i] && i < sizeof(move_id) - 1; i++)
++		move_id[i] = ((id[i] >= '0' && id[i] <= '9') || (id[i] >= 'a' && id[i] <= 'z') || id[i] == '-') ? id[i]
++														: '_';
++	move_id[i] = 0;
 +}
 +
 +/* ---- lens board replies ---------------------------------------------- */
@@ -631,11 +1431,23 @@ index 000000000..84ce6db25
 +
 +			if (m != board_moving) {
 +				board_moving = m;
++				if (m)
++					flag_since = now_ms();
 +				status_write();
 +			}
 +		} else if (rx[i + 4] == 0x90 && rx[i + 5] == 0x06) {
 +			long z = (long)rx[i + 10] << 8 | rx[i + 11];
 +
++			zoom_seq++;
++			zoom_at = now_ms();
++			/* asked once the zoom stood still: good until it moves again */
++			if (!(motion.verb && motion.zooms) && query_sent >= zoom_still_at) {
++				zoom_fresh = 1;
++				if (trv.known && trv.ref_zoom < 0)
++					trv.ref_zoom = z;	/* the zoom at the preset */
++			}
++			logm(LOG_DEBUG, "position reply %ld ms after the query: zoom %ld%s", zoom_at - query_sent, z,
++			     zoom_fresh ? "" : " (moving)");
 +			if (z != zoom_pos) {
 +				zoom_pos = z;
 +				status_write();
@@ -776,33 +1588,834 @@ index 000000000..84ce6db25
 +
 +/* ---- commands ---------------------------------------------------------- */
 +
-+/* Stock's pan/tilt speed 1..10 (web UI and /cgi-bin/ptz_ctrl, default 5) as
-+ * the data byte it sends; ONVIF velocity v uses level floor(10v)+1, capped at
-+ * 10. Zoom has no speed: stock sends 01 01 at every level. */
-+static const unsigned char pt_speed[10] = {0x01, 0x04, 0x0a, 0x12, 0x19, 0x20, 0x27, 0x2e, 0x35, 0x3f};
++/* The move is over (stopped, or a hold ran out). A rel's settle keeps
++ * "moving" a little past the stop, and the board's flag gets BOARD_FLAG_MS
++ * from now to come down. */
++static void move_end(void)
++{
++	int zoomed = motion.zooms;
++
++	if (motion.verb && motion.t0)
++		logm(LOG_DEBUG, "%s over %ld ms after its command (+%ld ms settle)", motion.verb, now_ms() - motion.t0,
++		     motion.settle);
++
++	settle_until = motion.settle > 0 ? now_ms() + motion.settle : 0;
++	memset(&motion, 0, sizeof(motion));
++	flag_since = now_ms();
++	/* A zoom or a recall moved the zoom, and stop_all() asked for it
++	 * before the stop: ask again once it stands still, so GetStatus (and
++	 * the next zoom_to) has it. The second is in case the first is lost. */
++	if (zoomed)
++		zoom_still_at = flag_since;
++	if (!zoom_fresh) {
++		query_at[0] = flag_since + 100;
++		query_at[1] = flag_since + 1500;
++	}
++	status_write();
++}
++
++/* A move of the zoom begins: the reading is stale until it is read again. */
++static void zoom_moves(void)
++{
++	motion.zooms = 1;
++	zoom_fresh = 0;
++}
++
++/* A zoom_to being replaced by another move: its zoom may still be running,
++ * and the board can keep an axis that a later frame leaves out. */
++static void zt_cancel(int fd);
 +
 +static void move_stop(int fd)
 +{
-+	stop_all(fd);
-+	motion.verb = NULL;
-+	status_write();
++	stop_soon(fd);
++	fifo_after = now_ms() + 250 + motion.settle;
++	move_end();
 +}
 +
 +/* Repeating the running move only pushes its deadline out: resending the
 + * frame would restart the board's ramp and stutter a held button. */
 +static void move(int fd, const char *verb, unsigned char c1, unsigned char c2, unsigned char d1, unsigned char d2,
-+		 long ms)
++		 int level, long ms)
 +{
 +	if (ms <= 0 || ms > MAX_MOVE_MS)
 +		ms = MAX_MOVE_MS;
 +	if (!motion.verb || strcmp(motion.verb, verb) || motion.d1 != d1 || motion.d2 != d2) {
++		zt_cancel(fd);
 +		pelco(fd, c1, c2, d1, d2);
++		memset(&motion, 0, sizeof(motion));
 +		motion.verb = verb;
++		motion.t0 = now_ms();
 +		motion.d1 = d1;
 +		motion.d2 = d2;
++		motion.level = level;
++		if (c2 == 0x20 || c2 == 0x40)	/* zoom in / out */
++			zoom_moves();
++		settle_until = 0;
 +		status_write();
 +	}
 +	motion.until = now_ms() + ms;
++}
++
++static int clampi(int v, int lo, int hi)
++{
++	return v < lo ? lo : v > hi ? hi : v;
++}
++
++static long clampl(long v, long lo, long hi)
++{
++	return v < lo ? lo : v > hi ? hi : v;
++}
++
++/* rel <pan_ms> <tilt_ms> <pan_speed> <tilt_speed> [settle=N] [id=X]: the pan
++ * leg, a full stop, then the tilt leg, each a timed single-axis move; the stop
++ * ends the second. lensctl has turned the ONVIF distances into these times
++ * from the head's measured speeds, which are single-axis ones. The legs run
++ * one after the other because a head can latch an axis: a JL12D2 head kept
++ * tilting when a frame dropped tilt, even right after a stop frame, and a
++ * diagonal turns each axis slower than it turns alone. */
++static void leg_start(int fd, unsigned char c2, unsigned char d1, unsigned char d2, long ms)
++{
++	pelco(fd, 0x00, c2, d1, d2);
++	motion.d1 = d1;
++	motion.d2 = d2;
++	motion.until = now_ms() + ms;
++}
++
++static void command(int fd, char *line);
++
++/* A preset recall is under way (its hold): the head travels to the preset
++ * and the board reports no position, so a relative move now would abandon
++ * the recall wherever the head is, and its distances come from a frame taken
++ * on the way. Frigate sends just that: a new track's first RelativeMove while
++ * it returns home (a JL12D2, 2026-11-07 20:31). Such a move (rel, zoom_to)
++ * is dropped; "moving" holds to the end of the recall, and the caller aims
++ * again from home. A continuous move or a stop still ends a recall. */
++static int recall_running(const char *what)
++{
++	if (!(motion.verb && motion.hold))
++		return 0;
++	logm(LOG_INFO, "%s during a preset recall: dropped (%ld ms of the recall left)", what,
++	     motion.until - now_ms());
++	status_write();	/* the caller still sees its id */
++	return 1;
++}
++
++/* Would a zoom term of delta move the zoom? Not when the zoom is known (read
++ * standing still) and the change would end within tol of where it stands: a
++ * zoom out at the wide end, a zoom in at the tele end. Frigate's relative
++ * zooming starts a track with such a term (a zoom out with the lens wide, on
++ * all three tracks of a JL12D2 walk, 2026-11-08), and running it cost the move a
++ * blocking stop and the zoom's settle: 0.46-0.56 s over Frigate's prediction,
++ * against 0.21 s for the plain moves. An unknown zoom: zoom_to reads it. */
++static int zoom_term_moves(long delta, long tol)
++{
++	long target;
++
++	if (!zoom_fresh || zoom_pos < 0)
++		return 1;
++	if (delta > 0 && tele_end >= 0 && zoom_pos >= tele_end - tol)
++		return 0;	/* at the tele end a zoom_to found */
++	target = clampl(zoom_pos + delta, 0, ZOOM_MAX);
++	if (target <= tol)
++		target = 0;
++	else if (target >= ZOOM_MAX - tol)
++		target = ZOOM_MAX;
++	return (target > zoom_pos ? target - zoom_pos : zoom_pos - target) > tol;
++}
++
++/* zoom=+-N: the zoom term, then zoom_to's own keys (ups=, dead=, ...) for
++ * the zoom_to that follows the legs. */
++static void rel_move(int fd)
++{
++	long pan = 0, tilt = 0, settle = 0, ap, at, ztol = ZT_TOL;
++	int pl = 10, tl = 10, n = 0, gap = 5;
++	unsigned char pc2, tc2, pd, td;
++	char *arg, zoom[16] = "", zkeys[sizeof(motion.then)] = "", then[sizeof(motion.then)] = "";
++	size_t zl = 0;
++
++	while ((arg = strtok(NULL, " \t\r\n"))) {
++		if (!strncmp(arg, "settle=", 7))
++			settle = atol(arg + 7);
++		else if (!strncmp(arg, "id=", 3))
++			set_move_id(arg + 3);
++		else if (!strncmp(arg, "gap=", 4))
++			gap = atoi(arg + 4);
++		else if (!strncmp(arg, "zoom=", 5))
++			snprintf(zoom, sizeof(zoom), "%s", arg + 5);
++		else if (strchr(arg, '=')) {	/* zoom_to's keys */
++			if (!strncmp(arg, "tol=", 4))
++				ztol = clampl(atol(arg + 4), 10, 5000);
++			zl += snprintf(zkeys + zl, zl < sizeof(zkeys) ? sizeof(zkeys) - zl : 0, " %s", arg);
++		}
++		else
++			switch (n++) {
++			case 0: pan = atol(arg); break;
++			case 1: tilt = atol(arg); break;
++			case 2: pl = atoi(arg); break;
++			case 3: tl = atoi(arg); break;
++			}
++	}
++	pl = clampi(pl, 1, 10);
++	tl = clampi(tl, 1, 10);
++	ap = pan < 0 ? -pan : pan;
++	at = tilt < 0 ? -tilt : tilt;
++	if (ap > MAX_MOVE_MS)
++		ap = MAX_MOVE_MS;
++	if (at > MAX_MOVE_MS)
++		at = MAX_MOVE_MS;
++	if (settle < 0 || settle > MAX_SETTLE_MS)
++		settle = settle < 0 ? 0 : MAX_SETTLE_MS;
++	if (recall_running("rel"))
++		return;
++	if (zoom[0] && atol(zoom) && !zoom_term_moves(atol(zoom), ztol)) {
++		logm(LOG_DEBUG, "rel: zoom %s from %ld moves nothing: dropped", zoom, zoom_pos);
++		zoom[0] = 0;
++	}
++	if (zoom[0] && atol(zoom) &&
++	    (zl >= sizeof(zkeys) ||
++	     (size_t)snprintf(then, sizeof(then), "zoom_to %s%s settle=%ld", zoom, zkeys, settle) >= sizeof(then))) {
++		logm(LOG_WARNING, "rel: zoom term too long, dropped");
++		then[0] = 0;
++	}
++	if (!ap && !at) {
++		if (then[0])
++			command(fd, then);	/* a zoom only */
++		else
++			status_write();	/* nothing to do; the caller still sees its id */
++		return;
++	}
++	pc2 = ap ? (pan > 0 ? 0x02 : 0x04) : 0;	/* right / left */
++	tc2 = at ? (tilt > 0 ? 0x08 : 0x10) : 0;	/* up / down */
++	pd = ap ? pt_speed[pl - 1] : 0;
++	td = at ? pt_speed[tl - 1] : 0;
++	zt_cancel(fd);
++	memset(&motion, 0, sizeof(motion));
++	motion.verb = "rel";
++	motion.t0 = now_ms();
++	if (ap) {
++		motion.level = pl;
++		leg_start(fd, pc2, pd, 0x00, ap);
++		if (at) {	/* the tilt leg once the pan leg has stopped */
++			motion.leg2_ms = at;
++			motion.lc2 = tc2;
++			motion.ld2 = td;
++			motion.l2level = tl;
++		}
++	} else {
++		motion.level = tl;
++		leg_start(fd, tc2, 0x00, td, at);
++	}
++	motion.settle = settle;
++	motion.gap = clampi(gap, 1, 5);
++	memcpy(motion.then, then, sizeof(then));
++	settle_until = 0;
++	status_write();
++	logm(LOG_DEBUG, "rel pan %ld ms (level %d) tilt %ld ms (level %d) settle %ld%s%s", pan, pl, tilt, tl, settle,
++	     then[0] ? ", then zoom " : "", then[0] ? zoom : "");
++}
++
++/* ---- zoom_to: the zoom to a position, by its readout --------------------
++ *
++ * The zoom cannot be watched while it moves: the board answers the position
++ * query ~0.6 s late, and a query before then restarts that wait. So each move
++ * is a timed zoom from a model, then one reading once the zoom stands still:
++ *   PULSE  zoom in or out for dead + the time the speed table gives for the
++ *          distance (the zoom is slower toward tele), scaled by how far the
++ *          moves of this zoom_to went against their prediction; a target at
++ *          an end of the range is overshot into the end, where the board
++ *          stops;
++ *   READ   one query at the stop, which the board answers with the zoom as
++ *          it is ~0.46 s later, after its run-on; within tol is done, else
++ *          the next pulse.
++ * Measured on a JL12D2 (2026-11-07): the board moves the zoom in ticks of
++ * 50 ms, so a zoom command moves ~52 units plus a whole number of ticks
++ * (~1012 units each at 20.2 units/ms): dead + k ticks of command moves k
++ * ticks, give or take one at the edges; now and then it runs one or two stop
++ * frames long, or the board ignores it. The pulse is a whole number of
++ * ticks, the reading after it catches the rest, and a target within half
++ * a tick (or tol, the more) is as near as the board gets.
++ * A reading taken while the zoom stood still is kept (zoom_fresh), so a
++ * zoom_to straight after another starts with its pulse. Gives up after
++ * ZT_MAX_MOVES, three moves that went nowhere, no readout, or max ms. An end
++ * move that went somewhere is at the end; the tele end found so is kept
++ * (tele_end): a head may stop short of 65535.
++ */
++
++/* Defaults; lensctl passes the head's (heads/<head>.conf, HEAD_ZOOM_*). */
++#define ZT_DEAD_MS 130
++#define ZT_TICK_MS 50
++#define ZT_UPS 20000		/* units per second */
++#define ZT_MAX_MS 8000
++/* No answer to a query this long: ask again, once. Answers come 0.54-0.6 s
++ * after the query; now and then one never comes (JL12D2, 2026-11-07 20:48:08,
++ * after a 2.7 s zoom), and the wait is then all lost. */
++#define ZT_REPLY_MS 800
++#define ZT_MAX_MOVES 6
++#define ZT_MAX_PULSE_MS 7000
++#define ZT_MOVED_MIN 30		/* a move of less went nowhere */
++
++static void zoom_cmd(int fd, int dir)
++{
++	pelco(fd, 0x00, dir > 0 ? 0x20 : 0x40, 0x01, 0x01);	/* in (tele) / out (wide) */
++}
++
++/* Two stop frames: the board now and then takes the second (a later stop)
++ * or none. */
++static void zoom_halt(int fd)
++{
++	pelco(fd, 0x00, 0x00, 0x00, 0x00);
++	usleep(10000);
++	pelco(fd, 0x00, 0x00, 0x00, 0x00);
++}
++
++static void zt_cancel(int fd)
++{
++	if (motion.verb == zoom_to_verb && motion.zt.phase == ZT_PULSE) {
++		zoom_halt(fd);
++		zoom_still_at = now_ms();
++	}
++}
++
++
++/* ups=<units per second> or ups=<pos>:<ups>,<pos>:<ups>,... (pos rising):
++ * the speed from each pos on, interpolated between them. */
++static void zt_table(struct zt *z, const char *s)
++{
++	z->npts = 0;
++	while (*s && z->npts < ZT_PTS) {
++		char *e;
++		long a = strtol(s, &e, 10), b;
++
++		if (e == s)
++			break;
++		if (*e == ':') {
++			s = e + 1;
++			b = strtol(s, &e, 10);
++			if (e == s)
++				break;
++		} else {
++			b = a;
++			a = 0;
++		}
++		if (b < 500 || b > 200000 || (z->npts && a <= z->pos[z->npts - 1]))
++			break;
++		z->pos[z->npts] = a;
++		z->ups[z->npts++] = b / 1000.0;
++		s = *e == ',' ? e + 1 : e;
++	}
++	if (!z->npts) {
++		z->pos[0] = 0;
++		z->ups[0] = ZT_UPS / 1000.0;
++		z->npts = 1;
++	}
++}
++
++static double zt_speed(const struct zt *z, long p)
++{
++	int i;
++
++	for (i = 1; i < z->npts; i++)
++		if (p <= z->pos[i])
++			return p <= z->pos[i - 1] ? z->ups[i - 1]
++						  : z->ups[i - 1] + (z->ups[i] - z->ups[i - 1]) *
++									(p - z->pos[i - 1]) / (z->pos[i] - z->pos[i - 1]);
++	return z->ups[z->npts - 1];
++}
++
++/* ms of zooming from a to b (past the dead time), by the table */
++static double zt_time(const struct zt *z, long a, long b)
++{
++	long lo = a < b ? a : b, hi = a < b ? b : a, p, step;
++	double t = 0;
++
++	for (p = lo; p < hi; p += step) {
++		step = hi - p < 256 ? hi - p : 256;
++		t += step / zt_speed(z, p + step / 2);
++	}
++	return t;
++}
++
++/* fov=<pos>:<deg>,... (pos rising, deg falling): the head's FOV along the
++ * zoom (HEAD_ZOOM_FOV). Anything else leaves no table, and no cap. */
++static void zt_fov(struct zt *z, const char *s)
++{
++	z->nfov = 0;
++	while (*s && z->nfov < ZT_PTS) {
++		char *e;
++		long a = strtol(s, &e, 10);
++		double d;
++
++		if (e == s || *e != ':')
++			break;
++		s = e + 1;
++		d = strtod(s, &e);
++		if (e == s || d <= 0 || (z->nfov && (a <= z->fpos[z->nfov - 1] || d >= z->fdeg[z->nfov - 1])))
++			break;
++		z->fpos[z->nfov] = a;
++		z->fdeg[z->nfov++] = d;
++		s = *e == ',' ? e + 1 : e;
++	}
++	if (z->nfov < 2)
++		z->nfov = 0;
++}
++
++static double fov_at(const struct zt *z, long p)
++{
++	int i;
++
++	if (p <= z->fpos[0])
++		return z->fdeg[0];
++	for (i = 1; i < z->nfov; i++)
++		if (p <= z->fpos[i])
++			return z->fdeg[i - 1] + (z->fdeg[i] - z->fdeg[i - 1]) * (p - z->fpos[i - 1]) /
++							 (double)(z->fpos[i] - z->fpos[i - 1]);
++	return z->fdeg[z->nfov - 1];
++}
++
++/* The zoom where the FOV is f; past the table's narrowest: the tele end. */
++static long zoom_for_fov(const struct zt *z, double f)
++{
++	int i;
++
++	if (f >= z->fdeg[0])
++		return z->fpos[0];
++	for (i = 1; i < z->nfov; i++)
++		if (f >= z->fdeg[i])
++			return z->fpos[i - 1] + (long)((z->fpos[i] - z->fpos[i - 1]) * (z->fdeg[i - 1] - f) /
++						       (z->fdeg[i - 1] - z->fdeg[i]));
++	return ZOOM_MAX;
++}
++
++/* A relative zoom in (an ONVIF RelativeMove's zoom term) narrows the view at
++ * most zstep times. Frigate's relative zooming asks for 2/(r+1) of the range,
++ * r being how far its area test is under the limit: most of the range just
++ * under it (r ~1.05: ~0.97), so one move went from 48 deg toward ~5 and lost
++ * the walker (a JL12D2, 2026-11-07, zoom_factor 0.5). Capped, it closes in
++ * over a few moves: Frigate reads the zoom after each and asks again while the
++ * subject is still small. Zooming out is never capped. */
++static long zt_cap(const struct zt *z, long from, long to)
++{
++	long cap;
++
++	if (to <= from || z->zstep <= 1.0 || !z->nfov)
++		return to;
++	cap = zoom_for_fov(z, fov_at(z, from) / z->zstep);
++	if (to <= cap)
++		return to;
++	logm(LOG_INFO, "zoom_to +%ld from %ld: capped at %ld (the view %.1f to %.1f deg, at most %.2fx)", to - from, from,
++	     cap, fov_at(z, from), fov_at(z, cap), z->zstep);
++	return cap;
++}
++
++/* An end of the range is zoomed into rather than stopped short of. */
++static void zt_target(struct zt *z, long target)
++{
++	z->end = target <= z->tol || target >= ZOOM_MAX - z->tol;
++	z->target = z->end ? (target <= z->tol ? 0 : ZOOM_MAX) : target;
++}
++
++/* Over, the zoom standing still: on target, or given up. */
++static void zt_done(const char *why, int ok)
++{
++	logm(ok ? LOG_DEBUG : LOG_WARNING, "zoom_to %ld: %s at %ld, %ld ms, %d moves (scale %.2f)", motion.zt.target,
++	     why, zoom_pos, now_ms() - motion.zt.start, motion.zt.moves, motion.zt.scale);
++	move_end();
++}
++
++/* Read the zoom: one query; the answer ends the READ phase. */
++static void zt_read(int fd)
++{
++	motion.zt.phase = ZT_READ;
++	motion.zt.seq = zoom_seq;
++	send_query(fd);
++	motion.zt.q_at = query_sent;
++}
++
++/* The zoom stands still at zoom_pos: learn from the move that brought it
++ * here, then stop or make the next one. */
++static void zt_decide(int fd, long t)
++{
++	struct zt *z = &motion.zt;
++	long err, dist, goal, near;
++	int dir;
++	double ms;
++
++	if (z->rel) {	/* zoom_to +-N: from the zoom as it stands */
++		zt_target(z, zt_cap(z, zoom_pos, clampl(zoom_pos + z->delta, 0, ZOOM_MAX)));
++		z->rel = 0;
++		logm(LOG_DEBUG, "zoom_to %+ld from %ld: to %ld", z->delta, zoom_pos, z->target);
++	}
++	err = z->target - zoom_pos;
++	dist = err < 0 ? -err : err;
++	dir = err > 0 ? 1 : -1;
++	/* as near as the board gets: half a tick of zoom here, give or take
++	 * the ~52-unit start of every move */
++	near = (long)(zt_speed(z, zoom_pos) * z->tick / 2) + 60;
++
++	if (z->moves) {
++		long moved = (zoom_pos - z->from) * z->dir, pred = (z->target - z->from) * z->dir;
++
++		logm(LOG_DEBUG, "zt move %d: %s %ld ms from %ld: moved %ld of %ld", z->moves, z->dir > 0 ? "in" : "out",
++		     z->pulse, z->from, moved, pred);
++		if (moved < ZT_MOVED_MIN) {
++			z->stuck++;
++		} else {
++			z->stuck = 0;
++			/* what a tick moved here, for the next short move: a table
++			 * that is off here would make every short move overshoot */
++			if (z->ticks >= 1 && moved > 52 + 20) {
++				z->upt = (double)(moved - 52) / z->ticks;
++				z->upt_at = (z->from + zoom_pos) / 2;
++			}
++			/* the table's error, from a move long enough that a tick
++			 * more or less does not swamp it */
++			if (!z->end_move && pred >= 5000)
++				z->scale = z->scale * (1.0 + (double)moved / pred) / 2;
++			if (z->scale < 0.5)
++				z->scale = 0.5;
++			if (z->scale > 2.0)
++				z->scale = 2.0;
++		}
++	}
++	/* an end is always reached exactly: zoom into it */
++	if (dist <= z->tol || (!z->end && dist <= near)) {
++		zt_done("on target", 1);
++		return;
++	}
++	/* an end move that went somewhere got there: it overshoots */
++	if (z->moves && dir == z->dir && z->end_move && !z->stuck) {
++		if (dir > 0)
++			tele_end = zoom_pos;
++		zt_done("at the end of the range", 1);
++		return;
++	}
++	if (z->stuck >= 3) {
++		zt_done("gave up: three moves went nowhere", 0);
++		return;
++	}
++	if (z->moves >= ZT_MAX_MOVES) {
++		zt_done("gave up: too many moves", 0);
++		return;
++	}
++	if (dir > 0 && tele_end >= 0 && zoom_pos >= tele_end - z->tol && z->target > zoom_pos) {
++		zt_done("at the tele end", 1);	/* found by an earlier zoom_to */
++		return;
++	}
++	z->moves++;
++	z->dir = dir;
++	z->from = zoom_pos;
++	z->end_move = z->end || (dir > 0 && tele_end >= 0 && z->target >= tele_end - z->tol);
++	goal = z->end_move ? (dir > 0 ? ZOOM_MAX : 0) : z->target;
++	ms = zt_time(z, zoom_pos, goal) / z->scale;
++	z->ticks = 0;
++	if (z->end_move) {
++		ms = ms * 1.3 + 200;
++	} else {
++		/* whole ticks: dead + k ticks is the middle of the command
++		 * lengths that move k ticks; near the last move, as many as its
++		 * ticks went */
++		long k = z->upt > 0 && labs(zoom_pos - z->upt_at) < 8000 ? (long)((dist - 52) / z->upt + 0.5)
++									   : (long)(ms / z->tick + 0.5);
++
++		z->ticks = k < 1 ? 1 : k;
++		ms = (double)z->ticks * z->tick;
++	}
++	z->pulse = clampl(z->dead + (long)(ms + 0.5), 1, ZT_MAX_PULSE_MS);
++	z->until = t + z->pulse;
++	z->phase = ZT_PULSE;
++	zoom_moves();
++	zoom_cmd(fd, dir);
++	logm(LOG_DEBUG, "zt move %d: %s %ld ms from %ld toward %ld%s", z->moves, dir > 0 ? "in" : "out", z->pulse,
++	     zoom_pos, z->target, z->end_move ? " (into the end)" : "");
++}
++
++static void zt_tick(int fd)
++{
++	struct zt *z = &motion.zt;
++	long t = now_ms();
++
++	if (t >= z->deadline) {
++		logm(LOG_WARNING, "zoom_to %ld: timed out at %ld after %d moves", z->target, zoom_pos, z->moves);
++		move_stop(fd);
++		return;
++	}
++	if (z->phase == ZT_PULSE) {
++		if (t >= z->until) {
++			zoom_halt(fd);
++			motion.zooms = 0;
++			zoom_still_at = now_ms();
++			zt_read(fd);	/* answered once the run-on is over */
++		}
++		return;
++	}
++	/* READ: an answer to this query (they come >0.5 s after it) */
++	if (zoom_seq != z->seq && zoom_at >= z->q_at + 300) {
++		zt_decide(fd, t);
++	} else if (t - z->q_at > ZT_REPLY_MS) {
++		if (z->retries++) {
++			logm(LOG_WARNING, "zoom_to %ld: no zoom readout from the board", z->target);
++			move_stop(fd);
++		} else {
++			logm(LOG_DEBUG, "zt: no answer %ld ms after the query, asking again", t - z->q_at);
++			zt_read(fd);
++		}
++	}
++}
++
++/* zoom_to <0-65535 | +N | -N> [tol=N] [dead=N] [tick=N] [ups=TABLE] [max=N] [settle=N] [id=X]:
++ * +N/-N is relative to the zoom when it starts (read first if it is not
++ * known at rest); dead, tick, max and settle in ms; ups see zt_table(). */
++static void zoom_to(int fd)
++{
++	long target = -1, tol = ZT_TOL, dead = ZT_DEAD_MS, tick = ZT_TICK_MS, max = ZT_MAX_MS, settle = 0, t;
++	long delta = 0;
++	const char *ups = "", *fov = "";
++	double zstep = 0;
++	int busy = motion.verb != NULL, rel = 0;
++	struct zt *z = &motion.zt;
++	char *arg;
++
++	while ((arg = strtok(NULL, " \t\r\n"))) {
++		if (!strncmp(arg, "tol=", 4))
++			tol = atol(arg + 4);
++		else if (!strncmp(arg, "dead=", 5))
++			dead = atol(arg + 5);
++		else if (!strncmp(arg, "tick=", 5))
++			tick = atol(arg + 5);
++		else if (!strncmp(arg, "ups=", 4))
++			ups = arg + 4;
++		else if (!strncmp(arg, "max=", 4))
++			max = atol(arg + 4);
++		else if (!strncmp(arg, "settle=", 7))
++			settle = atol(arg + 7);
++		else if (!strncmp(arg, "fov=", 4))
++			fov = arg + 4;
++		else if (!strncmp(arg, "zstep=", 6))
++			zstep = strtod(arg + 6, NULL);
++		else if (!strncmp(arg, "id=", 3))
++			set_move_id(arg + 3);
++		else if (strchr(arg, '='))
++			;	/* a key of a newer lensctl: ignored */
++		else if (arg[0] == '+' || arg[0] == '-')
++			rel = 1, delta = atol(arg);
++		else
++			target = atol(arg);
++	}
++	if (rel ? delta < -ZOOM_MAX || delta > ZOOM_MAX : target < 0 || target > ZOOM_MAX) {
++		logm(LOG_WARNING, "zoom_to: a position 0-%d or a change of at most that expected", ZOOM_MAX);
++		status_write();	/* the caller still sees its id */
++		return;
++	}
++	if (rel && !delta) {
++		status_write();	/* nothing to do */
++		return;
++	}
++	if (recall_running("zoom_to"))
++		return;
++	zt_cancel(fd);
++	memset(&motion, 0, sizeof(motion));
++	motion.verb = zoom_to_verb;
++	motion.t0 = chain_t0 ? chain_t0 : now_ms();	/* a rel's: timed from its command */
++	motion.settle = clampl(settle, 0, MAX_SETTLE_MS);
++	z->tol = clampl(tol, 10, 5000);
++	z->dead = clampl(dead, 0, 1000);
++	z->tick = clampl(tick, 1, 500);
++	zt_table(z, ups);
++	zt_fov(z, fov);
++	z->zstep = zstep;
++	z->scale = 1.0;
++	z->rel = rel;
++	z->delta = delta;
++	if (!rel)
++		zt_target(z, target);
++	t = now_ms();
++	z->start = t;
++	z->deadline = t + clampl(max, 1000, MAX_MOVE_MS);
++	query_at[0] = query_at[1] = 0;	/* zoom_to reads the zoom itself */
++	settle_until = 0;
++	status_write();	/* "moving" and the id, before anything blocks */
++	logm(LOG_DEBUG, "zoom_to %s%ld from %ld%s: tol %ld dead %ld tick %ld, %d speed points", rel && delta > 0 ? "+" : "",
++	     rel ? delta : z->target, zoom_pos, zoom_fresh && !busy ? "" : " (to be read)", z->tol, z->dead, z->tick,
++	     z->npts);
++	if (busy) {
++		stop_all(fd);	/* the move it replaces */
++		zoom_still_at = now_ms();
++	}
++	if (zoom_fresh && !busy && zoom_pos >= 0)
++		zt_decide(fd, now_ms());
++	else
++		zt_read(fd);
++}
++
++/* The time-driven part of a move: a rel's second leg and its stop, the end
++ * of a hold or a settle, and a board flag that never came down. Called every
++ * few ms, so a timed move ends within ~2 ms of its time, not a frame. */
++static void motion_tick(int fd)
++{
++	long t = now_ms();
++	int i;
++
++	if (motion.verb == zoom_to_verb) {
++		zt_tick(fd);
++	} else if (motion.verb && motion.leg2_ms && t >= motion.until) {
++		stop_n(fd, motion.gap);	/* the first leg's full stop, then the second leg */
++		motion.level = motion.l2level;
++		leg_start(fd, motion.lc2, 0x00, motion.ld2, motion.leg2_ms);
++		motion.leg2_ms = 0;
++		status_write();
++	} else if (motion.verb && t >= motion.until) {
++		logm(LOG_DEBUG, "%s %s", motion.verb, motion.hold ? "hold over" : "timed out");
++		if (motion.hold) {
++			int p = motion.preset;
++
++			move_end();
++			at_preset = p;	/* the head is there now */
++			memset(&trv, 0, sizeof(trv));
++			trv.known = 1;
++			trv.ref = p;
++			trv.ref_zoom = -1;
++		} else if (motion.then[0]) {
++			char then[sizeof(motion.then)];
++
++			/* the last leg's stop, then the zoom; "moving" holds */
++			long t0 = motion.t0;
++
++			memcpy(then, motion.then, sizeof(then));
++			stop_all(fd);
++			memset(&motion, 0, sizeof(motion));
++			chain_t0 = t0;
++			command(fd, then);
++			chain_t0 = 0;
++		} else {
++			move_stop(fd);
++		}
++	}
++	if (stops_left && now_ms() >= next_stop_at) {
++		pelco(fd, 0x00, 0x00, 0x00, 0x00);
++		stops_left--;
++		next_stop_at += 50;
++	}
++	if (settle_until && now_ms() >= settle_until) {
++		settle_until = 0;
++		status_write();
++	}
++	for (i = 0; i < 2; i++)
++		if (query_at[i] && now_ms() >= query_at[i]) {
++			query_at[i] = 0;
++			if (!motion.verb)	/* a running move queries at its own end */
++				send_query(fd);
++		}
++	if (board_moving && !motion.verb && now_ms() - flag_since > BOARD_FLAG_MS) {
++		logm(LOG_WARNING, "board moving flag still up %d ms after the move: cleared", BOARD_FLAG_MS);
++		board_moving = 0;
++		status_write();
++	}
++}
++
++/* ---- recall: how long the way back to a preset takes -------------------
++ *
++ * The board turns every axis at once on a recall (a JL12D2, 2026-11-08,
++ * timed on the video: pan 1500 ms away + zoom 30000 or + tilt 1000 ms came
++ * back in the time of the pan alone), at its own speeds: ~0.4 s to start,
++ * then the pan at ~24 deg/s, the tilt at ~18, the zoom about as zoom_to's
++ * table has it. So a recall takes rbase + the slowest axis's way back +
++ * rmargin (at least rmin), the way back in degrees from trv's ms by the head's speed at each
++ * level (pdps= / tdps=, ten values each). When the way back is not known
++ * (lensd just started, a raw frame, a recall that did not finish, or another
++ * preset), or the keys are missing, the hold is ms= as before. */
++struct recall_model {
++	long base, margin;	/* ms */
++	long min;		/* ms: any recall that may move the head holds at least this */
++	double rpan, rtilt;	/* deg/s */
++	double pdps[10], tdps[10];
++	int np, nt;
++	struct zt z;		/* ups= */
++	int has_ups;
++};
++
++static int dps_list(double *v, const char *s)
++{
++	int n = 0;
++	char *e;
++
++	while (n < 10 && *s) {
++		v[n] = strtod(s, &e);
++		if (e == s || v[n] <= 0)
++			return 0;
++		n++;
++		s = *e == ',' ? e + 1 : e;
++	}
++	return n;
++}
++
++static void recall_key(struct recall_model *m, const char *a)
++{
++	if (!strncmp(a, "rbase=", 6))
++		m->base = atol(a + 6);
++	else if (!strncmp(a, "rmargin=", 8))
++		m->margin = atol(a + 8);
++	else if (!strncmp(a, "rmin=", 5))
++		m->min = atol(a + 5);
++	else if (!strncmp(a, "rpan=", 5))
++		m->rpan = strtod(a + 5, NULL);
++	else if (!strncmp(a, "rtilt=", 6))
++		m->rtilt = strtod(a + 6, NULL);
++	else if (!strncmp(a, "pdps=", 5))
++		m->np = dps_list(m->pdps, a + 5);
++	else if (!strncmp(a, "tdps=", 5))
++		m->nt = dps_list(m->tdps, a + 5);
++	else if (!strncmp(a, "ups=", 4)) {
++		zt_table(&m->z, a + 4);
++		m->has_ups = 1;
++	}
++}
++
++static long recall_hold(const struct recall_model *m, int n, long max, char *why, size_t wn)
++{
++	double pan = 0, tilt = 0, tp, tt, tz = 0, t;
++	long hold;
++	int i;
++
++	if (m->np != 10 || m->nt != 10 || m->rpan <= 0 || m->rtilt <= 0 || !m->has_ups) {
++		snprintf(why, wn, "no recall model");
++		return max;
++	}
++	if (!trv.known || trv.ref != n) {
++		snprintf(why, wn, !trv.known ? "the way back is not known" : "the head left from preset %d", trv.ref);
++		return max;
++	}
++	seg_close();	/* a frame still turning the head counts to now */
++	for (i = 0; i < 10; i++) {
++		pan += trv.pan[i] * m->pdps[i] / 1000.0;
++		tilt += trv.tilt[i] * m->tdps[i] / 1000.0;
++	}
++	if (pan < 0)
++		pan = -pan;
++	if (tilt < 0)
++		tilt = -tilt;
++	tp = pan / m->rpan * 1000;
++	tt = tilt / m->rtilt * 1000;
++	if (!trv.zoomed) {
++		tz = 0;	/* still the preset's zoom */
++	} else if (zoom_fresh && zoom_pos >= 0 && trv.ref_zoom >= 0) {
++		if ((zoom_pos > trv.ref_zoom ? zoom_pos - trv.ref_zoom : trv.ref_zoom - zoom_pos) > ZT_TOL)
++			tz = zt_time(&m->z, zoom_pos, trv.ref_zoom);
++	} else {
++		tz = zt_time(&m->z, 0, ZOOM_MAX);	/* the zoom is not known: its longest way */
++	}
++	t = tp > tt ? tp : tt;
++	if (tz > t)
++		t = tz;
++	hold = m->base + (long)t + m->margin;
++	/* out and back adds up to nothing, but the head is a little off and the
++	 * board still starts and stops (JL12D2: ~0.9 s for that) */
++	if (hold < m->min)
++		hold = m->min;
++	if (hold > max)
++		hold = max;
++	snprintf(why, wn, "pan %.1f deg %.0f ms, tilt %.1f deg %.0f ms, zoom %ld to %ld %.0f ms", pan, tp, tilt, tt,
++		 zoom_fresh ? zoom_pos : -1L, trv.ref_zoom, tz);
++	return hold;
 +}
 +
 +static void command(int fd, char *line)
@@ -833,8 +2446,12 @@ index 000000000..84ce6db25
 +		return;
 +	if (!strcmp(cmd, "stop")) {
 +		move_stop(fd);
++	} else if (!strcmp(cmd, "rel")) {
++		rel_move(fd);
++	} else if (!strcmp(cmd, "zoom_to")) {
++		zoom_to(fd);
 +	} else if (!strcmp(cmd, "query")) {
-+		put(fd, query9a, sizeof(query9a));
++		send_query(fd);
 +	} else if (!strcmp(cmd, "trace")) {
 +		char *secs = strtok(NULL, " \t\r\n");
 +
@@ -846,6 +2463,8 @@ index 000000000..84ce6db25
 +
 +		while (n < sizeof(b) && (tok = strtok(NULL, " \t\r\n")))
 +			b[n++] = (unsigned char)strtoul(tok, NULL, 16);
++		at_preset = 0;	/* a raw frame may move the head */
++		trv.known = 0;
 +		put(fd, b, n);
 +	} else if (!strcmp(cmd, "day") || !strcmp(cmd, "night")) {
 +		night_mode = cmd[0] == 'n';
@@ -855,12 +2474,64 @@ index 000000000..84ce6db25
 +			if (!strcmp(cmd, presets[i].name)) {
 +				char *arg = strtok(NULL, " \t\r\n");
 +				int n = arg ? atoi(arg) : 0;
++				long ms = 0;
++				struct recall_model rm = {0};
 +
 +				if (n < 1 || n > 255) {
 +					logm(LOG_WARNING, "%s: preset 1-255 expected", cmd);
 +					return;
 +				}
++				while ((arg = strtok(NULL, " \t\r\n")))
++					if (!strncmp(arg, "ms=", 3))
++						ms = atol(arg + 3);
++					else if (!strncmp(arg, "id=", 3))
++						set_move_id(arg + 3);
++					else
++						recall_key(&rm, arg);
++				/* A recall of the preset the head is at (its last recall
++				 * finished, and no frame since could have moved it): the
++				 * board has nowhere to go, so it is over at once. Frigate
++				 * sends one when a track it never moved for times out:
++				 * 7.5 s of MOVING for no travel on a JL12D2, 2026-11-08
++				 * 14:24:50, and a new object then would have been dropped. */
++				if (presets[i].c2 == 0x07 && ms > 0 && n == at_preset && !motion.verb) {
++					logm(LOG_INFO, "preset_goto %d: the head is there already (its last recall, nothing since)",
++					     n);
++					status_write();	/* the caller sees its id, not moving */
++					logm(LOG_DEBUG, "command %s", cmd);
++					return;
++				}
++				/* a recall replaces a zoom_to (the recall sets the zoom) */
++				if (presets[i].c2 == 0x07 && motion.verb == zoom_to_verb) {
++					zt_cancel(fd);
++					memset(&motion, 0, sizeof(motion));
++				}
 +				pelco(fd, 0x00, presets[i].c2, 0x00, (unsigned char)n);
++				/* A recall moves the head with no moving flag from the
++				 * board; ms= (the head's longest recall) stands in for it,
++				 * or less when lensd knows the way back (recall_hold). */
++				if (presets[i].c2 == 0x07 && ms > 0) {
++					char why[160];
++
++					ms = recall_hold(&rm, n, ms > MAX_MOVE_MS ? MAX_MOVE_MS : ms, why, sizeof(why));
++					logm(LOG_INFO, "preset_goto %d: hold %ld ms (%s)", n, ms, why);
++					trv.known = 0;	/* until this recall has finished */
++					memset(&motion, 0, sizeof(motion));
++					motion.verb = "preset";
++					motion.t0 = now_ms();
++					motion.hold = 1;
++					motion.preset = n;
++					motion.until = now_ms() + ms;
++					zoom_moves();	/* a preset has its own zoom */
++					settle_until = 0;
++				} else if (presets[i].c2 == 0x07) {
++					trv.known = 0;	/* no end, so no start for the travel */
++					/* no hold, so no end: the longest recall measured */
++					zoom_fresh = 0;
++					zoom_still_at = now_ms() + 7500;
++					query_at[0] = zoom_still_at + 100;
++				}
++				status_write();
 +				break;
 +			}
 +		if (i < sizeof(presets) / sizeof(*presets)) {
@@ -887,7 +2558,7 @@ index 000000000..84ce6db25
 +					d1 = pt_speed[lvl - 1];
 +				if (verbs[i].axes & 2)
 +					d2 = pt_speed[lvl - 1];
-+				move(fd, verbs[i].name, verbs[i].c1, verbs[i].c2, d1, d2, ms);
++				move(fd, verbs[i].name, verbs[i].c1, verbs[i].c2, d1, d2, verbs[i].axes ? lvl : 0, ms);
 +				break;
 +			}
 +		if (i == sizeof(verbs) / sizeof(*verbs)) {
@@ -907,7 +2578,7 @@ index 000000000..84ce6db25
 +
 +static void fifo_poll(int ffd, int fd)
 +{
-+	static char buf[256];
++	static char buf[1024];	/* a rel with the zoom_to keys is ~250 bytes */
 +	static size_t len;
 +	ssize_t n;
 +	char *nl;
@@ -933,7 +2604,7 @@ index 000000000..84ce6db25
 +	long period, next, last_check = 0, frames = 0;
 +	int hz = 25, fd, ffd, opt;
 +
-+	while ((opt = getopt(argc, argv, "p:f:s:r:vP")) != -1) {
++	while ((opt = getopt(argc, argv, "p:f:s:r:vPd:n:m:")) != -1) {
 +		switch (opt) {
 +		case 'p': port = optarg; break;
 +		case 'f': fifo = optarg; break;
@@ -941,8 +2612,12 @@ index 000000000..84ce6db25
 +		case 'r': hz = atoi(optarg); break;
 +		case 'v': verbose = 1; break;
 +		case 'P': pelco_only = 1; break;
++		case 'd': day_gpio = atoi(optarg); break;
++		case 'n': night_gpio = atoi(optarg); break;
++		case 'm': night_mode = !strcmp(optarg, "night"); break;
 +		default:
-+			fprintf(stderr, "usage: lensd [-p port] [-f fifo] [-s status] [-r hz] [-v] [-P]\n");
++			fprintf(stderr, "usage: lensd [-p port] [-f fifo] [-s status] [-r hz] [-v] [-P]"
++				" [-d day_gpio -n night_gpio] [-m day|night]\n");
 +			return 2;
 +		}
 +	}
@@ -973,7 +2648,7 @@ index 000000000..84ce6db25
 +	if (!pelco_only)
 +		handshake(fd);
 +	status_write();
-+	put(fd, query9a, sizeof(query9a));
++	send_query(fd);
 +	ffd = fifo_open(fifo);
 +
 +	f[10] = 0x01;	/* OEM AF + day/night frame tail (f[11]/f[13] set per frame) */
@@ -987,9 +2662,9 @@ index 000000000..84ce6db25
 +			f[7] = fva & 0xff;
 +			f[8] = fvb >> 8;
 +			f[9] = fvb & 0xff;
-+			if (gpio_val(IRCUT_DAY_GPIO) == 1)
++			if (gpio_val(day_gpio) == 1)
 +				night_mode = 0;
-+			else if (gpio_val(IRCUT_NIGHT_GPIO) == 1)
++			else if (gpio_val(night_gpio) == 1)
 +				night_mode = 1;
 +			f[11] = night_mode ? 0x01 : 0x00;	/* day/night -> IR-cut filter */
 +			f[13] = night_mode ? 0x32 : 0x00;
@@ -1001,20 +2676,21 @@ index 000000000..84ce6db25
 +				logm(LOG_DEBUG, "FVa %u FVb %u", fva, fvb);
 +		}
 +		rx_drain(fd);
-+		if (ffd >= 0)
++		if (ffd >= 0 && now_ms() >= fifo_after)	/* a stop's frames and settle first (stop_soon) */
 +			fifo_poll(ffd, fd);
-+		if (motion.verb && now_ms() >= motion.until) {
-+			logm(LOG_DEBUG, "%s timed out", motion.verb);
-+			move_stop(fd);
-+		}
++		motion_tick(fd);
 +		if (!pelco_only && now_ms() - last_check > 5000) {
 +			last_check = now_ms();
 +			if (!af_config_current())
 +				af_apply();
 +		}
 +		next += period;
-+		while (now_ms() < next)
++		while (now_ms() < next) {
++			if (motion.verb == zoom_to_verb)
++				rx_drain(fd);	/* zoom_to waits on a reply */
++			motion_tick(fd);
 +			usleep(2000);
++		}
 +		if (now_ms() - next > 1000)
 +			next = now_ms();
 +	}
@@ -1022,16 +2698,20 @@ index 000000000..84ce6db25
 +}
 diff --git a/package/thingino-lensd/files/onvif-ptz.json b/package/thingino-lensd/files/onvif-ptz.json
 new file mode 100644
-index 000000000..047c82a4e
+index 000000000..663c0ac50
 --- /dev/null
 +++ b/package/thingino-lensd/files/onvif-ptz.json
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,33 @@
 +{
 +  "ptz": {
-+    "min_step_x": -1,
-+    "max_step_x": 1,
-+    "min_step_y": -1,
-+    "max_step_y": 1,
++    "min_step_x": -180,
++    "max_step_x": 180,
++    "min_step_y": -90,
++    "max_step_y": 90,
++    "pan_min": -180,
++    "pan_max": 180,
++    "tilt_min": -90,
++    "tilt_max": 90,
 +    "min_step_z": 0,
 +    "max_step_z": 65535,
 +    "zoom": true,
@@ -1043,6 +2723,10 @@ index 000000000..047c82a4e
 +    "move_in": "/usr/sbin/lensctl zoom_in",
 +    "move_out": "/usr/sbin/lensctl zoom_out",
 +    "move_stop": "/usr/sbin/lensctl stop %s",
++    "jump_to_rel": "/usr/sbin/lensctl rel %f %f %f",
++    "jump_to_rel_speed": "/usr/sbin/lensctl rel %f %f %f %f",
++    "jump_to_abs": "/usr/sbin/lensctl abs %f %f %f",
++    "jump_to_abs_speed": "/usr/sbin/lensctl abs %f %f %f %f %f",
 +    "get_presets": "/usr/sbin/lensctl presets",
 +    "set_preset": "/usr/sbin/lensctl preset_set %d %s",
 +    "move_preset": "/usr/sbin/lensctl preset_goto %d",
@@ -1065,7 +2749,7 @@ index 000000000..62808bccc
 +exec /etc/init.d/S33lensd "$1"
 diff --git a/package/thingino-lensd/files/stock_af.h b/package/thingino-lensd/files/stock_af.h
 new file mode 100644
-index 000000000..817eb486f
+index 000000000..cebde9544
 --- /dev/null
 +++ b/package/thingino-lensd/files/stock_af.h
 @@ -0,0 +1,53 @@
@@ -1124,22 +2808,30 @@ index 000000000..817eb486f
 +};
 diff --git a/package/thingino-lensd/thingino-lensd.mk b/package/thingino-lensd/thingino-lensd.mk
 new file mode 100644
-index 000000000..5c8cdd8b1
+index 000000000..09babb0a5
 --- /dev/null
 +++ b/package/thingino-lensd/thingino-lensd.mk
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,85 @@
 +################################################################################
 +#
 +# thingino-lensd
 +#
 +################################################################################
 +
-+THINGINO_LENSD_VERSION = 1.1
++THINGINO_LENSD_VERSION = 1.2
 +THINGINO_LENSD_SITE_METHOD = local
 +THINGINO_LENSD_SITE = $(THINGINO_LENSD_PKGDIR)/files
++THINGINO_LENSD_LICENSE = MIT
 +
 +THINGINO_LENSD_DEPENDENCIES = sigmastar-lib
 +
++# off, af or pelco (Config.in). Every SigmaStar camera builds lensd; the mode
++# says whether it runs and whether the camera offers PTZ at all. The head
++# names its calibration file (heads/), which ONVIF RelativeMove needs.
++THINGINO_LENSD_MODE = $(call qstrip,$(BR2_PACKAGE_THINGINO_LENSD_MODE))
++THINGINO_LENSD_HEAD = $(call qstrip,$(BR2_PACKAGE_THINGINO_LENSD_HEAD))
++
++ifneq ($(THINGINO_LENSD_MODE),off)
 +ifeq ($(BR2_PACKAGE_THINGINO_WEBUI),y)
 +# The web UI PTZ plugin: installed after thingino-webui so that its plugin
 +# assembly (a target-finalize hook) finds lensd.webui.json.
@@ -1152,6 +2844,24 @@ index 000000000..5c8cdd8b1
 +		$(TARGET_DIR)/var/www/x/json-lensd.cgi
 +	$(INSTALL) -D -m 0644 $(@D)/lensd.webui.json \
 +		$(TARGET_DIR)/var/www/a/plugins/lensd.webui.json
++endef
++endif
++
++# /usr/bin/motors is what turns the ONVIF server's PTZ on (/bin -> usr/bin);
++# S33lensd points the server's ptz section at lensctl with onvif-ptz.json.
++# Every head's calibration ships; LENSD_HEAD picks this camera's.
++define THINGINO_LENSD_INSTALL_PTZ_CMDS
++	$(INSTALL) -D -m 0755 $(@D)/motors $(TARGET_DIR)/usr/bin/motors
++	$(INSTALL) -D -m 0644 $(@D)/onvif-ptz.json \
++		$(TARGET_DIR)/usr/share/lensd/onvif-ptz.json
++	$(INSTALL) -d -m 0755 $(TARGET_DIR)/usr/share/lensd/heads
++	$(INSTALL) -m 0644 -t $(TARGET_DIR)/usr/share/lensd/heads $(@D)/heads/*.conf
++	printf '%s\n' \
++		'# The head calibration (/usr/share/lensd/heads/<head>.conf), from' \
++		'# BR2_PACKAGE_THINGINO_LENSD_HEAD. Empty: no ONVIF RelativeMove.' \
++		'LENSD_HEAD="$(THINGINO_LENSD_HEAD)"' \
++		>>$(TARGET_DIR)/etc/default/lensd
++	$(THINGINO_LENSD_INSTALL_WWW_CMDS)
 +endef
 +endif
 +
@@ -1170,17 +2880,23 @@ index 000000000..5c8cdd8b1
 +		-Wl,--allow-shlib-undefined -ldl
 +endef
 +
-+# /usr/bin/motors is what turns the ONVIF server's PTZ on (/bin -> usr/bin);
-+# /etc/raptor.d/lensd has raptor stop lensd before rvd goes down.
++# /etc/raptor.d/lensd has raptor stop lensd before rvd goes down (S33lensd
++# does nothing in mode off). /etc/default/lensd carries the mode.
 +define THINGINO_LENSD_INSTALL_TARGET_CMDS
 +	$(INSTALL) -D -m 0755 $(@D)/lensd $(TARGET_DIR)/usr/sbin/lensd
 +	$(INSTALL) -D -m 0755 $(@D)/lensctl $(TARGET_DIR)/usr/sbin/lensctl
-+	$(INSTALL) -D -m 0755 $(@D)/motors $(TARGET_DIR)/usr/bin/motors
 +	$(INSTALL) -D -m 0755 $(@D)/S33lensd $(TARGET_DIR)/etc/init.d/S33lensd
 +	$(INSTALL) -D -m 0755 $(@D)/raptor-hook $(TARGET_DIR)/etc/raptor.d/lensd
-+	$(INSTALL) -D -m 0644 $(@D)/onvif-ptz.json \
-+		$(TARGET_DIR)/usr/share/lensd/onvif-ptz.json
-+	$(THINGINO_LENSD_INSTALL_WWW_CMDS)
++	$(INSTALL) -d -m 0755 $(TARGET_DIR)/etc/default
++	printf '%s\n' \
++		'# The lens/PTZ board, from BR2_PACKAGE_THINGINO_LENSD_MODE: off, af or pelco.' \
++		'# S33lensd starts lensd only when it is not off.' \
++		'LENSD_MODE="$(THINGINO_LENSD_MODE)"' \
++		>$(TARGET_DIR)/etc/default/lensd
++	$(THINGINO_LENSD_INSTALL_PTZ_CMDS)
 +endef
 +
 +$(eval $(generic-package))
+-- 
+2.43.0
+

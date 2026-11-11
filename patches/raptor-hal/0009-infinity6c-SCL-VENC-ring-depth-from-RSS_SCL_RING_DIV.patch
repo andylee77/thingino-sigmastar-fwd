@@ -1,7 +1,7 @@
-From c93e90d8fbf147054f95dbe77b1e33d54a08a72d Mon Sep 17 00:00:00 2001
+From 71e48388a092c6414ab736e00b8e6a4da3d595a4 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
 Date: Sun, 1 Nov 2026 13:13:08 -0500
-Subject: [PATCH] infinity6c: SCL->VENC ring depth from RSS_SCL_RING_DIV
+Subject: [PATCH 09/13] infinity6c: SCL->VENC ring depth from RSS_SCL_RING_DIV
 
 The main encoder reads its frame out of the SCL ring while the scaler is
 still writing it, and the ring held a quarter frame -- about 10 ms of slack

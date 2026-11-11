@@ -1,7 +1,7 @@
-From 39a48ca03d64755d376357b33ee7cdd371237700 Mon Sep 17 00:00:00 2001
+From 2b428bf2928ade4b4c2162a910eb49c489501611 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
 Date: Tue, 3 Nov 2026 18:16:05 -0500
-Subject: [PATCH] infinity6c: opt-in AE max-shutter cap from
+Subject: [PATCH 10/13] infinity6c: opt-in AE max-shutter cap from
  RSS_AE_MAX_SHUTTER_US
 
 The backend deliberately runs without a shutter ceiling (the long exposure

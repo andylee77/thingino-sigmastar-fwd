@@ -1,33 +1,32 @@
-From 52784a9ac800ea46acfced136b27532e9f4b782f Mon Sep 17 00:00:00 2001
+From 8f791ce2baefa4c356fe4efb1311b0be3e56335c Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 4 Nov 2026 08:19:16 -0500
-Subject: [PATCH 18/21] cameras: UVision MC-A85 / Anpviz IPC-D3B83B-S
+Date: Wed, 11 Nov 2026 17:09:54 -0500
+Subject: [PATCH 18/22] cameras: UVision MC-A85 / Anpviz IPC-D3B83B-S
  (yma85_ssc378_gc8613, 4K)
 
+SSC378DE + GC8613, 2560x1440 + 1280x720, scaled from the sensor's full
+3840x2160 readout, which leaves far more of the video-memory heap free than a
+4K main (3840x2160 stays a choice in the web UI): its own board DTS, the
+GC8613 built from source, FlickerEx anti-flicker, luma day/night with the IR
+ladder, the mic. It boots under the stock OEM U-Boot and flash layout, with the U-Boot
+env kept in a file. The RAPTOR_* keys are in raptor.config. The OEM sensor
+tuning (gc8613.bin) is a vendor file and is not included.
 ---
  ...nity6c-add-the-UVision-MC-A85-module.patch |  93 +++++++
  .../cameras/yma85_ssc378_gc8613/.gitignore    |   3 +
- .../overlay/etc/fw_env.config                 |  12 +
- .../overlay/etc/fw_env.dat                    | Bin 0 -> 65536 bytes
- .../overlay/etc/init.d/S30light               |  19 ++
- .../yma85_ssc378_gc8613/overlay/etc/timezone  |   1 +
- .../overlay/usr/sbin/light                    | 151 +++++++++++
+ .../cameras/yma85_ssc378_gc8613/raptor.config |  39 +++
  .../yma85_ssc378_gc8613.kernel.config         |  35 +++
- .../yma85_ssc378_gc8613_defconfig             | 251 ++++++++++++++++++
- 9 files changed, 565 insertions(+)
+ .../yma85_ssc378_gc8613_defconfig             | 247 ++++++++++++++++++
+ 5 files changed, 417 insertions(+)
  create mode 100644 board/sigmastar/infinity6c/patches/linux/0001-ARM-dts-infinity6c-add-the-UVision-MC-A85-module.patch
  create mode 100644 configs/cameras/yma85_ssc378_gc8613/.gitignore
- create mode 100755 configs/cameras/yma85_ssc378_gc8613/overlay/etc/fw_env.config
- create mode 100755 configs/cameras/yma85_ssc378_gc8613/overlay/etc/fw_env.dat
- create mode 100755 configs/cameras/yma85_ssc378_gc8613/overlay/etc/init.d/S30light
- create mode 100644 configs/cameras/yma85_ssc378_gc8613/overlay/etc/timezone
- create mode 100755 configs/cameras/yma85_ssc378_gc8613/overlay/usr/sbin/light
+ create mode 100644 configs/cameras/yma85_ssc378_gc8613/raptor.config
  create mode 100644 configs/cameras/yma85_ssc378_gc8613/yma85_ssc378_gc8613.kernel.config
  create mode 100644 configs/cameras/yma85_ssc378_gc8613/yma85_ssc378_gc8613_defconfig
 
 diff --git a/board/sigmastar/infinity6c/patches/linux/0001-ARM-dts-infinity6c-add-the-UVision-MC-A85-module.patch b/board/sigmastar/infinity6c/patches/linux/0001-ARM-dts-infinity6c-add-the-UVision-MC-A85-module.patch
 new file mode 100644
-index 000000000..53b149494
+index 000000000..951d98d47
 --- /dev/null
 +++ b/board/sigmastar/infinity6c/patches/linux/0001-ARM-dts-infinity6c-add-the-UVision-MC-A85-module.patch
 @@ -0,0 +1,93 @@
@@ -133,231 +132,54 @@ index 000000000..f0ad88300
 +# OEM GC8613 tuning (proprietary) -- copy from the OEM rootfs /config/iqfile/gc4023_day.bin;
 +# never commit it.
 +gc8613.bin
-diff --git a/configs/cameras/yma85_ssc378_gc8613/overlay/etc/fw_env.config b/configs/cameras/yma85_ssc378_gc8613/overlay/etc/fw_env.config
-new file mode 100755
-index 000000000..4d2e2e30b
---- /dev/null
-+++ b/configs/cameras/yma85_ssc378_gc8613/overlay/etc/fw_env.config
-@@ -0,0 +1,12 @@
-+# U-Boot environment location on the Anpviz / MC-A85 (OEM LX510 U-Boot).
-+#
-+# Deliberately a FILE, not flash. This OEM U-Boot keeps its saveenv copy at
-+# flash 0x30000 -- the first block of the kernel partition (mtd1) -- and
-+# thingino's default "/dev/mtd1 0x0" pointed straight at it, so every
-+# fw_setenv (S97sysupgrade's "mark sysupgrade complete", the WebUI) erased the
-+# kernel's first 64 KB and the next boot failed with "Wrong Image Format".
-+# U-Boot boots from its built-in bootargs, so nothing needs to reach its env
-+# from Linux; fw_setenv/fw_printenv work against this scratch file instead.
-+#
-+# <device> <offset> <env size>
-+/etc/fw_env.dat 0x0 0x10000
-diff --git a/configs/cameras/yma85_ssc378_gc8613/overlay/etc/fw_env.dat b/configs/cameras/yma85_ssc378_gc8613/overlay/etc/fw_env.dat
-new file mode 100755
-index 0000000000000000000000000000000000000000..c97c12f9b0a24bfc19c74a2b265a97c924137775
-GIT binary patch
-literal 65536
-zcmeIufdBvi0Dz$VsTV1P3IhfV7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd
-z0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd0RsjM7%*VKfB^#r3>YwA
-zz<>b*1`HT5V8DO@0|pEjFkrxd0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEj
-zFkrxd0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd0RsjM7%*VKfB^#r
-z3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@
-u0|pEjFkrxd0RsjM7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFi-;k4*&rG
-
-literal 0
-HcmV?d00001
-
-diff --git a/configs/cameras/yma85_ssc378_gc8613/overlay/etc/init.d/S30light b/configs/cameras/yma85_ssc378_gc8613/overlay/etc/init.d/S30light
-new file mode 100755
-index 000000000..76e0189d8
---- /dev/null
-+++ b/configs/cameras/yma85_ssc378_gc8613/overlay/etc/init.d/S30light
-@@ -0,0 +1,19 @@
-+#!/bin/sh
-+# S30light -- set up the MC-A85 LED PWM channels and leave both banks off.
-+# Runs before S31raptor so ric's irled_cmd hook finds the channels ready.
-+
-+case "$1" in
-+	start | restart | reload)
-+		printf "Starting light: "
-+		if /usr/sbin/light init; then echo "OK"; else echo "FAIL"; fi
-+		;;
-+	stop)
-+		/usr/sbin/light ir off 2>/dev/null
-+		/usr/sbin/light white off 2>/dev/null
-+		;;
-+	*)
-+		echo "Usage: $0 {start|stop|restart}"
-+		exit 1
-+		;;
-+esac
-+exit 0
-diff --git a/configs/cameras/yma85_ssc378_gc8613/overlay/etc/timezone b/configs/cameras/yma85_ssc378_gc8613/overlay/etc/timezone
+diff --git a/configs/cameras/yma85_ssc378_gc8613/raptor.config b/configs/cameras/yma85_ssc378_gc8613/raptor.config
 new file mode 100644
-index 000000000..3eeea8cc9
+index 000000000..0b0f6a0e3
 --- /dev/null
-+++ b/configs/cameras/yma85_ssc378_gc8613/overlay/etc/timezone
-@@ -0,0 +1 @@
-+America/New York
-diff --git a/configs/cameras/yma85_ssc378_gc8613/overlay/usr/sbin/light b/configs/cameras/yma85_ssc378_gc8613/overlay/usr/sbin/light
-new file mode 100755
-index 000000000..3c63c22e6
---- /dev/null
-+++ b/configs/cameras/yma85_ssc378_gc8613/overlay/usr/sbin/light
-@@ -0,0 +1,151 @@
-+#!/bin/sh
-+# light -- IR and white LED control for the Anpviz / UVision MC-A85 (SSC378DE)
-+#
-+#   light <ir|ir850|white|flood> <on|off|toggle|read|1|0|~>
-+#   light <ir|ir850|white|flood> on <0-100>
-+#   light <ir|ir850|white|flood> brightness [0-100]
-+#   light init | status
-+#
-+# Same command line as thingino's GPIO light script (the web UI's light
-+# buttons call "light <type> <0|1|~>"), but both banks here are PWM-dimmed.
-+# The board wires them to the SoC's two PWM pads, as the OEM firmware does:
-+#
-+#   PAD_PWM1 -> IR (850 nm) bank, driven by PWM1
-+#   PAD_PWM0 -> white bank, driven by PWM9 via PINMUX_FOR_PWM9_MODE_2
-+#
-+# The board device tree (infinity6c-ssc378de-mca85) sets that padmux at boot.
-+# PWM9 rather than the OEM's PWM0 so the white bank cannot pick up mi.ko's
-+# dual-sensor frame-sync wave: mi.ko drives that on PWM0, which the board DT
-+# routes to no pad, so it strobes nothing (on the reference board PAD_PWM0
-+# carried PWM0, which is what strobed the LEDs).
-+#
-+# Brightness persists in /etc/light.conf. "on <percent>" lights the bank at
-+# that level once without saving it: ric's IR level ladder steps the IR bank
-+# that way, and must not rewrite flash at every step. Off is duty 0 with the
-+# channel left enabled, so switching does not re-export.
-+
-+CONF=/etc/light.conf
-+PWM=/sys/class/pwm/pwmchip0
-+PERIOD=50000 # ns, 20 kHz -- the OEM's period for this board family
-+
-+IR_CH=1
-+WHITE_CH=9
-+# The level for a plain "on" (web UI buttons, manual use). ric's automatic
-+# night picks its own level from [ircut] ir_levels.
-+IR_BRIGHTNESS=40
-+WHITE_BRIGHTNESS=100
-+[ -f "$CONF" ] && . "$CONF"
-+
-+die() {
-+	echo "light: $*" >&2
-+	exit 1
-+}
-+
-+usage() {
-+	echo "Usage: light <ir|ir850|white|flood> <on|off|toggle|read|brightness [0-100]>
-+       light init | status" >&2
-+	exit 1
-+}
-+
-+save_conf() {
-+	cat >"$CONF" <<EOF
-+IR_BRIGHTNESS=$IR_BRIGHTNESS
-+WHITE_BRIGHTNESS=$WHITE_BRIGHTNESS
-+EOF
-+}
-+
-+ch_setup() {
-+	local ch=$1
-+	[ -d $PWM/pwm$ch ] || echo "$ch" >$PWM/export || return 1
-+	echo 0 >$PWM/pwm$ch/duty_cycle 2>/dev/null
-+	echo $PERIOD >$PWM/pwm$ch/period
-+	echo 0 >$PWM/pwm$ch/duty_cycle
-+	echo 1 >$PWM/pwm$ch/enable
-+}
-+
-+init() {
-+	ch_setup $IR_CH || die "cannot set up pwm$IR_CH"
-+	ch_setup $WHITE_CH || die "cannot set up pwm$WHITE_CH"
-+}
-+
-+ready() {
-+	[ -f $PWM/pwm$IR_CH/duty_cycle ] && [ -f $PWM/pwm$WHITE_CH/duty_cycle ] || init
-+}
-+
-+duty_of() { cat $PWM/pwm$1/duty_cycle 2>/dev/null || echo 0; }
-+
-+set_level() { # set_level <ch> <percent>
-+	echo $((PERIOD * $2 / 100)) >$PWM/pwm$1/duty_cycle
-+}
-+
-+state() { [ "$(duty_of "$1")" -gt 0 ] && echo 1 || echo 0; }
-+
-+case "$1" in
-+	init)
-+		init
-+		exit 0
-+		;;
-+	status)
-+		ready
-+		echo "{\"ir\":$(state $IR_CH),\"ir_brightness\":$IR_BRIGHTNESS,\"white\":$(state $WHITE_CH),\"white_brightness\":$WHITE_BRIGHTNESS}"
-+		exit 0
-+		;;
-+	ir | ir850)
-+		CH=$IR_CH
-+		VAR=IR_BRIGHTNESS
-+		;;
-+	white | flood)
-+		CH=$WHITE_CH
-+		VAR=WHITE_BRIGHTNESS
-+		;;
-+	ir940)
-+		die "this board has no 940 nm bank"
-+		;;
-+	*)
-+		usage
-+		;;
-+esac
-+
-+ready
-+eval "LEVEL=\$$VAR"
-+
-+case "${2:-read}" in
-+	1 | on)
-+		if [ -n "$3" ]; then
-+			case "$3" in
-+				*[!0-9]*) die "level must be 0-100" ;;
-+			esac
-+			[ "$3" -le 100 ] || die "level must be 0-100"
-+			set_level $CH "$3"
-+		else
-+			set_level $CH "$LEVEL"
-+		fi
-+		;;
-+	0 | off)
-+		set_level $CH 0
-+		;;
-+	~ | toggle)
-+		if [ "$(state $CH)" = 1 ]; then set_level $CH 0; else set_level $CH "$LEVEL"; fi
-+		;;
-+	\? | read)
-+		echo -n "$(state $CH)"
-+		;;
-+	brightness)
-+		if [ -z "$3" ]; then
-+			echo "$LEVEL"
-+			exit 0
-+		fi
-+		case "$3" in
-+			*[!0-9]* | "") die "brightness must be 0-100" ;;
-+		esac
-+		[ "$3" -le 100 ] || die "brightness must be 0-100"
-+		eval "$VAR=$3"
-+		save_conf
-+		# a bank that is on follows the new level at once
-+		[ "$(state $CH)" = 1 ] && set_level $CH "$3"
-+		;;
-+	*)
-+		usage
-+		;;
-+esac
-+exit 0
++++ b/configs/cameras/yma85_ssc378_gc8613/raptor.config
+@@ -0,0 +1,39 @@
++RAPTOR_SENSOR_ANTIFLICKER="2"
++RAPTOR_SENSOR_NAME="gc8613"
++RAPTOR_SENSOR_I2C_ADDR="0x31"
++RAPTOR_IRCUT_GPIO_IRCUT="80"
++RAPTOR_IRCUT_GPIO_IRCUT2="81"
++RAPTOR_IRCUT_PULSE_MS="250"
++RAPTOR_IRCUT_TRIGGER="luma"
++RAPTOR_IRCUT_NIGHT_GAIN="40000"
++RAPTOR_IRCUT_IR_LEVELS="10,20,40,70,100"
++RAPTOR_IRCUT_IR_STEP_GAIN="16000"
++RAPTOR_IRCUT_IRLED_CMD="/usr/sbin/light ir"
++RAPTOR_STREAM0_WIDTH="2560"
++RAPTOR_STREAM0_HEIGHT="1440"
++RAPTOR_STREAM0_JPEG_FALSE=y
++RAPTOR_STREAM1_ENABLED_TRUE=y
++RAPTOR_STREAM1_WIDTH="1280"
++RAPTOR_STREAM1_HEIGHT="720"
++RAPTOR_RING_REFMODE_FALSE=y
++RAPTOR_OSD_ENABLED_TRUE=y
++RAPTOR_OSD_TIMESTAMP_VISIBLE_TRUE=y
++RAPTOR_OSD_UPTIME_VISIBLE_FALSE=y
++RAPTOR_OSD_CAMERA_VISIBLE_FALSE=y
++RAPTOR_OSD_LOGO_VISIBLE_FALSE=y
++RAPTOR_RTSP_MAX_CLIENTS="8"
++RAPTOR_HTTP_PORT="8443"
++RAPTOR_HTTP_HTTPS_TRUE=y
++RAPTOR_AUDIO_DEVICE="0"
++RAPTOR_SENSOR_FPS="25"
++RAPTOR_STREAM0_FPS="25"
++RAPTOR_STREAM0_GOP="25"
++RAPTOR_STREAM0_RC_MODE="cbr"
++RAPTOR_STREAM0_BITRATE="3000000"
++RAPTOR_STREAM0_MAX_BITRATE="4000000"
++RAPTOR_STREAM1_FPS="25"
++RAPTOR_STREAM1_GOP="25"
++RAPTOR_STREAM1_RC_MODE="vbr"
++RAPTOR_STREAM1_BITRATE="1500000"
++RAPTOR_STREAM1_MAX_BITRATE="2000000"
++RAPTOR_AUDIO_ENABLED_TRUE=y
 diff --git a/configs/cameras/yma85_ssc378_gc8613/yma85_ssc378_gc8613.kernel.config b/configs/cameras/yma85_ssc378_gc8613/yma85_ssc378_gc8613.kernel.config
 new file mode 100644
-index 000000000..bfbfcdb3f
+index 000000000..b8e86c8d2
 --- /dev/null
 +++ b/configs/cameras/yma85_ssc378_gc8613/yma85_ssc378_gc8613.kernel.config
 @@ -0,0 +1,35 @@
@@ -369,7 +191,7 @@ index 000000000..bfbfcdb3f
 +# board/sigmastar/infinity6c/patches/linux/0001-ARM-dts-infinity6c-add-the-UVision-MC-A85-module.patch.
 +CONFIG_SS_DTB_NAME="infinity6c-ssc378de-mca85"
 +
-+# Boot under the OEM U-Boot (the .anjoy888 install keeps it) without touching
++# Boot under the OEM U-Boot (the ANJOY888 .bin install keeps it) without touching
 +# its environment. Its bootcmd rebuilds bootargs from the env on every boot:
 +#
 +#   root=/dev/mtdblock2 rootfstype=squashfs ro init=/linuxrc LX_MEM=8000000
@@ -398,16 +220,16 @@ index 000000000..bfbfcdb3f
 +# CONFIG_CMDLINE_EXTEND is not set
 diff --git a/configs/cameras/yma85_ssc378_gc8613/yma85_ssc378_gc8613_defconfig b/configs/cameras/yma85_ssc378_gc8613/yma85_ssc378_gc8613_defconfig
 new file mode 100644
-index 000000000..c5690b7cb
+index 000000000..8b4f9ebc4
 --- /dev/null
 +++ b/configs/cameras/yma85_ssc378_gc8613/yma85_ssc378_gc8613_defconfig
-@@ -0,0 +1,251 @@
+@@ -0,0 +1,247 @@
 +# NAME: Anpviz IPC-D3B83B-S (YMA85_IRCN) — SSC378DE, Infinity6C, GC8613 (8MP)
 +#
 +# STATUS (2026-10-18): self-contained. The image carries the GC8613 driver, the
 +# board device tree and the OEM-U-Boot boot arguments, and streams 4K H.264 with
 +# correct colour, 60 Hz flicker lock, day/night, IR-cut and both LED banks.
-+# Installed as an .anjoy888 through the OEM web UI, which keeps the OEM U-Boot.
++# Installed as an ANJOY888 .bin through the OEM web UI, which keeps the OEM U-Boot.
 +#
 +# A third Infinity6C target, cloned from johnchia's noname_ssc377qe_imx335
 +# (thingino-firmware@sigmastar-6b0-platform) and our mcl12d2_ssc377d_imx335.
@@ -447,10 +269,11 @@ index 000000000..c5690b7cb
 +# ---- SENSOR ----
 +# GC8613 has no prebuilt driver in any drop, and the vendor's own module oopses
 +# 1230's mi.ko. Our from-source driver is added to sigmastar-sdk's sensor-src by
-+# package/sigmastar-sdk/0001-..., which also restores the sensor headers that
-+# match 1230's mi.ko (the pre-fe5d953 set; the 0907 layout has no spi_bus, so
-+# mi.ko dereferenced an AE field). BR2_SIGMASTAR_SENSOR_SOURCE builds the
-+# sensor-src drivers against them instead of installing the prebuilts;
++# package/sigmastar-sdk/0001-..., and the sensor headers that match 1230's mi.ko
++# (the pre-fe5d953 set; the 0907 layout has no spi_bus, so mi.ko dereferenced an
++# AE field) come from sigmastar-sensor-headers. BR2_SIGMASTAR_SENSOR_SOURCE builds the
++# sensor-src drivers against them (every board sets it, so every image carries
++# the same driver set; the drop's prebuilt imx335/imx307 stay as they are);
 +# load_sigmastar loads gc8613 with chmap=1 lane_num=4 (4-lane MIPI).
 +# FRAG: soc-sigmastar core-sigmastar
 +
@@ -501,8 +324,7 @@ index 000000000..c5690b7cb
 +# $(SOC_FAMILY)_defconfig, passes the model as -DPRODUCT_SOC) and OpenIPC's tree
 +# carries infinity6c_defconfig + ipl/infinity6c + the GCIS-at-36k NOR branch, so
 +# ssc378de needs no package change. NB: producing BOOT.bin is not flashing it —
-+# on this board mtd0 is the one place a bad write cannot be undone in software
-+# (see boot-contract-ssc377d.md).
++# on this board mtd0 is the one place a bad write cannot be undone in software.
 +BR2_PACKAGE_SIGMASTAR_UBOOT=y
 +
 +BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_THINGINO_PATH)/board/sigmastar/post-image.sh"
@@ -555,7 +377,6 @@ index 000000000..c5690b7cb
 +# MI_ISP_AE_SetFlickerEx manual lock on the first frame, after the tuning loads:
 +# exposure snaps to n x 1/120 s. Measured rolling band ripple 3.8 DN unlocked ->
 +# 0.03 DN locked at a forced 12 ms shutter.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_SENSOR_ANTIFLICKER="2"
 +
 +# ---- SENSOR IDENTITY FOR RVD ----
 +# Upstream rvd reads the sensor's name and I2C address from /proc/jz/sensor, an
@@ -563,8 +384,6 @@ index 000000000..c5690b7cb
 +# come from [sensor]. The address is 7-bit, raptor.conf's convention (the
 +# driver's 8-bit slave is 0x62). The Infinity6C backend does not use it; rvd
 +# only refuses 0.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_SENSOR_NAME="gc8613"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_SENSOR_I2C_ADDR="0x31"
 +
 +# ---- DAY/NIGHT ----
 +# IR-cut: two-pin H-bridge coil, from the OEM kernel's built-in "IRLED driver
@@ -576,9 +395,6 @@ index 000000000..c5690b7cb
 +# order. ric's default pulse_ms (10) is too short for this coil. Also in the
 +# OEM table: gpio 23 PAD_PM_IRIN "irdetect" (input, IR-board status) and
 +# gpio 27 PAD_PM_GPIO0 "wifi_pwr".
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_GPIO_IRCUT="80"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_GPIO_IRCUT2="81"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_PULSE_MS="250"
 +
 +# Auto day/night: ric's luma trigger, which judges night->day against a night
 +# baseline taken with the IR lit, plus an IR level ladder. The legacy gain
@@ -588,12 +404,8 @@ index 000000000..c5690b7cb
 +# and steps up while the IR-lit gain stays above 16000 (on the bench: 29460 at
 +# 5% down to 3003 at 100%); day returns when gain drops under 25% of the settled
 +# night baseline, or when an IR-off probe finds gain at or under 20000 (half of
-+# night_gain). Needs raptor patches 0003-0004 and the raptor-hal fork's 0..255
-+# ae_luma. See docs/contrib/thingino/DAYNIGHT-TUNING.md.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_TRIGGER="luma"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_NIGHT_GAIN="40000"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IR_LEVELS="10,20,40,70,100"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IR_STEP_GAIN="16000"
++# night_gain). Needs raptor patches 0103-0104 and the raptor-hal fork's 0..255
++# ae_luma, tuned on the bench.
 +
 +# ---- LIGHTS ----
 +# IR (850 nm) and white banks are PWM-dimmed on the SoC's two PWM pads, as in
@@ -606,50 +418,59 @@ index 000000000..c5690b7cb
 +# The board device tree muxes both pads that way; PWM0 is routed to no pad, so
 +# mi.ko's frame-sync wave on PWM0 strobes nothing and the sync output is left at
 +# its default (the reference board gave these pads to I2C0 and carried PWM0 on
-+# PAD_PWM0, which is what strobed). overlay/etc/init.d/
-+# S30light sets up the two PWM channels at boot via overlay/usr/sbin/light,
-+# which also provides thingino's "light <type> on|off|toggle|read" CLI (the
-+# WebUI light buttons) plus "light <type> brightness 0-100". ric switches the
-+# IR bank with day/night through our irled_cmd hook
-+# (package/thingino-raptor/0002-ric-irled_cmd-hook-*.patch).
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_IRCUT_IRLED_CMD="/usr/sbin/light ir"
++# PAD_PWM0, which is what strobed). sigmastar-light's S30light sets up the two
++# channels at boot, and its /usr/sbin/light is thingino's "light <type>
++# on|off|toggle|read" CLI (the WebUI light buttons) plus "light <type>
++# brightness 0-100"; both read the channels from /etc/default/light. ric
++# switches the IR bank with day/night through our irled_cmd hook
++# (package/thingino-raptor/0102-ric-irled_cmd-hook-*.patch).
++BR2_PACKAGE_SIGMASTAR_LIGHT_IR_PWM=1
++BR2_PACKAGE_SIGMASTAR_LIGHT_WHITE_PWM=9
 +
-+# ---- STREAMS / OSD / RING: fit full-4K main in the 70 MB MMA (2026-10-18) ----
-+# This module has only 128 MB DDR (~54 MB Linux + 70 MB MMA). raptor makes one
-+# JPEG encoder per video stream at that stream's resolution, so a 4K main would
-+# add a SECOND full-4K pipeline (4K H.264 + 4K JPEG) the 70 MB cannot hold -- the
-+# OEM fits 4K by not running a 4K JPEG. So: 4K H.264 main (3840x2160 stated,
-+# because the backend's default was not sensor-native here), JPEG OFF on the
-+# main, MJPEG/snapshot off the 720p sub. refmode (zero-copy ring) over-allocates here -- copy mode. OSD =
-+# timestamp (date+clock) only; each MI_RGN element costs MMA. Verified streaming
-+# with ~12 MB MMA free. See docs/contrib/thingino/RAPTOR-PACKAGE-TOPOLOGY.md.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM0_WIDTH="3840"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM0_HEIGHT="2160"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM0_JPEG_FALSE=y
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM1_ENABLED_TRUE=y
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM1_WIDTH="1280"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_STREAM1_HEIGHT="720"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_RING_REFMODE_FALSE=y
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_OSD_ENABLED_TRUE=y
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_OSD_TIMESTAMP_VISIBLE_TRUE=y
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_OSD_UPTIME_VISIBLE_FALSE=y
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_OSD_CAMERA_VISIBLE_FALSE=y
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_OSD_LOGO_VISIBLE_FALSE=y
++# ---- LENS / PTZ ----
++# Fixed lens, no lens board: lensd is built but does not run.
++BR2_PACKAGE_THINGINO_LENSD_MODE_OFF=y
++
++# ---- STREAMS / OSD / RING: the main at 2560x1440 in the 70 MB MMA (2026-11-10) ----
++# This module has only 128 MB DDR (~54 MB Linux + 70 MB MMA). The sensor reads
++# out 3840x2160 and the SCL scales the whole frame to each stream (no crop).
++# Main 2560x1440 (stated: the backend's default was not sensor-native here):
++# the 4K main left ~9 MB of MMA free, ~4 MB with the on-camera IPU detector
++# (ipud) running; at 1440p the encoder's buffers shrink and ~29 MB is free
++# (~24 MB with ipud), measured 2026-11-10. 3840x2160 stays a WebUI choice.
++# raptor makes one JPEG encoder per video stream at that stream's resolution:
++# JPEG OFF on the main, MJPEG/snapshot off the 720p sub (a 4K JPEG starved the
++# unit on 2026-10-24; one at 1440p is untried). refmode (zero-copy ring)
++# over-allocates here -- copy mode. OSD = timestamp (date+clock) only; each
++# MI_RGN element costs MMA.
 +
 +# ---- RTSP ----
 +# Four clients is not enough: Frigate holds two (main + sub), an NVR two
 +# more, and a live view or snapshot client then gets refused (as on the
 +# YMF46D).
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_RTSP_MAX_CLIENTS="8"
 +
 +# ---- HTTP (rhd) ----
 +# rhd serves the snapshots and MJPEG the web UI previews. HTTPS on 8443, as on
 +# the unit today: its [http] credentials travel as Basic auth.
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_HTTP_PORT="8443"
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_HTTP_HTTPS_TRUE=y
 +
 +# ---- AUDIO ----
 +# One AI device on this chip (the analog mic); rad's default of device 1 does
 +# not exist, so without this the mic stays off (the same fix the B8A63 needed).
-+# The MC-A85 has no microSD slot, so no MMC config here (unlike the JL12D2/B8A63).
-+BR2_PACKAGE_THINGINO_RAPTOR_CONF_AUDIO_DEVICE="0"
++# The MC-A85 has no microSD slot, so no MMC config here (unlike the JL12D2/B8A63);
++# the automount handler every board ships stays idle.
++
++# === profile contract completion: WebUI stream-choice menus + SCL ring ===
++BR2_PACKAGE_THINGINO_RAPTOR_SCL_RING_DIV="2"
++BR2_PACKAGE_THINGINO_RAPTOR_UI_STREAM0_RESOLUTIONS="3840x2160 2560x1440 1920x1080"
++BR2_PACKAGE_THINGINO_RAPTOR_UI_STREAM1_RESOLUTIONS="1280x720 960x540 640x360"
++BR2_PACKAGE_THINGINO_RAPTOR_UI_FPS="5 10 15 20 25"
++BR2_PACKAGE_THINGINO_RAPTOR_UI_STREAM0_BITRATES="2000 3000 4000 6000 8000 10000"
++BR2_PACKAGE_THINGINO_RAPTOR_UI_STREAM1_BITRATES="256 512 768 1000 1500 2000 3000"
++BR2_PACKAGE_THINGINO_RAPTOR_UI_CODECS="h264 h265"
++BR2_PACKAGE_THINGINO_RAPTOR_UI_PROFILES="baseline main high"
++BR2_PACKAGE_THINGINO_RAPTOR_UI_RC_MODES="cbr vbr capped_vbr"
++BR2_PACKAGE_THINGINO_RAPTOR_UI_GOP_SECONDS="1 2 4"
++BR2_PACKAGE_THINGINO_RAPTOR_UI_JPEG_QUALITIES="50 60 75 85 95"
+-- 
+2.43.0
+

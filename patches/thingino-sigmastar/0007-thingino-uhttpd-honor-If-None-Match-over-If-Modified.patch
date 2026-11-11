@@ -1,16 +1,23 @@
-From 5b2e0951b9a24ec3947cf1c4a09bd3df0b56c3b3 Mon Sep 17 00:00:00 2001
+From f0f4e5f19508561502475f4a7fe07c583d83f3ea Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 4 Nov 2026 08:19:15 -0500
-Subject: [PATCH 07/21] thingino-uhttpd: honor If-None-Match over
+Date: Wed, 11 Nov 2026 17:09:54 -0500
+Subject: [PATCH 07/22] thingino-uhttpd: honor If-None-Match over
  If-Modified-Since; cache policy
 
+A uhttpd patch: If-None-Match decides when present (RFC 9110 13.2.2). uhttpd
+tested the date first, so a browser that last saw another device at the same
+address kept that device's files.
+
+A cache policy (uhttpd -H /etc/uhttpd-cache.json): runtime-config.js and the
+/x/ CGIs are no-store, the versioned /a/ scripts and styles are cached
+far-future, and the rest is revalidated.
 ---
  ...ne-match-overrides-if-modified-since.patch | 24 +++++++++++++++++++
  package/thingino-uhttpd/files/S60uhttpd       |  8 +++++++
  package/thingino-uhttpd/files/uhttpd          |  3 +++
- .../thingino-uhttpd/files/uhttpd-cache.json   | 12 ++++++++++
+ .../thingino-uhttpd/files/uhttpd-cache.json   | 19 +++++++++++++++
  package/thingino-uhttpd/thingino-uhttpd.mk    |  3 +++
- 5 files changed, 50 insertions(+)
+ 5 files changed, 57 insertions(+)
  create mode 100644 package/thingino-uhttpd/0007-file-if-none-match-overrides-if-modified-since.patch
  create mode 100644 package/thingino-uhttpd/files/uhttpd-cache.json
 
@@ -86,20 +93,27 @@ index 29edccb0d..86978a8bf 100644
  EXTRA_ARGS=""
 diff --git a/package/thingino-uhttpd/files/uhttpd-cache.json b/package/thingino-uhttpd/files/uhttpd-cache.json
 new file mode 100644
-index 000000000..5e7a6de4f
+index 000000000..ddd948470
 --- /dev/null
 +++ b/package/thingino-uhttpd/files/uhttpd-cache.json
-@@ -0,0 +1,12 @@
+@@ -0,0 +1,19 @@
 +{
 +	"request": [
-+		[ "if", [ "regex", "REQUEST_URI", "^/a/runtime-config\\.js" ], [
-+			[ "no-cache" ],
-+			[ "add-header", "Cache-Control", "no-store" ]
-+		], [ "if", [ "regex", "REQUEST_URI", "^/x/" ],
-+			[ "add-header", "Cache-Control", "no-store" ],
-+			[ "if", [ "not", [ "regex", "REQUEST_URI", "^/onvif/" ] ],
-+				[ "add-header", "Cache-Control", "no-cache" ] ]
-+		] ]
++		[ "if", [ "regex", "REQUEST_URI", "^/a/runtime-config\\.js" ],
++			[
++				[ "no-cache" ],
++				[ "add-header", "Cache-Control", "no-store" ]
++			],
++			[ "if", [ "regex", "REQUEST_URI", "^/a/.*\\.(js|css)" ],
++				[ "add-header", "Cache-Control", "public, max-age=31536000, immutable" ],
++				[ "if", [ "regex", "REQUEST_URI", "^/x/" ],
++					[ "add-header", "Cache-Control", "no-store" ],
++					[ "if", [ "not", [ "regex", "REQUEST_URI", "^/onvif/" ] ],
++						[ "add-header", "Cache-Control", "no-cache" ]
++					]
++				]
++			]
++		]
 +	]
 +}
 diff --git a/package/thingino-uhttpd/thingino-uhttpd.mk b/package/thingino-uhttpd/thingino-uhttpd.mk
@@ -116,3 +130,6 @@ index 6faf10809..8f1460168 100644
  endef
  
  THINGINO_UHTTPD_POST_INSTALL_TARGET_HOOKS += THINGINO_UHTTPD_INSTALL_CONFIG
+-- 
+2.43.0
+

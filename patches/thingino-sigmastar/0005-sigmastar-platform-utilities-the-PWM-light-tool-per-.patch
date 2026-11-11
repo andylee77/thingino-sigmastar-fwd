@@ -1,20 +1,36 @@
-From 2de2f494bd5962c851b69ff7e8e78251f625f4f6 Mon Sep 17 00:00:00 2001
+From 111fe0513b20560ad059b456827f308bae540519 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 4 Nov 2026 08:19:15 -0500
-Subject: [PATCH 05/21] sigmastar: thingino-system platform utilities and
+Date: Wed, 11 Nov 2026 17:09:54 -0500
+Subject: [PATCH 05/22] sigmastar: platform utilities, the PWM light tool,
  per-vendor lib-serial-mac
 
+The SigmaStar soc, sensor, usb-role and S03mac utilities under
+files/sigmastar/, in upstream's per-vendor layout. lib-serial-mac becomes
+per-vendor too: the global copy reads Ingenic serial registers, so on other
+vendors the hostname suffix came out empty.
+
+sigmastar-light is the light command for boards whose LED banks are
+PWM-dimmed. Each board's defconfig names the channels, written to
+/etc/default/light.
 ---
+ package/sigmastar-light/Config.in             |  54 ++++++
+ package/sigmastar-light/files/S30light        |  20 +++
+ package/sigmastar-light/files/light           | 162 ++++++++++++++++++
+ package/sigmastar-light/sigmastar-light.mk    |  40 +++++
  package/thingino-system/Config.in             |  13 ++
  package/thingino-system/Config.sigmastar.in   |  15 ++
  .../files/ingenic}/lib-serial-mac             |   0
- .../thingino-system/files/sigmastar/S03mac    |  76 ++++++++++
- .../files/sigmastar/lib-serial-mac            |  38 +++++
- .../thingino-system/files/sigmastar/sensor    |  77 ++++++++++
- package/thingino-system/files/sigmastar/soc   | 136 ++++++++++++++++++
- .../thingino-system/files/sigmastar/usb-role  |  32 +++++
- package/thingino-system/thingino-system.mk    |  18 +++
- 9 files changed, 405 insertions(+)
+ .../thingino-system/files/sigmastar/S03mac    |  76 ++++++++
+ .../files/sigmastar/lib-serial-mac            |  38 ++++
+ .../thingino-system/files/sigmastar/sensor    |  77 +++++++++
+ package/thingino-system/files/sigmastar/soc   | 136 +++++++++++++++
+ .../thingino-system/files/sigmastar/usb-role  |  32 ++++
+ package/thingino-system/thingino-system.mk    |  18 ++
+ 13 files changed, 681 insertions(+)
+ create mode 100644 package/sigmastar-light/Config.in
+ create mode 100755 package/sigmastar-light/files/S30light
+ create mode 100755 package/sigmastar-light/files/light
+ create mode 100644 package/sigmastar-light/sigmastar-light.mk
  create mode 100644 package/thingino-system/Config.sigmastar.in
  rename {overlay/etc/init.d => package/thingino-system/files/ingenic}/lib-serial-mac (100%)
  create mode 100755 package/thingino-system/files/sigmastar/S03mac
@@ -23,6 +39,306 @@ Subject: [PATCH 05/21] sigmastar: thingino-system platform utilities and
  create mode 100755 package/thingino-system/files/sigmastar/soc
  create mode 100755 package/thingino-system/files/sigmastar/usb-role
 
+diff --git a/package/sigmastar-light/Config.in b/package/sigmastar-light/Config.in
+new file mode 100644
+index 000000000..d162de656
+--- /dev/null
++++ b/package/sigmastar-light/Config.in
+@@ -0,0 +1,54 @@
++config BR2_PACKAGE_SIGMASTAR_LIGHT
++	bool "sigmastar-light"
++	depends on BR2_SOC_VENDOR_SIGMASTAR
++	help
++	  The light tool for SigmaStar boards whose IR and white LED banks
++	  are PWM-dimmed: /usr/sbin/light, with the command line of
++	  thingino's GPIO light script (the web UI's light buttons and
++	  ric's irled_cmd call it), plus "on <percent>" and "brightness",
++	  and S30light, which sets the channels up at boot.
++
++	  Which PWM channel drives which bank is a board fact, set below
++	  and written to /etc/default/light. The board device tree must
++	  mux the pads to those channels.
++
++if BR2_PACKAGE_SIGMASTAR_LIGHT
++
++config BR2_PACKAGE_SIGMASTAR_LIGHT_IR_PWM
++	int "IR bank PWM channel (-1: none)"
++	range -1 15
++	default -1
++	help
++	  The PWM channel (pwmchip0/pwm<N>) of the IR (850 nm) LED bank,
++	  or -1 if the board has none.
++
++config BR2_PACKAGE_SIGMASTAR_LIGHT_WHITE_PWM
++	int "White bank PWM channel (-1: none)"
++	range -1 15
++	default -1
++	help
++	  The PWM channel of the white LED bank, or -1 if the board has
++	  none.
++
++config BR2_PACKAGE_SIGMASTAR_LIGHT_PERIOD_NS
++	int "PWM period (ns)"
++	range 1000 1000000
++	default 50000
++	help
++	  The PWM period for both banks. 50000 ns (20 kHz) is what the
++	  OEM firmware of the Infinity6C boards uses.
++
++config BR2_PACKAGE_SIGMASTAR_LIGHT_IR_BRIGHTNESS
++	int "IR brightness for a plain \"on\" (percent)"
++	range 0 100
++	default 40
++	help
++	  The level "light ir on" uses until a brightness is saved. ric's
++	  automatic night picks its own levels ([ircut] ir_levels).
++
++config BR2_PACKAGE_SIGMASTAR_LIGHT_WHITE_BRIGHTNESS
++	int "White brightness for a plain \"on\" (percent)"
++	range 0 100
++	default 100
++
++endif
+diff --git a/package/sigmastar-light/files/S30light b/package/sigmastar-light/files/S30light
+new file mode 100755
+index 000000000..5268c8c90
+--- /dev/null
++++ b/package/sigmastar-light/files/S30light
+@@ -0,0 +1,20 @@
++#!/bin/sh
++# S30light -- set up the LED banks' PWM channels (/etc/default/light) and
++# leave the banks off. Runs before S31raptor so ric's irled_cmd hook finds the
++# channels ready.
++
++case "$1" in
++	start | restart | reload)
++		printf "Starting light: "
++		if /usr/sbin/light init; then echo "OK"; else echo "FAIL"; fi
++		;;
++	stop)
++		/usr/sbin/light ir off 2>/dev/null
++		/usr/sbin/light white off 2>/dev/null
++		;;
++	*)
++		echo "Usage: $0 {start|stop|restart}"
++		exit 1
++		;;
++esac
++exit 0
+diff --git a/package/sigmastar-light/files/light b/package/sigmastar-light/files/light
+new file mode 100755
+index 000000000..f8a3a65b1
+--- /dev/null
++++ b/package/sigmastar-light/files/light
+@@ -0,0 +1,162 @@
++#!/bin/sh
++# light -- IR and white LED control for SigmaStar boards whose LED banks are
++# PWM-dimmed (sigmastar-light)
++#
++#   light <ir|ir850|white|flood> <on|off|toggle|read|1|0|~>
++#   light <ir|ir850|white|flood> on <0-100>
++#   light <ir|ir850|white|flood> brightness [0-100]
++#   light init | status
++#
++# Same command line as thingino's GPIO light script (the web UI's light
++# buttons call "light <type> <0|1|~>"), but each bank is a PWM channel. Which
++# channel drives which bank is a board fact: /etc/default/light, written at
++# build time from the camera's BR2_PACKAGE_SIGMASTAR_LIGHT_* options, says so
++# (IR_CH, WHITE_CH; -1 = the board has no such bank), with the PWM period and
++# the default brightness. The board device tree muxes the pads at boot.
++#
++# Brightness persists in /etc/light.conf. "on <percent>" lights the bank at
++# that level once without saving it: ric's IR level ladder steps the IR bank
++# that way, and must not rewrite flash at every step. Off is duty 0 with the
++# channel left enabled, so switching does not re-export.
++
++CONF=/etc/light.conf
++PWM=/sys/class/pwm/pwmchip0
++
++IR_CH=-1
++WHITE_CH=-1
++PERIOD=50000 # ns
++# The level for a plain "on" (web UI buttons, manual use). ric's automatic
++# night picks its own level from [ircut] ir_levels.
++IR_BRIGHTNESS=40
++WHITE_BRIGHTNESS=100
++[ -f /etc/default/light ] && . /etc/default/light
++[ -f "$CONF" ] && . "$CONF"
++
++die() {
++	echo "light: $*" >&2
++	exit 1
++}
++
++usage() {
++	echo "Usage: light <ir|ir850|white|flood> <on|off|toggle|read|brightness [0-100]>
++       light init | status" >&2
++	exit 1
++}
++
++save_conf() {
++	cat >"$CONF" <<EOF
++IR_BRIGHTNESS=$IR_BRIGHTNESS
++WHITE_BRIGHTNESS=$WHITE_BRIGHTNESS
++EOF
++}
++
++has() { [ "$1" -ge 0 ] 2>/dev/null; }
++
++ch_setup() {
++	local ch=$1
++	[ -d $PWM/pwm$ch ] || echo "$ch" >$PWM/export || return 1
++	echo 0 >$PWM/pwm$ch/duty_cycle 2>/dev/null
++	echo $PERIOD >$PWM/pwm$ch/period
++	echo 0 >$PWM/pwm$ch/duty_cycle
++	echo 1 >$PWM/pwm$ch/enable
++}
++
++init() {
++	if has $IR_CH; then ch_setup $IR_CH || die "cannot set up pwm$IR_CH"; fi
++	if has $WHITE_CH; then ch_setup $WHITE_CH || die "cannot set up pwm$WHITE_CH"; fi
++	return 0
++}
++
++ready() {
++	if has $IR_CH && [ ! -f $PWM/pwm$IR_CH/duty_cycle ]; then init; return; fi
++	if has $WHITE_CH && [ ! -f $PWM/pwm$WHITE_CH/duty_cycle ]; then init; fi
++}
++
++duty_of() { cat $PWM/pwm$1/duty_cycle 2>/dev/null || echo 0; }
++
++set_level() { # set_level <ch> <percent>
++	echo $((PERIOD * $2 / 100)) >$PWM/pwm$1/duty_cycle
++}
++
++state() { [ "$(duty_of "$1")" -gt 0 ] && echo 1 || echo 0; }
++
++# status fields for one bank: its state and brightness, or null without one
++bank_json() { # bank_json <name> <ch> <brightness>
++	if has "$2"; then
++		printf '"%s":%s,"%s_brightness":%s' "$1" "$(state "$2")" "$1" "$3"
++	else
++		printf '"%s":null,"%s_brightness":null' "$1" "$1"
++	fi
++}
++
++case "$1" in
++	init)
++		init
++		exit 0
++		;;
++	status)
++		ready
++		echo "{$(bank_json ir $IR_CH $IR_BRIGHTNESS),$(bank_json white $WHITE_CH $WHITE_BRIGHTNESS)}"
++		exit 0
++		;;
++	ir | ir850)
++		has $IR_CH || die "this board has no IR bank"
++		CH=$IR_CH
++		VAR=IR_BRIGHTNESS
++		;;
++	white | flood)
++		has $WHITE_CH || die "this board has no white bank"
++		CH=$WHITE_CH
++		VAR=WHITE_BRIGHTNESS
++		;;
++	ir940)
++		die "this board has no 940 nm bank"
++		;;
++	*)
++		usage
++		;;
++esac
++
++ready
++eval "LEVEL=\$$VAR"
++
++case "${2:-read}" in
++	1 | on)
++		if [ -n "$3" ]; then
++			case "$3" in
++				*[!0-9]*) die "level must be 0-100" ;;
++			esac
++			[ "$3" -le 100 ] || die "level must be 0-100"
++			set_level $CH "$3"
++		else
++			set_level $CH "$LEVEL"
++		fi
++		;;
++	0 | off)
++		set_level $CH 0
++		;;
++	~ | toggle)
++		if [ "$(state $CH)" = 1 ]; then set_level $CH 0; else set_level $CH "$LEVEL"; fi
++		;;
++	\? | read)
++		echo -n "$(state $CH)"
++		;;
++	brightness)
++		if [ -z "$3" ]; then
++			echo "$LEVEL"
++			exit 0
++		fi
++		case "$3" in
++			*[!0-9]* | "") die "brightness must be 0-100" ;;
++		esac
++		[ "$3" -le 100 ] || die "brightness must be 0-100"
++		eval "$VAR=$3"
++		save_conf
++		# a bank that is on follows the new level at once
++		[ "$(state $CH)" = 1 ] && set_level $CH "$3"
++		;;
++	*)
++		usage
++		;;
++esac
++exit 0
+diff --git a/package/sigmastar-light/sigmastar-light.mk b/package/sigmastar-light/sigmastar-light.mk
+new file mode 100644
+index 000000000..dae40dc94
+--- /dev/null
++++ b/package/sigmastar-light/sigmastar-light.mk
+@@ -0,0 +1,40 @@
++################################################################################
++#
++# sigmastar-light
++#
++# One light tool for every SigmaStar board; the board's PWM channels come from
++# its defconfig and land in /etc/default/light.
++#
++################################################################################
++
++SIGMASTAR_LIGHT_VERSION = 1.0
++SIGMASTAR_LIGHT_SITE_METHOD = local
++SIGMASTAR_LIGHT_SITE = $(SIGMASTAR_LIGHT_PKGDIR)/files
++SIGMASTAR_LIGHT_LICENSE = MIT
++
++define SIGMASTAR_LIGHT_INSTALL_TARGET_CMDS
++	$(INSTALL) -D -m 0755 $(@D)/S30light $(TARGET_DIR)/etc/init.d/S30light
++	$(INSTALL) -d -m 0755 $(TARGET_DIR)/etc/default
++	printf '%s\n' \
++		'# The LED banks, from the camera defconfig (BR2_PACKAGE_SIGMASTAR_LIGHT_*).' \
++		'# PWM channel per bank (-1: none), period in ns, default brightness in %.' \
++		'IR_CH=$(BR2_PACKAGE_SIGMASTAR_LIGHT_IR_PWM)' \
++		'WHITE_CH=$(BR2_PACKAGE_SIGMASTAR_LIGHT_WHITE_PWM)' \
++		'PERIOD=$(BR2_PACKAGE_SIGMASTAR_LIGHT_PERIOD_NS)' \
++		'IR_BRIGHTNESS=$(BR2_PACKAGE_SIGMASTAR_LIGHT_IR_BRIGHTNESS)' \
++		'WHITE_BRIGHTNESS=$(BR2_PACKAGE_SIGMASTAR_LIGHT_WHITE_BRIGHTNESS)' \
++		>$(TARGET_DIR)/etc/default/light
++endef
++
++# /usr/sbin/light goes in at target-finalize, after the per-package targets are
++# merged: thingino-raptor installs its GPIO light script at the same path when
++# ric is on, and the merge copies duplicates in package-name order, not
++# dependency order. The overlays come after this hook, so a camera overlay can
++# still replace it.
++define SIGMASTAR_LIGHT_INSTALL_TOOL
++	$(INSTALL) -D -m 0755 $(SIGMASTAR_LIGHT_PKGDIR)/files/light \
++		$(TARGET_DIR)/usr/sbin/light
++endef
++SIGMASTAR_LIGHT_TARGET_FINALIZE_HOOKS += SIGMASTAR_LIGHT_INSTALL_TOOL
++
++$(eval $(generic-package))
 diff --git a/package/thingino-system/Config.in b/package/thingino-system/Config.in
 index 774f8a19e..2a477169a 100644
 --- a/package/thingino-system/Config.in
@@ -497,3 +813,6 @@ index c2f9b439a..e7a7fe39a 100644
  endef
  
  $(eval $(generic-package))
+-- 
+2.43.0
+

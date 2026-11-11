@@ -1,0 +1,2044 @@
+From e5a4e0cc8df0c36ec82ba3b912d77662c196a43d Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 16:31:39 -0500
+Subject: [PATCH 12/13] infinity6c: encoder I-frame cap, I/P QP bounds and
+ delta, super frames
+
+Keyframes ran 330-370 KB at 3 Mbit/s with a 1 s GOP, nearly the whole
+second's budget, and raptorctl's set-max-pic-size, set-qp-bounds,
+set-qp-bounds-per-frame, set-super-frame and enc-set qp|qp_ip_delta all
+answered "not supported": the backend published only bitrate, GOP, fps and
+RC mode. libmi_venc.so has what they need.
+
+- i6c_venc_rc.h (new, local: sigmastar-headers stays verbatim): the 56-byte
+  MI_VENC_RcParam_t with its CBR, VBR and AVBR arms, the 16-byte super-frame
+  config and the RC priority, with layout asserts, checked against the
+  shipped 1230 mi.ko and libmi_venc.so (SetRcPriority takes a pointer on
+  MI 3.0). Plus the pure logic: a per-channel record and the RcParam
+  builder, host-tested by tests/t_venc_rc_i6c.c.
+- Seven ops: enc_set_qp_bounds, enc_set_qp_bounds_per_frame,
+  enc_set_qp_ip_delta, enc_set_qp, enc_set_max_pic_size and
+  enc_set/get_super_frame. CBR's frame bounds go through RcParam (its
+  channel attribute has none), VBR/AVBR's through the attribute with the
+  I-frame bounds nested inside; fixed QP splits its I/P pair.
+- The record outlives rvd's destroy/re-create for set-resolution and
+  set-codec; only teardown clears it. GetRcParam never returns MaxISize or
+  MaxPSize in CBR or VBR, so the HAL owns and always writes both. Every
+  other field nobody asked about goes back exactly as the driver reported
+  it: the driver reports MaxIPProp outside the doc's range, and raising it
+  halved a VBR channel's I-frames. A released bound is MI's full range.
+- RcParam is pushed after create, after every rate reapply and from each
+  op. A channel nobody configured never sees SetRcParam: the default path
+  makes no new MI call. A refused op is rolled back.
+- Asked-for QP values clamp to MI's [12, 48] and the delta to [-12, 12],
+  warned once per channel; an inverted pair from an op is RSS_ERR_INVAL,
+  one from the config is swapped rather than pinning QP to the ceiling.
+- Re-encode forces frame-bits-first priority: rvd always sends
+  bitrate-first, under which re-encode never fires. MI's NOT_SUPPORT comes
+  back as RSS_ERR_NOTSUP.
+- The six MI calls bind optionally; a library without them still encodes.
+- caps: has_max_pic_size, has_super_frame, has_qp_bounds_per_frame.
+
+On an SSC377D, VBR at night: the I-frame QP bounds and the I/P delta work
+(I = P - delta; -6 cut keyframes from 228 to 57 KB) and survive a mode
+change and a re-create. MaxISize counts bytes and is soft: a 98 KB cap
+settled 232 KB keyframes at ~130 KB, a 293 KB one did nothing
+(I6C_RC_SIZE_UNIT_BITS = 8; RSS_VENC_SIZE_UNIT_BITS overrides it).
+Super-frame re-encode is NOT_SUPPORT; discard is accepted.
+---
+ src/caps_sigmastar.inc            |   9 +
+ src/infinity6c/hal_common.c       |  23 ++
+ src/infinity6c/hal_encoder.c      | 655 ++++++++++++++++++++++++++++-
+ src/infinity6c/i6c_venc_load.h    |  33 ++
+ src/infinity6c/i6c_venc_rc.h      | 663 ++++++++++++++++++++++++++++++
+ src/infinity6c/infinity6c_state.h |  12 +
+ tests/t_venc_rc_i6c.c             | 384 +++++++++++++++++
+ 7 files changed, 1766 insertions(+), 13 deletions(-)
+ create mode 100644 src/infinity6c/i6c_venc_rc.h
+ create mode 100644 tests/t_venc_rc_i6c.c
+
+diff --git a/src/caps_sigmastar.inc b/src/caps_sigmastar.inc
+index 967144a..87434ee 100644
+--- a/src/caps_sigmastar.inc
++++ b/src/caps_sigmastar.inc
+@@ -430,6 +430,15 @@ const rss_hal_caps_t g_hal_caps = {
+     /* AVBR is what the capped and smart modes map onto; see hal_encoder.c. */
+     .has_capped_rc = true,
+     .has_smart_rc = true,
++    /*
++     * The rate-control extras: MI_VENC_SetRcParam's MaxISize/MaxPSize and I-frame
++     * QP bounds, and MI_VENC_SetSuperFrameCfg. rvd only reports these
++     * (get-enc-caps); the ops are what work, and answer not supported if the
++     * running libmi_venc.so lacks the calls.
++     */
++    .has_max_pic_size = true,
++    .has_super_frame = true,
++    .has_qp_bounds_per_frame = true,
+ 
+     /* ISP — only what hal_isp.c publishes an op for; see above for the rest. */
+     .has_color2grey = false,
+diff --git a/src/infinity6c/hal_common.c b/src/infinity6c/hal_common.c
+index 66cac5e..d221d46 100644
+--- a/src/infinity6c/hal_common.c
++++ b/src/infinity6c/hal_common.c
+@@ -116,6 +116,14 @@ int hal_enc_set_bitrate(void *ctx, int chn, uint32_t bitrate);
+ int hal_enc_set_gop(void *ctx, int chn, uint32_t gop_length);
+ int hal_enc_set_fps(void *ctx, int chn, uint32_t fps_num, uint32_t fps_den);
+ int hal_enc_query(void *ctx, int chn, bool *busy);
++int hal_enc_set_qp(void *ctx, int chn, int qp);
++int hal_enc_set_qp_bounds(void *ctx, int chn, int min_qp, int max_qp);
++int hal_enc_set_qp_ip_delta(void *ctx, int chn, int delta);
++int hal_enc_set_qp_bounds_per_frame(void *ctx, int chn, int min_i, int max_i, int min_p,
++                                    int max_p);
++int hal_enc_set_max_pic_size(void *ctx, int chn, uint32_t max_i_kbits, uint32_t max_p_kbits);
++int hal_enc_set_super_frame(void *ctx, int chn, const rss_super_frame_cfg_t *cfg);
++int hal_enc_get_super_frame(void *ctx, int chn, rss_super_frame_cfg_t *cfg);
+ 
+ /* ── ISP tuning (infinity6c/hal_isp.c) ── */
+ 
+@@ -709,6 +717,21 @@ static const rss_hal_ops_t g_ops = {
+     .enc_set_fps = hal_enc_set_fps,
+     .enc_query = hal_enc_query,
+ 
++    /*
++     * The rate-control extras: QP bounds (frame, and I-frame apart), the I/P
++     * delta, the fixed QP, the I/P frame-size cap and super frames, through
++     * MI_VENC_SetRcParam, SetSuperFrameCfg and SetRcPriority. hal_encoder.c has
++     * the table of what each does per mode. qp_pb_delta, max_psnr,
++     * rc_options and gop_mode stay NULL: no B frames, and no MI counterpart.
++     */
++    .enc_set_qp = hal_enc_set_qp,
++    .enc_set_qp_bounds = hal_enc_set_qp_bounds,
++    .enc_set_qp_ip_delta = hal_enc_set_qp_ip_delta,
++    .enc_set_qp_bounds_per_frame = hal_enc_set_qp_bounds_per_frame,
++    .enc_set_max_pic_size = hal_enc_set_max_pic_size,
++    .enc_set_super_frame = hal_enc_set_super_frame,
++    .enc_get_super_frame = hal_enc_get_super_frame,
++
+     .isp_get_exposure = hal_isp_get_exposure,
+     .isp_get_sensor_attr = hal_isp_get_sensor_attr,
+ 
+diff --git a/src/infinity6c/hal_encoder.c b/src/infinity6c/hal_encoder.c
+index 41f166b..ca9cdfc 100644
+--- a/src/infinity6c/hal_encoder.c
++++ b/src/infinity6c/hal_encoder.c
+@@ -118,15 +118,19 @@ static void i6c_enc_fill_attrib(i6c_venc_attrib *attrib, const rss_video_config_
+  * The mode enum is per codec rather than shared, so an H.265 channel asking for
+  * CBR is a different value from an H.264 one -- which is why this switches on
+  * both.
++ *
++ * rcx is the channel's rate-control extras record (i6c_venc_rc.h): it splits
++ * the fixed-QP pair. Returns I6C_RC_F_* flags for the caller to report once.
+  */
+-static void i6c_enc_fill_rate(i6c_venc_rate *rate, const rss_video_config_t *cfg,
+-                              i6c_venc_codec codec)
++static unsigned i6c_enc_fill_rate(i6c_venc_rate *rate, const rss_video_config_t *cfg,
++                                  i6c_venc_codec codec, const i6c_venc_rcx_t *rcx)
+ {
+     unsigned int fps_num = cfg->fps_num ? cfg->fps_num : 25;
+     unsigned int fps_den = cfg->fps_den ? cfg->fps_den : 1;
+     unsigned int gop = cfg->gop_length ? cfg->gop_length : fps_num / fps_den * 2;
+     unsigned int bitrate = cfg->bitrate;
+     rss_rc_mode_t mode = cfg->rc_mode;
++    unsigned flags = 0;
+ 
+     memset(rate, 0, sizeof(*rate));
+ 
+@@ -151,7 +155,7 @@ static void i6c_enc_fill_rate(i6c_venc_rate *rate, const rss_video_config_t *cfg
+             rate->mjpgCbr.fpsNum = fps_num;
+             rate->mjpgCbr.fpsDen = fps_den;
+         }
+-        return;
++        return 0;
+     }
+ 
+     /*
+@@ -193,8 +197,14 @@ static void i6c_enc_fill_rate(i6c_venc_rate *rate, const rss_video_config_t *cfg
+         rate->h264Qp.gop = gop;
+         rate->h264Qp.fpsNum = fps_num;
+         rate->h264Qp.fpsDen = fps_den;
+-        rate->h264Qp.interQual = cfg->init_qp > 0 ? (unsigned int)cfg->init_qp : 30;
+-        rate->h264Qp.predQual = cfg->init_qp > 0 ? (unsigned int)cfg->init_qp : 30;
++        /*
++         * interQual and predQual are MI's u32IQp and u32PQp, the I-frame and the
++         * P-frame QP, whatever the vendored header calls them. With nothing asked
++         * both are init_qp, as they always were; enc-set qp and qp_ip_delta (or
++         * the config's ip_delta) split them. See i6c_rc_fixqp.
++         */
++        flags |= i6c_rc_fixqp(cfg->init_qp, rcx, cfg->ip_delta, &rate->h264Qp.interQual,
++                              &rate->h264Qp.predQual);
+         break;
+ 
+     case RSS_RC_VBR:
+@@ -218,9 +228,13 @@ static void i6c_enc_fill_rate(i6c_venc_rate *rate, const rss_video_config_t *cfg
+          * QP 20 because QP may never rise above it, which at 2560x1920 is far
+          * more than the bitrate cap allows and shows up as drops downstream
+          * rather than as an error here.
++         *
++         * That is also what an inverted pair from the config does, so
++         * i6c_rc_frame_bounds swaps one back and clamps both into MI's
++         * [12, 48]; the defaults, 20 and 48, are unchanged.
+          */
+-        rate->h264Vbr.maxQual = cfg->max_qp >= 0 ? (unsigned int)cfg->max_qp : 48;
+-        rate->h264Vbr.minQual = cfg->min_qp >= 0 ? (unsigned int)cfg->min_qp : 20;
++        flags |= i6c_rc_frame_bounds(cfg->min_qp, cfg->max_qp, &rate->h264Vbr.minQual,
++                                     &rate->h264Vbr.maxQual);
+         break;
+ 
+     /*
+@@ -238,8 +252,8 @@ static void i6c_enc_fill_rate(i6c_venc_rate *rate, const rss_video_config_t *cfg
+         rate->h264Avbr.fpsDen = fps_den;
+         rate->h264Avbr.maxBitrate = cfg->max_bitrate ? cfg->max_bitrate : bitrate;
+         /* Same pair, same way round: AVBR shares the VBR struct. */
+-        rate->h264Avbr.maxQual = cfg->max_qp >= 0 ? (unsigned int)cfg->max_qp : 48;
+-        rate->h264Avbr.minQual = cfg->min_qp >= 0 ? (unsigned int)cfg->min_qp : 20;
++        flags |= i6c_rc_frame_bounds(cfg->min_qp, cfg->max_qp, &rate->h264Avbr.minQual,
++                                     &rate->h264Avbr.maxQual);
+         break;
+ 
+     case RSS_RC_CBR:
+@@ -252,8 +266,233 @@ static void i6c_enc_fill_rate(i6c_venc_rate *rate, const rss_video_config_t *cfg
+         rate->h264Cbr.fpsDen = fps_den;
+         rate->h264Cbr.bitrate = bitrate;
+         rate->h264Cbr.avgLvl = 0;
++        /* CBR's frame bounds are not in the attribute: they go out through RcParam. */
+         break;
+     }
++
++    return flags;
++}
++
++/* ================================================================
++ * RATE-CONTROL EXTRAS
++ *
++ * The I-frame cap, the I-frame and per-frame QP bounds, the I/P QP
++ * delta and the super-frame handling: MI_VENC_SetRcParam,
++ * SetSuperFrameCfg and SetRcPriority, none of which the channel
++ * attribute carries. The ABI, the driver behaviour that shapes this
++ * code and the pure builders are in i6c_venc_rc.h.
++ * ================================================================ */
++
++/* The pure header spells the UBR mode numbers out; hold it to the enum. */
++_Static_assert((int)I6C_RC_MODE_H264CBR == (int)I6C_VENC_RATEMODE_UBR_H264CBR, "UBR H.264 CBR");
++_Static_assert((int)I6C_RC_MODE_H264VBR == (int)I6C_VENC_RATEMODE_UBR_H264VBR, "UBR H.264 VBR");
++_Static_assert((int)I6C_RC_MODE_H264AVBR == (int)I6C_VENC_RATEMODE_UBR_H264AVBR, "UBR H.264 AVBR");
++_Static_assert((int)I6C_RC_MODE_H265CBR == (int)I6C_VENC_RATEMODE_UBR_H265CBR, "UBR H.265 CBR");
++_Static_assert((int)I6C_RC_MODE_H265VBR == (int)I6C_VENC_RATEMODE_UBR_H265VBR, "UBR H.265 VBR");
++_Static_assert((int)I6C_RC_MODE_H265AVBR == (int)I6C_VENC_RATEMODE_UBR_H265AVBR, "UBR H.265 AVBR");
++_Static_assert(RSS_SUPERFRM_DISCARD == (int)I6C_VENC_SUPERFRM_DISCARD &&
++                   RSS_SUPERFRM_REENCODE == (int)I6C_VENC_SUPERFRM_REENCODE,
++               "raptor's super-frame modes are MI's numerically");
++
++/* Say each I6C_RC_F_* outcome once per channel; the record outlives a re-create. */
++static void i6c_enc_rc_note(infinity6c_state_t *st, int chn, unsigned flags)
++{
++    i6c_venc_rcx_t *x = &st->enc_rcx[chn];
++
++    if ((flags & I6C_RC_F_RANGE) && !x->warned_range) {
++        x->warned_range = true;
++        HAL_LOG_WARN("venc chn %d: a QP outside MI's [%d, %d] or an I/P QP delta outside [%d, %d] "
++                     "was clamped into range",
++                     chn, I6C_RC_QP_MIN, I6C_RC_QP_MAX, I6C_RC_DELTA_MIN, I6C_RC_DELTA_MAX);
++    }
++    if ((flags & I6C_RC_F_SWAP) && !x->warned_swap) {
++        x->warned_swap = true;
++        HAL_LOG_WARN("venc chn %d: min_qp is above max_qp in the config; the two were swapped "
++                     "rather than pinning QP to the ceiling",
++                     chn);
++    }
++    if ((flags & I6C_RC_F_NEST) && !x->warned_nest) {
++        x->warned_nest = true;
++        HAL_LOG_WARN("venc chn %d: the I-frame QP bounds were pulled inside the frame QP bounds, "
++                     "which VBR and AVBR require",
++                     chn);
++    }
++}
++
++/*
++ * An MI error code is 0xA0 | module | level | id; id 8 is NOT_SUPPORT. The
++ * driver answers that for a setting this part does not do (super-frame
++ * re-encode on the SSC377D), which raptor should hear as "not supported", not
++ * as an I/O fault.
++ */
++static int i6c_enc_mi_err(int mi)
++{
++    return ((unsigned int)mi & 0xff000000u) == 0xa0000000u && ((unsigned int)mi & 0xfffu) == 8u
++               ? RSS_ERR_NOTSUP
++               : RSS_ERR_IO;
++}
++
++/*
++ * i6c_enc_rate_now -- the rate half this channel's config produces, without
++ * writing it: the one place that knows the mode and the VBR/AVBR frame bounds,
++ * so the RcParam push and the ops read them from it rather than repeat it.
++ */
++static i6c_rc_arm i6c_enc_rate_now(infinity6c_state_t *st, int chn, int *attr_min, int *attr_max)
++{
++    infinity6c_venc_chn_t *enc = &st->enc[chn];
++    i6c_venc_codec codec;
++    i6c_venc_rate rate;
++    i6c_rc_arm arm;
++
++    *attr_min = *attr_max = -1;
++    if (i6c_enc_codec(enc->codec, &codec) != RSS_OK || codec == I6C_VENC_CODEC_MJPG)
++        return I6C_RC_ARM_NONE;
++
++    (void)i6c_enc_fill_rate(&rate, &enc->cfg, codec, &st->enc_rcx[chn]);
++    arm = i6c_rc_arm_of(rate.mode);
++    if (arm == I6C_RC_ARM_VBR) {
++        *attr_min = (int)rate.h264Vbr.minQual;
++        *attr_max = (int)rate.h264Vbr.maxQual;
++    } else if (arm == I6C_RC_ARM_AVBR) {
++        *attr_min = (int)rate.h264Avbr.minQual;
++        *attr_max = (int)rate.h264Avbr.maxQual;
++    }
++
++    return arm;
++}
++
++static void i6c_enc_rc_log(int chn, i6c_rc_arm arm, const i6c_venc_rcparam *p)
++{
++    i6c_rc_fields f;
++
++    i6c_rc_decode(arm, p, &f);
++    if (arm == I6C_RC_ARM_CBR)
++        HAL_LOG_INFO("venc chn %d: RcParam %s: QP [%d, %d], I QP [%d, %d], I/P delta %d, "
++                     "I/P prop %d, max I %u, max P %u (applies with the next frame)",
++                     chn, i6c_rc_arm_name(arm), f.min_qp, f.max_qp, f.min_iqp, f.max_iqp,
++                     f.ip_delta, f.max_ip_prop, f.max_i_size, f.max_p_size);
++    else
++        HAL_LOG_INFO("venc chn %d: RcParam %s: I QP [%d, %d], I/P delta %d, change pos %d, "
++                     "I/P prop %d, max I %u, max P %u (applies with the next frame)",
++                     chn, i6c_rc_arm_name(arm), f.min_iqp, f.max_iqp, f.ip_delta, f.change_pos,
++                     f.max_ip_prop, f.max_i_size, f.max_p_size);
++}
++
++/*
++ * i6c_enc_push_rc -- send this channel's RcParam, if it has one to send.
++ *
++ * Nothing at all for a channel nobody configured, for MJPEG and for fixed QP
++ * (which has no arm: its I/P pair is in the channel attribute). Otherwise
++ * GetRcParam for the driver's live values, the record over them
++ * (i6c_rc_build), and SetRcParam. Get is synchronous; Set is deferred to the
++ * next frame and checks nothing, so its return proves only that the call
++ * arrived.
++ *
++ * Called at the end of every create and every rate reapply, and from each op.
++ * Whether a channel-attribute write resets RcParam is not known, and the mode
++ * may have changed which arm applies, so the push after a reapply is
++ * unconditional.
++ */
++static int i6c_enc_push_rc(infinity6c_state_t *st, int chn)
++{
++    infinity6c_venc_chn_t *enc = &st->enc[chn];
++    i6c_venc_rcx_t *x = &st->enc_rcx[chn];
++    i6c_venc_rcparam base, out;
++    i6c_rc_want want;
++    i6c_rc_arm arm;
++    int attr_min, attr_max;
++    int ret;
++
++    if (!enc->created)
++        return RSS_OK;
++
++    arm = i6c_enc_rate_now(st, chn, &attr_min, &attr_max);
++    if (!i6c_rc_want_of(x, arm, enc->cfg.min_qp, enc->cfg.max_qp, enc->cfg.ip_delta, attr_min,
++                        attr_max, &want))
++        return RSS_OK;
++
++    if (!st->venc.get_rc_param || !st->venc.set_rc_param) {
++        if (!x->warned_nosym) {
++            x->warned_nosym = true;
++            HAL_LOG_WARN("venc chn %d: this libmi_venc.so has no MI_VENC_Get/SetRcParam, so the "
++                         "QP bounds, the I/P delta and the frame-size cap are not applied",
++                         chn);
++        }
++        return RSS_ERR_NOTSUP;
++    }
++
++    memset(&base, 0, sizeof(base));
++    if ((ret = st->venc.get_rc_param(enc->device, (unsigned int)chn, &base)) != 0) {
++        HAL_LOG_ERR("MI_VENC_GetRcParam(chn %d) failed: %d", chn, ret);
++        return RSS_ERR_IO;
++    }
++
++    i6c_enc_rc_note(st, chn, i6c_rc_build(arm, &base, &want, &out));
++
++    if ((ret = st->venc.set_rc_param(enc->device, (unsigned int)chn, &out)) != 0) {
++        HAL_LOG_ERR("MI_VENC_SetRcParam(chn %d) failed: %#x", chn, (unsigned int)ret);
++        return i6c_enc_mi_err(ret);
++    }
++
++    i6c_enc_rc_log(chn, arm, &out);
++    return RSS_OK;
++}
++
++/*
++ * i6c_enc_push_superfrm -- the super-frame config and its RC priority, as last
++ * asked. The config first: the driver may refuse it (re-encode is
++ * NOT_SUPPORT on the SSC377D), and a priority already changed would then be
++ * left behind for a mode that never took.
++ */
++static int i6c_enc_push_superfrm(infinity6c_state_t *st, int chn)
++{
++    infinity6c_venc_chn_t *enc = &st->enc[chn];
++    i6c_venc_rcx_t *x = &st->enc_rcx[chn];
++    i6c_venc_superfrm sf;
++    uint32_t prio;
++    int ret;
++
++    if (!enc->created || !x->superfrm_set || enc->device == I6C_VENC_DEV_MJPG_0)
++        return RSS_OK;
++
++    if (!st->venc.set_superfrm || !st->venc.set_rc_prio) {
++        if (!x->warned_nosym) {
++            x->warned_nosym = true;
++            HAL_LOG_WARN("venc chn %d: this libmi_venc.so has no MI_VENC_SetSuperFrameCfg or "
++                         "SetRcPriority, so the super-frame setting is not applied",
++                         chn);
++        }
++        return RSS_ERR_NOTSUP;
++    }
++
++    sf = x->superfrm;
++    if ((ret = st->venc.set_superfrm(enc->device, (unsigned int)chn, &sf)) != 0) {
++        HAL_LOG_ERR("MI_VENC_SetSuperFrameCfg(chn %d, mode %u) failed: %#x", chn, sf.mode,
++                    (unsigned int)ret);
++        return i6c_enc_mi_err(ret);
++    }
++
++    prio = x->priority;
++    if ((ret = st->venc.set_rc_prio(enc->device, (unsigned int)chn, &prio)) != 0) {
++        HAL_LOG_ERR("MI_VENC_SetRcPriority(chn %d, %u) failed: %#x", chn, prio, (unsigned int)ret);
++        return i6c_enc_mi_err(ret);
++    }
++
++    HAL_LOG_INFO("venc chn %d: super frame mode %u, I %u bits, P %u bits, priority %s", chn,
++                 sf.mode, sf.iBitsThr, sf.pBitsThr,
++                 prio == I6C_VENC_RCPRIO_FRAMEBITS ? "frame bits" : "bitrate");
++    return RSS_OK;
++}
++
++/*
++ * Both pushes, for the create and reapply paths. Failures are logged by the
++ * pushes and not propagated: a stream whose extras could not be applied still
++ * runs, as it did before they existed.
++ */
++static void i6c_enc_push_extras(infinity6c_state_t *st, int chn)
++{
++    (void)i6c_enc_push_rc(st, chn);
++    (void)i6c_enc_push_superfrm(st, chn);
+ }
+ 
+ /* ================================================================
+@@ -1067,6 +1306,8 @@ static int i6c_enc_pool(infinity6c_state_t *st, unsigned int device, const rss_v
+ int hal_enc_create_channel(void *ctx, int chn, const rss_video_config_t *cfg)
+ {
+     infinity6c_venc_chn_t *enc;
++    const i6c_venc_rcx_t *rcx;
++    rss_video_config_t eff;
+     i6c_venc_codec codec;
+     i6c_venc_chn attr;
+     unsigned int device;
+@@ -1083,6 +1324,20 @@ int hal_enc_create_channel(void *ctx, int chn, const rss_video_config_t *cfg)
+     if (enc->created)
+         return RSS_ERR_BUSY;
+ 
++    /*
++     * The config as the extras record amends it. Frame bounds set at run time
++     * outlive the destroy and re-create rvd does for set-resolution and
++     * set-codec, and they win over rvd's copy: its set-qp-bounds-per-frame
++     * handler never updates that copy, so it would restore stale bounds.
++     */
++    rcx = &st->enc_rcx[chn];
++    eff = *cfg;
++    if (rcx->frame_set) {
++        eff.min_qp = rcx->min_qp;
++        eff.max_qp = rcx->max_qp;
++    }
++    cfg = &eff;
++
+     if ((ret = i6c_enc_device(cfg->codec, &device)) != RSS_OK) {
+         HAL_LOG_ERR("i6c_venc: codec %d is not encoded by this part", (int)cfg->codec);
+         return ret;
+@@ -1111,7 +1366,7 @@ int hal_enc_create_channel(void *ctx, int chn, const rss_video_config_t *cfg)
+         return ret;
+ 
+     i6c_enc_fill_attrib(&attr.attrib, cfg, codec);
+-    i6c_enc_fill_rate(&attr.rate, cfg, codec);
++    i6c_enc_rc_note(st, chn, i6c_enc_fill_rate(&attr.rate, cfg, codec, rcx));
+ 
+     if ((ret = st->venc.create_chn(device, (unsigned int)chn, &attr)) != 0) {
+         HAL_LOG_ERR("MI_VENC_CreateChn(dev %u, chn %d) failed: %d", device, chn, ret);
+@@ -1156,6 +1411,9 @@ int hal_enc_create_channel(void *ctx, int chn, const rss_video_config_t *cfg)
+      */
+     HAL_LOG_INFO("infinity6c: venc chn %d created on dev %u, %ux%u", chn, device, cfg->width,
+                  cfg->height);
++
++    /* The extras last: SetRcParam and its kin need the channel to exist. */
++    i6c_enc_push_extras(st, chn);
+     return RSS_OK;
+ 
+ fail:
+@@ -1436,7 +1694,7 @@ int hal_enc_request_idr(void *ctx, int chn)
+  * ================================================================ */
+ 
+ /*
+- * i6c_enc_reapply_rate -- rebuild the rate half from the cached settings.
++ * i6c_enc_write_rate -- rebuild the rate half from the cached settings.
+  *
+  * The whole attribute is fetched rather than only rebuilt, so that the codec
+  * half written back is byte-for-byte what the driver already holds. It compares
+@@ -1444,7 +1702,7 @@ int hal_enc_request_idr(void *ctx, int chn)
+  * a locally reconstructed copy risks being rejected over a field neither the
+  * caller nor this function meant to touch.
+  */
+-static int i6c_enc_reapply_rate(infinity6c_state_t *st, int chn)
++static int i6c_enc_write_rate(infinity6c_state_t *st, int chn)
+ {
+     infinity6c_venc_chn_t *enc = &st->enc[chn];
+     i6c_venc_codec codec;
+@@ -1462,7 +1720,7 @@ static int i6c_enc_reapply_rate(infinity6c_state_t *st, int chn)
+         return RSS_ERR_IO;
+     }
+ 
+-    i6c_enc_fill_rate(&attr.rate, &enc->cfg, codec);
++    i6c_enc_rc_note(st, chn, i6c_enc_fill_rate(&attr.rate, &enc->cfg, codec, &st->enc_rcx[chn]));
+ 
+     if ((ret = st->venc.set_chn_attr(enc->device, (unsigned int)chn, &attr)) != 0) {
+         HAL_LOG_ERR("MI_VENC_SetChnAttr(chn %d) failed: %d", chn, ret);
+@@ -1472,6 +1730,20 @@ static int i6c_enc_reapply_rate(infinity6c_state_t *st, int chn)
+     return RSS_OK;
+ }
+ 
++/*
++ * i6c_enc_reapply_rate -- the rate half, then the extras after it, for every
++ * bitrate, GOP, frame-rate and mode change. The extras' outcome is logged and
++ * not returned: it is not what the caller asked about.
++ */
++static int i6c_enc_reapply_rate(infinity6c_state_t *st, int chn)
++{
++    int ret = i6c_enc_write_rate(st, chn);
++
++    if (ret == RSS_OK)
++        i6c_enc_push_extras(st, chn);
++    return ret;
++}
++
+ int hal_enc_set_rc_mode(void *ctx, int chn, rss_rc_mode_t mode, uint32_t bitrate)
+ {
+     I6C_ENTER(ctx, chn, st);
+@@ -1517,6 +1789,357 @@ int hal_enc_set_fps(void *ctx, int chn, uint32_t fps_num, uint32_t fps_den)
+     return i6c_enc_reapply_rate(st, chn);
+ }
+ 
++/* ================================================================
++ * RATE-CONTROL EXTRAS: THE OPS
++ *
++ *   op (raptorctl)              CBR             VBR / AVBR          fixed QP
++ *   qp_bounds (set-qp-bounds)   RcParam frame   channel attribute   remembered
++ *   qp_bounds_per_frame         RcParam I+frame RcParam I + attr    remembered
++ *   qp_ip_delta (enc-set)       RcParam         RcParam             I = P - delta
++ *   qp (enc-set)                remembered      remembered          P = qp
++ *   max_pic_size                RcParam         RcParam             remembered
++ *   super_frame                 SetSuperFrameCfg + SetRcPriority, any mode
++ *
++ * "Remembered" means accepted, kept in the record and applied if the channel
++ * later moves to a mode that has the field -- how set-bitrate already behaves on
++ * a fixed-QP channel. MI has no P-only bound: the frame bounds act as the P
++ * bounds, and in VBR/AVBR the I-frame bounds nest inside them.
++ *
++ * The sign of the I/P delta is undocumented ("IPQP change value"); measured on
++ * an SSC377D it is I = P - delta: +6 lowered the I-frame QP against P, -6
++ * raised it, and -6 cut night keyframes from 228 to 57 KB. raptor's value
++ * passes straight through, and the fixed-QP split reads it the same way.
++ *
++ * Left unpublished on purpose: qp_pb_delta (no B frames), and max_psnr,
++ * rc_options and gop_mode, which MI has no equivalent for.
++ * ================================================================ */
++
++/* The channel exists and is H.26x: JPEG has no I/P frames to bound. */
++static int i6c_enc_rc_check(infinity6c_state_t *st, int chn)
++{
++    infinity6c_venc_chn_t *enc = &st->enc[chn];
++
++    if (!enc->created)
++        return RSS_ERR_INVAL;
++    if (enc->device == I6C_VENC_DEV_MJPG_0)
++        return RSS_ERR_NOTSUP;
++    return RSS_OK;
++}
++
++/* What an op may change, saved before it does, so a refused op leaves no trace. */
++typedef struct {
++    i6c_venc_rcx_t x;
++    int16_t min_qp, max_qp;
++} i6c_enc_rc_undo;
++
++static void i6c_enc_rc_save(infinity6c_state_t *st, int chn, i6c_enc_rc_undo *u)
++{
++    u->x = st->enc_rcx[chn];
++    u->min_qp = st->enc[chn].cfg.min_qp;
++    u->max_qp = st->enc[chn].cfg.max_qp;
++}
++
++/*
++ * The record has changed: write the rate half again if the change lives there
++ * (VBR/AVBR frame bounds, the fixed-QP pair), then push RcParam. Unlike the
++ * reapply path, the outcome is the op's answer, and a failure puts the record
++ * and the config back (and rewrites the rate half, if it got that far). A
++ * refused setting must not come back at the next create: rvd does not persist
++ * one either.
++ */
++static int i6c_enc_rc_apply(infinity6c_state_t *st, int chn, bool attr, const i6c_enc_rc_undo *u)
++{
++    int ret = attr ? i6c_enc_write_rate(st, chn) : RSS_OK;
++    bool wrote = attr && ret == RSS_OK;
++
++    if (ret == RSS_OK)
++        ret = i6c_enc_push_rc(st, chn);
++    if (ret != RSS_OK) {
++        st->enc_rcx[chn] = u->x;
++        st->enc[chn].cfg.min_qp = u->min_qp;
++        st->enc[chn].cfg.max_qp = u->max_qp;
++        if (wrote)
++            (void)i6c_enc_write_rate(st, chn);
++    }
++    return ret;
++}
++
++/* Whether the frame bounds of this channel's mode live in the channel attribute. */
++static bool i6c_enc_bounds_in_attr(infinity6c_state_t *st, int chn)
++{
++    int lo, hi;
++    i6c_rc_arm arm = i6c_enc_rate_now(st, chn, &lo, &hi);
++
++    return arm == I6C_RC_ARM_VBR || arm == I6C_RC_ARM_AVBR;
++}
++
++/*
++ * hal_enc_set_qp_bounds -- the frame QP bounds. A negative side is released:
++ * VBR/AVBR's attribute takes this HAL's default for it (20 or 48), CBR's
++ * RcParam MI's full range (12 or 48).
++ */
++int hal_enc_set_qp_bounds(void *ctx, int chn, int min_qp, int max_qp)
++{
++    i6c_enc_rc_undo undo;
++    i6c_venc_rcx_t *x;
++    unsigned flags = 0;
++    int16_t lo, hi;
++    int ret;
++
++    I6C_ENTER(ctx, chn, st);
++
++    if ((ret = i6c_enc_rc_check(st, chn)) != RSS_OK)
++        return ret;
++    if (i6c_rc_take_pair(min_qp, max_qp, &lo, &hi, &flags) != RSS_OK) {
++        HAL_LOG_ERR("venc chn %d: QP bounds [%d, %d] are the wrong way round", chn, min_qp,
++                    max_qp);
++        return RSS_ERR_INVAL;
++    }
++    i6c_enc_rc_note(st, chn, flags);
++
++    i6c_enc_rc_save(st, chn, &undo);
++    x = &st->enc_rcx[chn];
++    x->any = true;
++    x->frame_set = true;
++    x->min_qp = lo;
++    x->max_qp = hi;
++    st->enc[chn].cfg.min_qp = lo;
++    st->enc[chn].cfg.max_qp = hi;
++
++    return i6c_enc_rc_apply(st, chn, i6c_enc_bounds_in_attr(st, chn), &undo);
++}
++
++/*
++ * hal_enc_set_qp_bounds_per_frame -- I-frame bounds, and P bounds that are the
++ * frame bounds (MI has no P-only pair). Either pair may be released with
++ * negative values; a pair the wrong way round refuses the whole call.
++ */
++int hal_enc_set_qp_bounds_per_frame(void *ctx, int chn, int min_i, int max_i, int min_p,
++                                    int max_p)
++{
++    i6c_enc_rc_undo undo;
++    i6c_venc_rcx_t *x;
++    unsigned flags = 0;
++    int16_t ilo, ihi, plo, phi;
++    int ret;
++
++    I6C_ENTER(ctx, chn, st);
++
++    if ((ret = i6c_enc_rc_check(st, chn)) != RSS_OK)
++        return ret;
++    if (i6c_rc_take_pair(min_i, max_i, &ilo, &ihi, &flags) != RSS_OK ||
++        i6c_rc_take_pair(min_p, max_p, &plo, &phi, &flags) != RSS_OK) {
++        HAL_LOG_ERR("venc chn %d: QP bounds I [%d, %d] P [%d, %d]: a pair is the wrong way round",
++                    chn, min_i, max_i, min_p, max_p);
++        return RSS_ERR_INVAL;
++    }
++    i6c_enc_rc_note(st, chn, flags);
++
++    i6c_enc_rc_save(st, chn, &undo);
++    x = &st->enc_rcx[chn];
++    x->any = true;
++    x->iframe_set = true;
++    x->min_iqp = ilo;
++    x->max_iqp = ihi;
++    x->frame_set = true;
++    x->min_qp = plo;
++    x->max_qp = phi;
++    st->enc[chn].cfg.min_qp = plo;
++    st->enc[chn].cfg.max_qp = phi;
++
++    return i6c_enc_rc_apply(st, chn, i6c_enc_bounds_in_attr(st, chn), &undo);
++}
++
++/* hal_enc_set_qp_ip_delta -- s32IPQPDelta, clamped to [-12, 12]. */
++int hal_enc_set_qp_ip_delta(void *ctx, int chn, int delta)
++{
++    i6c_enc_rc_undo undo;
++    i6c_venc_rcx_t *x;
++    unsigned flags = 0;
++    int ret;
++
++    I6C_ENTER(ctx, chn, st);
++
++    if ((ret = i6c_enc_rc_check(st, chn)) != RSS_OK)
++        return ret;
++
++    i6c_enc_rc_save(st, chn, &undo);
++    x = &st->enc_rcx[chn];
++    x->any = true;
++    x->delta_set = true;
++    x->ip_delta =
++        (int16_t)i6c_rc_clamp(delta, I6C_RC_DELTA_MIN, I6C_RC_DELTA_MAX, &flags, I6C_RC_F_RANGE);
++    i6c_enc_rc_note(st, chn, flags);
++
++    /* On a fixed-QP channel the delta splits the attribute's I/P pair. */
++    return i6c_enc_rc_apply(st, chn, st->enc[chn].cfg.rc_mode == RSS_RC_FIXQP, &undo);
++}
++
++/*
++ * hal_enc_set_qp -- the fixed-QP P-frame QP, the I-frame one following it less
++ * the delta. Remembered on any other mode; negative releases it to init_qp.
++ */
++int hal_enc_set_qp(void *ctx, int chn, int qp)
++{
++    i6c_enc_rc_undo undo;
++    i6c_venc_rcx_t *x;
++    unsigned flags = 0;
++    int ret;
++
++    I6C_ENTER(ctx, chn, st);
++
++    if ((ret = i6c_enc_rc_check(st, chn)) != RSS_OK)
++        return ret;
++
++    i6c_enc_rc_save(st, chn, &undo);
++    x = &st->enc_rcx[chn];
++    x->qp_set = qp >= 0;
++    x->qp = x->qp_set ? (int16_t)i6c_rc_clamp(qp, I6C_RC_QP_MIN, I6C_RC_QP_MAX, &flags,
++                                              I6C_RC_F_RANGE)
++                      : 0;
++    i6c_enc_rc_note(st, chn, flags);
++
++    if (st->enc[chn].cfg.rc_mode != RSS_RC_FIXQP)
++        return RSS_OK;
++    return i6c_enc_rc_apply(st, chn, true, &undo);
++}
++
++/*
++ * hal_enc_set_max_pic_size -- MaxISize and MaxPSize, from kbits; 0 lifts a cap.
++ * The driver's unit is unknown (see I6C_RC_SIZE_UNIT_BITS); RSS_VENC_SIZE_UNIT_BITS
++ * overrides the bits-per-unit assumed, read once.
++ */
++static uint32_t i6c_enc_size_unit_bits(infinity6c_state_t *st)
++{
++    const char *s;
++    char *end = NULL;
++    unsigned long v;
++
++    if (st->enc_size_unit_bits)
++        return st->enc_size_unit_bits;
++
++    st->enc_size_unit_bits = I6C_RC_SIZE_UNIT_BITS;
++    if (!(s = getenv("RSS_VENC_SIZE_UNIT_BITS")) || !*s)
++        return st->enc_size_unit_bits;
++
++    v = strtoul(s, &end, 10);
++    if (*end || v < 1 || v > 65536)
++        HAL_LOG_WARN("infinity6c: RSS_VENC_SIZE_UNIT_BITS=%s ignored (bits per unit, 1-65536)", s);
++    else
++        st->enc_size_unit_bits = (uint32_t)v;
++    HAL_LOG_INFO("infinity6c: max picture size in units of %u bits", st->enc_size_unit_bits);
++    return st->enc_size_unit_bits;
++}
++
++int hal_enc_set_max_pic_size(void *ctx, int chn, uint32_t max_i_kbits, uint32_t max_p_kbits)
++{
++    i6c_enc_rc_undo undo;
++    i6c_venc_rcx_t *x;
++    int ret;
++
++    I6C_ENTER(ctx, chn, st);
++
++    if ((ret = i6c_enc_rc_check(st, chn)) != RSS_OK)
++        return ret;
++
++    i6c_enc_rc_save(st, chn, &undo);
++    x = &st->enc_rcx[chn];
++    x->any = true;
++    x->max_i_size = i6c_rc_size_of_kbits(max_i_kbits, i6c_enc_size_unit_bits(st));
++    x->max_p_size = i6c_rc_size_of_kbits(max_p_kbits, i6c_enc_size_unit_bits(st));
++
++    return i6c_enc_rc_apply(st, chn, false, &undo);
++}
++
++/*
++ * hal_enc_set_super_frame -- the hard per-frame limit: discard or re-encode a
++ * frame over the threshold (bits). Re-encode forces frame-bits-first priority,
++ * since under bitrate-first, which rvd always sends, it never fires.
++ */
++int hal_enc_set_super_frame(void *ctx, int chn, const rss_super_frame_cfg_t *cfg)
++{
++    i6c_enc_rc_undo undo;
++    i6c_venc_rcx_t *x;
++    bool forced;
++    int ret;
++
++    I6C_ENTER(ctx, chn, st);
++
++    if (!cfg)
++        return RSS_ERR_INVAL;
++    if ((ret = i6c_enc_rc_check(st, chn)) != RSS_OK)
++        return ret;
++    if (cfg->mode != RSS_SUPERFRM_NONE && cfg->mode != RSS_SUPERFRM_DISCARD &&
++        cfg->mode != RSS_SUPERFRM_REENCODE)
++        return RSS_ERR_INVAL;
++
++    i6c_enc_rc_save(st, chn, &undo);
++    x = &st->enc_rcx[chn];
++    x->priority = i6c_rc_priority(cfg->mode, cfg->priority, &forced);
++    if (forced && !x->warned_prio) {
++        x->warned_prio = true;
++        HAL_LOG_WARN("venc chn %d: re-encode needs frame-bits-first rate control, so the RC "
++                     "priority is frame bits rather than the %s asked for",
++                     chn, cfg->priority == RSS_RC_PRIO_RDO ? "RDO" : "bitrate");
++    }
++    x->superfrm.mode = (uint32_t)cfg->mode;
++    x->superfrm.iBitsThr = cfg->i_bits_thr;
++    x->superfrm.pBitsThr = cfg->p_bits_thr;
++    x->superfrm.bBitsThr = 0;
++    x->superfrm_set = true;
++
++    if ((ret = i6c_enc_push_superfrm(st, chn)) != RSS_OK)
++        st->enc_rcx[chn] = undo.x;
++    return ret;
++}
++
++/*
++ * hal_enc_get_super_frame -- what was sent, priority included; before any set,
++ * what the driver holds.
++ */
++int hal_enc_get_super_frame(void *ctx, int chn, rss_super_frame_cfg_t *cfg)
++{
++    infinity6c_venc_chn_t *enc;
++    i6c_venc_rcx_t *x;
++    i6c_venc_superfrm sf;
++    uint32_t prio;
++    int ret;
++
++    I6C_ENTER(ctx, chn, st);
++
++    if (!cfg)
++        return RSS_ERR_INVAL;
++    if ((ret = i6c_enc_rc_check(st, chn)) != RSS_OK)
++        return ret;
++
++    enc = &st->enc[chn];
++    x = &st->enc_rcx[chn];
++    if (x->superfrm_set) {
++        sf = x->superfrm;
++        prio = x->priority;
++    } else {
++        if (!st->venc.get_superfrm || !st->venc.get_rc_prio)
++            return RSS_ERR_NOTSUP;
++        memset(&sf, 0, sizeof(sf));
++        prio = 0;
++        if ((ret = st->venc.get_superfrm(enc->device, (unsigned int)chn, &sf)) != 0 ||
++            (ret = st->venc.get_rc_prio(enc->device, (unsigned int)chn, &prio)) != 0) {
++            HAL_LOG_ERR("MI_VENC_GetSuperFrameCfg/GetRcPriority(chn %d) failed: %d", chn, ret);
++            return RSS_ERR_IO;
++        }
++    }
++
++    memset(cfg, 0, sizeof(*cfg));
++    cfg->mode = (rss_super_frame_mode_t)sf.mode;
++    cfg->i_bits_thr = sf.iBitsThr;
++    cfg->p_bits_thr = sf.pBitsThr;
++    cfg->priority = prio == I6C_VENC_RCPRIO_FRAMEBITS ? RSS_RC_PRIO_FRAMEBITS : RSS_RC_PRIO_BITRATE;
++    /* MI's re-encode count is fixed at four; the field is T32's. */
++    cfg->max_reencode = 0;
++
++    return RSS_OK;
++}
++
+ int hal_enc_query(void *ctx, int chn, bool *busy)
+ {
+     i6c_venc_stat stat;
+@@ -1636,6 +2259,12 @@ void i6c_teardown_all(infinity6c_state_t *st)
+         }
+     }
+ 
++    /*
++     * The one place the extras records are cleared: they outlive a single
++     * channel's destroy on purpose, and nothing outlives this.
++     */
++    memset(st->enc_rcx, 0, sizeof(st->enc_rcx));
++
+     /* Forced rather than reference counted: the daemon is going away. */
+     st->pipeline_refs = 1;
+     i6c_pipeline_destroy(st);
+diff --git a/src/infinity6c/i6c_venc_load.h b/src/infinity6c/i6c_venc_load.h
+index 931c846..09b4b1b 100644
+--- a/src/infinity6c/i6c_venc_load.h
++++ b/src/infinity6c/i6c_venc_load.h
+@@ -21,6 +21,7 @@
+ #include "hal_symbols.h"
+ 
+ #include "i6c_venc.h"
++#include "i6c_venc_rc.h"
+ 
+ typedef struct {
+     void *lib;
+@@ -62,6 +63,19 @@ typedef struct {
+ 
+     int (*get_jpeg_param)(unsigned int device, unsigned int channel, i6c_venc_jpg *param);
+     int (*set_jpeg_param)(unsigned int device, unsigned int channel, i6c_venc_jpg *param);
++
++    /*
++     * The rate-control extras (i6c_venc_rc.h). Optional, unlike everything
++     * above: a library without them still encodes, so a missing one leaves its
++     * pointer NULL and only the op that needs it answers RSS_ERR_NOTSUP. The
++     * priority is passed by pointer on MI 3.0, not by value as the V2 doc has it.
++     */
++    int (*set_rc_param)(unsigned int device, unsigned int channel, i6c_venc_rcparam *param);
++    int (*get_rc_param)(unsigned int device, unsigned int channel, i6c_venc_rcparam *param);
++    int (*set_superfrm)(unsigned int device, unsigned int channel, i6c_venc_superfrm *cfg);
++    int (*get_superfrm)(unsigned int device, unsigned int channel, i6c_venc_superfrm *cfg);
++    int (*set_rc_prio)(unsigned int device, unsigned int channel, uint32_t *prio);
++    int (*get_rc_prio)(unsigned int device, unsigned int channel, uint32_t *prio);
+ } i6c_venc_api;
+ 
+ static inline int i6c_venc_load(i6c_venc_api *venc)
+@@ -147,6 +161,25 @@ static inline int i6c_venc_load(i6c_venc_api *venc)
+               hal_symbol_load("i6c_venc", venc->lib, "MI_VENC_SetJpegParam")))
+         return RSS_ERR_NOTSUP;
+ 
++    /* Optional: plain dlsym, since a miss is not an error. */
++    venc->set_rc_param = (int (*)(unsigned int, unsigned int, i6c_venc_rcparam *))dlsym(
++        venc->lib, "MI_VENC_SetRcParam");
++    venc->get_rc_param = (int (*)(unsigned int, unsigned int, i6c_venc_rcparam *))dlsym(
++        venc->lib, "MI_VENC_GetRcParam");
++    venc->set_superfrm = (int (*)(unsigned int, unsigned int, i6c_venc_superfrm *))dlsym(
++        venc->lib, "MI_VENC_SetSuperFrameCfg");
++    venc->get_superfrm = (int (*)(unsigned int, unsigned int, i6c_venc_superfrm *))dlsym(
++        venc->lib, "MI_VENC_GetSuperFrameCfg");
++    venc->set_rc_prio =
++        (int (*)(unsigned int, unsigned int, uint32_t *))dlsym(venc->lib, "MI_VENC_SetRcPriority");
++    venc->get_rc_prio =
++        (int (*)(unsigned int, unsigned int, uint32_t *))dlsym(venc->lib, "MI_VENC_GetRcPriority");
++
++    if (!venc->set_rc_param || !venc->get_rc_param || !venc->set_superfrm ||
++        !venc->get_superfrm || !venc->set_rc_prio || !venc->get_rc_prio)
++        HAL_LOG_INFO("i6c_venc: no RcParam/SuperFrameCfg/RcPriority calls in libmi_venc.so; "
++                     "the encoder's rate-control extras answer not supported");
++
+     return RSS_OK;
+ }
+ 
+diff --git a/src/infinity6c/i6c_venc_rc.h b/src/infinity6c/i6c_venc_rc.h
+new file mode 100644
+index 0000000..066ee9a
+--- /dev/null
++++ b/src/infinity6c/i6c_venc_rc.h
+@@ -0,0 +1,663 @@
++/*
++ * infinity6c/i6c_venc_rc.h -- MI_VENC rate-control extras for MI 3.0: the
++ * RcParam arms, the super-frame config and the RC priority, and the pure logic
++ * that turns raptor's settings into them.
++ *
++ * Local rather than in sigmastar-headers/, which is vendored verbatim and never
++ * edited in place (FORK.md). The ABI half is a candidate for
++ * johnchia/sigmastar-headers once the bench has proven it.
++ *
++ * Pure: no HAL, no MI, no dlopen, so tests/t_venc_rc_i6c.c includes it on the
++ * build host. hal_encoder.c makes the MI calls.
++ *
++ * THE ABI, and where it was checked
++ *
++ * Against what the images ship: the monolithic mi.ko (the SDK's 1230 drop) and
++ * libmi_venc.so. The SDK tree's 0907 mi_venc.ko numbers rate modes differently
++ * and is not shipped; do not take offsets or mode numbers from it.
++ *
++ * - MI_VENC_RcParam_t is 56 bytes: SetRcParam's ioctl (0x40406936) carries 64,
++ *   two id words and the struct, and the library copies 3 x 16 + 8 bytes.
++ *   RC_TEXTURE_THR_SIZE is 1, so the arms start at +12.
++ * - The arms are as the SigmaStar MI V2 VENC doc prints them, and the driver's
++ *   apply (mi.ko 0x87520) confirms the order: H.264 CBR (mode 1) forwards
++ *   +12..+40, VBR (2) +12..+36 reordered into its internal AVBR shape, AVBR (6)
++ *   +12..+48; H.265 CBR, VBR and AVBR (10, 11, 14) are identical.
++ * - MI_VENC_SuperFrameCfg_t is 16 bytes {mode, I, P, B thresholds}, the
++ *   thresholds in bits (doc; ioctl 0x4018693e and the driver's trace string).
++ * - MI_VENC_SetRcPriority takes a *pointer* to the enum on MI 3.0, where the V2
++ *   doc's prototype passes it by value: the shipped library NULL-checks its
++ *   third argument and loads the priority through it (ioctl 0x400c6940). The
++ *   driver accepts 1..2 only.
++ *
++ * Two driver behaviours shape hal_encoder.c rather than this file:
++ *
++ * - SetRcParam is deferred. MI_VENC_IMPL_SetRcParam checks only the codec,
++ *   copies the 56 bytes into the channel context and sets a dirty byte; the
++ *   encode task applies them when the next frame is queued. A successful return
++ *   proves nothing about the values, which is why i6c_rc_build keeps every
++ *   asked-for field inside its documented range itself.
++ * - GetRcParam returns six CBR words and five VBR words: MaxISize and MaxPSize
++ *   never come back for those two modes, although the apply forwards them. A
++ *   Get-modify-Set round trip would zero the cap, so the HAL owns both fields
++ *   and writes them from its own record every time.
++ */
++#ifndef INFINITY6C_I6C_VENC_RC_H
++#define INFINITY6C_I6C_VENC_RC_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++
++#include "raptor_hal.h"
++
++/* ================================================================
++ * ABI
++ * ================================================================ */
++
++/*
++ * The rate modes the RcParam arms belong to, in the UBR numbering the shipped
++ * driver speaks (see i6c_enc_fill_rate). Spelled out here so this header stays
++ * pure; hal_encoder.c asserts each against i6c_venc_ratemode_ubr.
++ */
++enum {
++    I6C_RC_MODE_H264CBR = 1,
++    I6C_RC_MODE_H264VBR = 2,
++    I6C_RC_MODE_H264AVBR = 6,
++    I6C_RC_MODE_H265CBR = 10,
++    I6C_RC_MODE_H265VBR = 11,
++    I6C_RC_MODE_H265AVBR = 14,
++};
++
++/* MI_VENC_ParamH264Cbr_t and ParamH265Cbr_t. */
++typedef struct {
++    uint32_t maxQp;     /* frame bounds: CBR's channel attribute has none */
++    uint32_t minQp;
++    int32_t ipQpDelta;  /* [-12, 12] */
++    uint32_t maxIQp;    /* independent of the frame pair in CBR */
++    uint32_t minIQp;
++    uint32_t maxIPProp; /* [5, 100] */
++    uint32_t maxISize;  /* 0 = no cap; the unit is undocumented, see I6C_RC_SIZE_PER_KBIT */
++    uint32_t maxPSize;
++} i6c_venc_rc_cbr;
++
++/* MI_VENC_ParamH264Vbr_t and ParamH265Vbr_t. */
++typedef struct {
++    int32_t ipQpDelta;
++    int32_t changePos;  /* [5, 100] */
++    uint32_t maxIQp;    /* (MinQp, MaxQp]: inside the channel attribute's frame bounds */
++    uint32_t minIQp;    /* [MinQp, MaxQp) */
++    uint32_t maxIPProp;
++    uint32_t maxISize;
++    uint32_t maxPSize;
++} i6c_venc_rc_vbr;
++
++/*
++ * MI_VENC_ParamH264Avbr_t and ParamH265Avbr_t. MinIQp and MaxIQp sit the other
++ * way round from VBR's, with MaxIPProp between them -- the vendor's order, which
++ * the driver's own VBR reorder confirms.
++ */
++typedef struct {
++    int32_t ipQpDelta;          /* default 0 */
++    int32_t changePos;          /* default 80 */
++    uint32_t minIQp;            /* default 12 */
++    uint32_t maxIPProp;
++    uint32_t maxIQp;            /* default 48 */
++    uint32_t maxISize;
++    uint32_t maxPSize;
++    uint32_t minStillPercent;   /* [5, 100] */
++    uint32_t maxStillQp;        /* "not supported yet" */
++    uint32_t motionSensitivity; /* [0, 100], default 100 */
++} i6c_venc_rc_avbr;
++
++typedef struct {
++    uint32_t thrdI[1];   /* "not supported yet": written 0 */
++    uint32_t thrdP[1];
++    uint32_t rowQpDelta;
++    union {
++        i6c_venc_rc_cbr cbr;
++        i6c_venc_rc_vbr vbr;
++        i6c_venc_rc_avbr avbr;
++    };
++    /*
++     * MI_VOID *pRcParam, reserved and written NULL. A u32 rather than a pointer:
++     * on the 32-bit target the two are the same four bytes, and this way the
++     * layout -- and the asserts below -- hold on the build host too.
++     */
++    uint32_t rcParamPtr;
++} i6c_venc_rcparam;
++
++#define I6C_VENC_SUPERFRM_NONE 0u
++#define I6C_VENC_SUPERFRM_DISCARD 1u
++/* Raise QP by 4 and encode again, up to four times, then discard (vendor doc). */
++#define I6C_VENC_SUPERFRM_REENCODE 2u
++
++typedef struct {
++    uint32_t mode;
++    uint32_t iBitsThr; /* bits */
++    uint32_t pBitsThr;
++    uint32_t bBitsThr; /* no B frames on this backend: 0 */
++} i6c_venc_superfrm;
++
++/* MI_VENC_RcPriority_e. Under bitrate-first, an oversized frame is not re-encoded. */
++#define I6C_VENC_RCPRIO_BITRATE 1u
++#define I6C_VENC_RCPRIO_FRAMEBITS 2u
++
++_Static_assert(sizeof(i6c_venc_rcparam) == 56, "SetRcParam's ioctl carries two ids and 56 bytes");
++_Static_assert(offsetof(i6c_venc_rcparam, cbr) == 12, "the arms follow ThrdI, ThrdP and RowQpDelta");
++_Static_assert(offsetof(i6c_venc_rcparam, cbr.maxISize) == 36, "CBR's apply forwards up to +40");
++_Static_assert(offsetof(i6c_venc_rcparam, cbr.maxPSize) == 40, "CBR's last forwarded word");
++_Static_assert(offsetof(i6c_venc_rcparam, vbr.maxISize) == 32, "VBR's apply forwards up to +36");
++_Static_assert(offsetof(i6c_venc_rcparam, vbr.maxPSize) == 36, "VBR's last forwarded word");
++_Static_assert(offsetof(i6c_venc_rcparam, avbr.maxIQp) == 28, "AVBR puts MaxIQp after MaxIPProp");
++_Static_assert(offsetof(i6c_venc_rcparam, avbr.motionSensitivity) == 48, "AVBR forwards up to +48");
++_Static_assert(offsetof(i6c_venc_rcparam, rcParamPtr) == 52, "the reserved pointer closes the 56");
++_Static_assert(sizeof(i6c_venc_superfrm) == 16, "SetSuperFrameCfg's ioctl carries two ids and 16");
++
++/* ================================================================
++ * RANGES AND UNITS
++ * ================================================================ */
++
++/* Every QP field's documented range, frame and I-frame bounds and fixed QP alike. */
++#define I6C_RC_QP_MIN 12
++#define I6C_RC_QP_MAX 48
++#define I6C_RC_DELTA_MIN (-12)
++#define I6C_RC_DELTA_MAX 12
++/* ChangePos, MaxIPProp and MinStillPercent. */
++#define I6C_RC_PCT_MIN 5
++#define I6C_RC_PCT_MAX 100
++
++/* The VBR/AVBR frame bounds this HAL has always used when the config names none. */
++#define I6C_RC_VBR_MIN_QP 20
++#define I6C_RC_VBR_MAX_QP 48
++
++/* The fixed QP when init_qp is unset, likewise long-standing. */
++#define I6C_RC_FIXQP_DEFAULT 30
++
++/*
++ * Bits per driver unit of MaxISize/MaxPSize: 8, the fields count bytes.
++ * raptor's set-max-pic-size speaks kbits, and the doc gives these two fields
++ * no unit (the super-frame thresholds, the only sizes it does, are bits).
++ * Measured on an SSC377D, VBR, 232 KB natural keyframes: 300,000 units changed
++ * nothing and 100,000 settled them at ~130 KB, which only bytes explains (as
++ * bits both caps sit far below the frame, as kbits both far above). The cap is
++ * soft -- rate control "tries", landing ~1.3x over -- and a cap of a few
++ * hundred units does no more than one just under the frame.
++ * RSS_VENC_SIZE_UNIT_BITS overrides it for another driver drop.
++ */
++#define I6C_RC_SIZE_UNIT_BITS 8u
++
++/* ================================================================
++ * THE PER-CHANNEL RECORD
++ * ================================================================ */
++
++/*
++ * What the extras ops were asked, per encoder channel.
++ *
++ * Kept apart from infinity6c_venc_chn_t because rvd destroys and re-creates a
++ * channel on set-resolution and set-codec, and hal_enc_destroy_channel clears
++ * that struct. This one is cleared only by i6c_teardown_all, so a re-created
++ * channel gets its settings back. After an rvd restart it starts empty and the
++ * config file rules again.
++ *
++ * All zero is "nothing asked", so the calloc'd state needs no initialiser.
++ */
++typedef struct {
++    /* An RcParam op was called: push RcParam on every create and reapply from now on. */
++    bool any;
++
++    /*
++     * Frame bounds from set-qp-bounds or the P pair of set-qp-bounds-per-frame,
++     * -1 for a side released back to the config. They override the config's at
++     * create, because rvd's per-frame handler does not update its own copy.
++     */
++    bool frame_set;
++    int16_t min_qp, max_qp;
++
++    /* I-frame bounds from set-qp-bounds-per-frame; -1 = released, MI's full range. */
++    bool iframe_set;
++    int16_t min_iqp, max_iqp;
++
++    /* s32IPQPDelta from enc-set qp_ip_delta; also splits the fixed-QP pair. */
++    bool delta_set;
++    int16_t ip_delta;
++
++    /* The fixed-QP P-frame QP from enc-set qp; unset = init_qp. */
++    bool qp_set;
++    int16_t qp;
++
++    /* MaxISize and MaxPSize in driver units, 0 = no cap. Owned here, see above. */
++    uint32_t max_i_size;
++    uint32_t max_p_size;
++
++    /* The super-frame config and RC priority exactly as sent. */
++    bool superfrm_set;
++    i6c_venc_superfrm superfrm;
++    uint32_t priority;
++
++    /* Each warning once per channel, not per push. */
++    bool warned_range;
++    bool warned_swap;
++    bool warned_nest;
++    bool warned_prio;
++    bool warned_nosym;
++} i6c_venc_rcx_t;
++
++/* ================================================================
++ * PURE LOGIC
++ * ================================================================ */
++
++/* Which arm a rate mode fills; NONE for fixed QP, MJPEG and anything unknown. */
++typedef enum {
++    I6C_RC_ARM_NONE = 0,
++    I6C_RC_ARM_CBR,
++    I6C_RC_ARM_VBR,
++    I6C_RC_ARM_AVBR,
++} i6c_rc_arm;
++
++static inline i6c_rc_arm i6c_rc_arm_of(int mode)
++{
++    switch (mode) {
++    case I6C_RC_MODE_H264CBR:
++    case I6C_RC_MODE_H265CBR:
++        return I6C_RC_ARM_CBR;
++    case I6C_RC_MODE_H264VBR:
++    case I6C_RC_MODE_H265VBR:
++        return I6C_RC_ARM_VBR;
++    case I6C_RC_MODE_H264AVBR:
++    case I6C_RC_MODE_H265AVBR:
++        return I6C_RC_ARM_AVBR;
++    default:
++        return I6C_RC_ARM_NONE;
++    }
++}
++
++static inline const char *i6c_rc_arm_name(i6c_rc_arm arm)
++{
++    return arm == I6C_RC_ARM_CBR ? "CBR" : arm == I6C_RC_ARM_VBR ? "VBR" :
++           arm == I6C_RC_ARM_AVBR ? "AVBR" : "none";
++}
++
++/*
++ * Flags the builders return, so the caller can say each thing once.
++ *   RANGE: a value raptor asked for was pulled into MI's range.
++ *   SWAP:  a config QP pair was the wrong way round and was swapped.
++ *   NEST:  asked-for I-frame bounds were pulled inside VBR/AVBR's frame bounds.
++ */
++#define I6C_RC_F_RANGE 0x1u
++#define I6C_RC_F_SWAP 0x2u
++#define I6C_RC_F_NEST 0x4u
++
++static inline int i6c_rc_clamp(int v, int lo, int hi, unsigned *flags, unsigned flag)
++{
++    if (v < lo) {
++        *flags |= flag;
++        return lo;
++    }
++    if (v > hi) {
++        *flags |= flag;
++        return hi;
++    }
++    return v;
++}
++
++/*
++ * i6c_rc_take_pair -- a QP pair as an op gave it.
++ *
++ * A negative side releases that side; the others clamp to [12, 48]. raptor's
++ * documented CBR defaults (15..51) reach past 48, so rejecting out-of-range
++ * values would break stock configs. A pair still the wrong way round after
++ * clamping is RSS_ERR_INVAL, and nothing is stored.
++ */
++static inline int i6c_rc_take_pair(int min, int max, int16_t *out_min, int16_t *out_max,
++                                   unsigned *flags)
++{
++    int lo = min < 0 ? -1 : i6c_rc_clamp(min, I6C_RC_QP_MIN, I6C_RC_QP_MAX, flags, I6C_RC_F_RANGE);
++    int hi = max < 0 ? -1 : i6c_rc_clamp(max, I6C_RC_QP_MIN, I6C_RC_QP_MAX, flags, I6C_RC_F_RANGE);
++
++    if (lo >= 0 && hi >= 0 && lo > hi)
++        return RSS_ERR_INVAL;
++
++    *out_min = (int16_t)lo;
++    *out_max = (int16_t)hi;
++    return RSS_OK;
++}
++
++/*
++ * set-max-pic-size's kbits in driver units of unit_bits bits each: saturating
++ * rather than wrapping, and never rounding a cap down to 0, which is "no cap".
++ */
++static inline uint32_t i6c_rc_size_of_kbits(uint32_t kbits, uint32_t unit_bits)
++{
++    uint64_t units;
++
++    if (!kbits)
++        return 0;
++    units = (uint64_t)kbits * 1000u / (unit_bits ? unit_bits : 1u);
++    if (!units)
++        return 1;
++    return units > UINT32_MAX ? UINT32_MAX : (uint32_t)units;
++}
++
++/*
++ * i6c_rc_frame_bounds -- VBR/AVBR's frame bounds for the channel attribute.
++ *
++ * The config's pair, clamped to [12, 48]; an unset side takes this HAL's
++ * long-standing default, and the default floor yields to a ceiling set below
++ * it. A pair the config gave the wrong way round is swapped and flagged: the
++ * driver accepts it as it is and pins QP to the ceiling, and failing the create
++ * instead would take the stream down over a config typo.
++ */
++static inline unsigned i6c_rc_frame_bounds(int cfg_min, int cfg_max, unsigned int *min,
++                                           unsigned int *max)
++{
++    unsigned flags = 0;
++    int hi = cfg_max >= 0 ? i6c_rc_clamp(cfg_max, I6C_RC_QP_MIN, I6C_RC_QP_MAX, &flags,
++                                         I6C_RC_F_RANGE)
++                          : I6C_RC_VBR_MAX_QP;
++    int lo = cfg_min >= 0 ? i6c_rc_clamp(cfg_min, I6C_RC_QP_MIN, I6C_RC_QP_MAX, &flags,
++                                         I6C_RC_F_RANGE)
++                          : (I6C_RC_VBR_MIN_QP < hi ? I6C_RC_VBR_MIN_QP : hi);
++
++    if (lo > hi) {
++        int t = lo;
++
++        lo = hi;
++        hi = t;
++        flags |= I6C_RC_F_SWAP;
++    }
++
++    *min = (unsigned int)lo;
++    *max = (unsigned int)hi;
++    return flags;
++}
++
++/*
++ * i6c_rc_fixqp -- the fixed-QP pair.
++ *
++ * With nothing asked this is exactly the old path: init_qp, or 30, for both
++ * frames. Otherwise the P-frame QP is enc-set qp (or init_qp) and the I-frame QP
++ * is that less the I/P delta, the delta coming from enc-set qp_ip_delta or the
++ * config's ip_delta (where -1 means "the SDK default", i.e. none). Both clamp to
++ * the fixed-QP range [12, 48].
++ */
++static inline unsigned i6c_rc_fixqp(int init_qp, const i6c_venc_rcx_t *x, int cfg_ip_delta,
++                                    unsigned int *iqp, unsigned int *pqp)
++{
++    unsigned flags = 0;
++    int p = x->qp_set ? x->qp : init_qp > 0 ? init_qp : I6C_RC_FIXQP_DEFAULT;
++    int d = x->delta_set ? x->ip_delta : cfg_ip_delta >= 0 ? cfg_ip_delta : 0;
++
++    if (!x->qp_set && !x->delta_set && cfg_ip_delta < 0) {
++        *iqp = *pqp = (unsigned int)p;
++        return 0;
++    }
++
++    p = i6c_rc_clamp(p, I6C_RC_QP_MIN, I6C_RC_QP_MAX, &flags, I6C_RC_F_RANGE);
++    *pqp = (unsigned int)p;
++    *iqp = (unsigned int)i6c_rc_clamp(p - d, I6C_RC_QP_MIN, I6C_RC_QP_MAX, &flags, I6C_RC_F_RANGE);
++    return flags;
++}
++
++/*
++ * i6c_rc_priority -- the MI priority for a super-frame request.
++ *
++ * Re-encode never fires under bitrate-first ("the oversized frame will not be
++ * reprogrammed"), and rvd's set-super-frame always sends bitrate-first. So
++ * REENCODE forces frame-bits-first and says so through *forced. RDO has no MI
++ * twin and maps to bitrate-first.
++ */
++static inline uint32_t i6c_rc_priority(rss_super_frame_mode_t mode, rss_rc_priority_t asked,
++                                       bool *forced)
++{
++    *forced = false;
++    if (mode == RSS_SUPERFRM_REENCODE) {
++        *forced = asked != RSS_RC_PRIO_FRAMEBITS;
++        return I6C_VENC_RCPRIO_FRAMEBITS;
++    }
++    return asked == RSS_RC_PRIO_FRAMEBITS ? I6C_VENC_RCPRIO_FRAMEBITS : I6C_VENC_RCPRIO_BITRATE;
++}
++
++/* RcParam as fields with one meaning each, whatever arm they came from. */
++typedef struct {
++    int max_qp, min_qp; /* CBR only */
++    int ip_delta;
++    int change_pos;     /* VBR and AVBR */
++    int max_iqp, min_iqp;
++    int max_ip_prop;
++    uint32_t max_i_size, max_p_size;
++    int min_still_pct, max_still_qp, motion_sens; /* AVBR only */
++} i6c_rc_fields;
++
++static inline void i6c_rc_decode(i6c_rc_arm arm, const i6c_venc_rcparam *p, i6c_rc_fields *f)
++{
++    memset(f, 0, sizeof(*f));
++    switch (arm) {
++    case I6C_RC_ARM_CBR:
++        f->max_qp = (int)p->cbr.maxQp;
++        f->min_qp = (int)p->cbr.minQp;
++        f->ip_delta = p->cbr.ipQpDelta;
++        f->max_iqp = (int)p->cbr.maxIQp;
++        f->min_iqp = (int)p->cbr.minIQp;
++        f->max_ip_prop = (int)p->cbr.maxIPProp;
++        f->max_i_size = p->cbr.maxISize;
++        f->max_p_size = p->cbr.maxPSize;
++        break;
++    case I6C_RC_ARM_VBR:
++        f->ip_delta = p->vbr.ipQpDelta;
++        f->change_pos = p->vbr.changePos;
++        f->max_iqp = (int)p->vbr.maxIQp;
++        f->min_iqp = (int)p->vbr.minIQp;
++        f->max_ip_prop = (int)p->vbr.maxIPProp;
++        f->max_i_size = p->vbr.maxISize;
++        f->max_p_size = p->vbr.maxPSize;
++        break;
++    case I6C_RC_ARM_AVBR:
++        f->ip_delta = p->avbr.ipQpDelta;
++        f->change_pos = p->avbr.changePos;
++        f->min_iqp = (int)p->avbr.minIQp;
++        f->max_ip_prop = (int)p->avbr.maxIPProp;
++        f->max_iqp = (int)p->avbr.maxIQp;
++        f->max_i_size = p->avbr.maxISize;
++        f->max_p_size = p->avbr.maxPSize;
++        f->min_still_pct = (int)p->avbr.minStillPercent;
++        f->max_still_qp = (int)p->avbr.maxStillQp;
++        f->motion_sens = (int)p->avbr.motionSensitivity;
++        break;
++    default:
++        break;
++    }
++}
++
++/* The common words and the reserved pointer go out as zero. */
++static inline void i6c_rc_encode(i6c_rc_arm arm, const i6c_rc_fields *f, i6c_venc_rcparam *p)
++{
++    memset(p, 0, sizeof(*p));
++    switch (arm) {
++    case I6C_RC_ARM_CBR:
++        p->cbr.maxQp = (uint32_t)f->max_qp;
++        p->cbr.minQp = (uint32_t)f->min_qp;
++        p->cbr.ipQpDelta = f->ip_delta;
++        p->cbr.maxIQp = (uint32_t)f->max_iqp;
++        p->cbr.minIQp = (uint32_t)f->min_iqp;
++        p->cbr.maxIPProp = (uint32_t)f->max_ip_prop;
++        p->cbr.maxISize = f->max_i_size;
++        p->cbr.maxPSize = f->max_p_size;
++        break;
++    case I6C_RC_ARM_VBR:
++        p->vbr.ipQpDelta = f->ip_delta;
++        p->vbr.changePos = f->change_pos;
++        p->vbr.maxIQp = (uint32_t)f->max_iqp;
++        p->vbr.minIQp = (uint32_t)f->min_iqp;
++        p->vbr.maxIPProp = (uint32_t)f->max_ip_prop;
++        p->vbr.maxISize = f->max_i_size;
++        p->vbr.maxPSize = f->max_p_size;
++        break;
++    case I6C_RC_ARM_AVBR:
++        p->avbr.ipQpDelta = f->ip_delta;
++        p->avbr.changePos = f->change_pos;
++        p->avbr.minIQp = (uint32_t)f->min_iqp;
++        p->avbr.maxIPProp = (uint32_t)f->max_ip_prop;
++        p->avbr.maxIQp = (uint32_t)f->max_iqp;
++        p->avbr.maxISize = f->max_i_size;
++        p->avbr.maxPSize = f->max_p_size;
++        p->avbr.minStillPercent = (uint32_t)f->min_still_pct;
++        p->avbr.maxStillQp = (uint32_t)f->max_still_qp;
++        p->avbr.motionSensitivity = (uint32_t)f->motion_sens;
++        break;
++    default:
++        break;
++    }
++}
++
++/* What one push asks of RcParam. */
++typedef struct {
++    /*
++     * CBR: the frame bounds to write, -1 for a side the driver keeps. VBR/AVBR:
++     * the channel attribute's frame bounds, which the I-frame pair nests in.
++     */
++    int min_qp, max_qp;
++    int min_iqp, max_iqp; /* -1 = the driver's */
++    /* A side an op released: it goes out as MI's full range, and nesting it is no news. */
++    bool full_min_i, full_max_i;
++    bool has_delta;
++    int ip_delta;
++    uint32_t max_i_size, max_p_size; /* always written: see the header comment */
++} i6c_rc_want;
++
++/*
++ * i6c_rc_want_of -- the record and the channel's config as one request.
++ *
++ * cfg_* are the channel's live config (frame bounds already overlaid from the
++ * record); attr_* the frame bounds its VBR/AVBR channel attribute carries.
++ * Returns whether there is anything to push. A channel nobody configured never
++ * sees SetRcParam, so the default path is exactly what it was. Config values
++ * alone count when they have nowhere else to go: CBR's frame bounds, which its
++ * channel attribute lacks, and ip_delta (where -1 is "the SDK default").
++ *
++ * A side an op released (-1) goes out as MI's full range, 12 or 48. Leaving it
++ * to the driver would keep the last value written: GetRcParam reports the live
++ * state, not a default (seen on the bench).
++ */
++static inline bool i6c_rc_want_of(const i6c_venc_rcx_t *x, i6c_rc_arm arm, int cfg_min_qp,
++                                  int cfg_max_qp, int cfg_ip_delta, int attr_min_qp,
++                                  int attr_max_qp, i6c_rc_want *w)
++{
++    memset(w, 0, sizeof(*w));
++    if (arm == I6C_RC_ARM_NONE)
++        return false;
++
++    if (arm == I6C_RC_ARM_CBR) {
++        w->min_qp = cfg_min_qp >= 0 ? cfg_min_qp : x->frame_set ? I6C_RC_QP_MIN : -1;
++        w->max_qp = cfg_max_qp >= 0 ? cfg_max_qp : x->frame_set ? I6C_RC_QP_MAX : -1;
++    } else {
++        w->min_qp = attr_min_qp;
++        w->max_qp = attr_max_qp;
++    }
++    w->min_iqp = -1;
++    w->max_iqp = -1;
++    if (x->iframe_set) {
++        w->full_min_i = x->min_iqp < 0;
++        w->full_max_i = x->max_iqp < 0;
++        w->min_iqp = w->full_min_i ? I6C_RC_QP_MIN : x->min_iqp;
++        w->max_iqp = w->full_max_i ? I6C_RC_QP_MAX : x->max_iqp;
++    }
++    if (x->delta_set) {
++        w->has_delta = true;
++        w->ip_delta = x->ip_delta;
++    } else if (cfg_ip_delta >= 0) {
++        w->has_delta = true;
++        w->ip_delta = cfg_ip_delta;
++    }
++    w->max_i_size = x->max_i_size;
++    w->max_p_size = x->max_p_size;
++
++    return x->any || cfg_ip_delta >= 0 ||
++           (arm == I6C_RC_ARM_CBR && (cfg_min_qp >= 0 || cfg_max_qp >= 0));
++}
++
++/*
++ * i6c_rc_build -- the RcParam to send.
++ *
++ * base is what GetRcParam returned: the driver's live values, which stand for
++ * every field nobody asked about and go back exactly as reported, in range or
++ * not. Clamping them changes the encoder: this driver reports MaxIPProp outside
++ * the doc's [5, 100] (0, by every sign), and raising it to 5 halved the I-frames
++ * of a VBR channel that had asked only for a size cap. The asked-for fields go
++ * over the base, clamped to MI's ranges (RANGE). MaxISize and MaxPSize always
++ * come from the request.
++ *
++ * In CBR the frame and I-frame pairs are independent. In VBR and AVBR an
++ * asked-for I-frame side sits inside the frame pair, as the doc's ranges
++ * require (NEST when that moved it). Within each pair the side that was asked
++ * for wins over the driver's.
++ */
++static inline unsigned i6c_rc_build(i6c_rc_arm arm, const i6c_venc_rcparam *base,
++                                    const i6c_rc_want *w, i6c_venc_rcparam *out)
++{
++    unsigned flags = 0;
++    bool ask_min_i = w->min_iqp >= 0, ask_max_i = w->max_iqp >= 0;
++    i6c_rc_fields f;
++
++    i6c_rc_decode(arm, base, &f);
++
++    if (arm == I6C_RC_ARM_CBR) {
++        bool ask_min = w->min_qp >= 0, ask_max = w->max_qp >= 0;
++
++        if (ask_min)
++            f.min_qp = i6c_rc_clamp(w->min_qp, I6C_RC_QP_MIN, I6C_RC_QP_MAX, &flags, I6C_RC_F_RANGE);
++        if (ask_max)
++            f.max_qp = i6c_rc_clamp(w->max_qp, I6C_RC_QP_MIN, I6C_RC_QP_MAX, &flags, I6C_RC_F_RANGE);
++        /* Neither side asked: the driver's pair goes back as it is. */
++        if (f.min_qp > f.max_qp && (ask_min || ask_max)) {
++            if (ask_min && !ask_max)
++                f.max_qp = f.min_qp;
++            else if (ask_max && !ask_min)
++                f.min_qp = f.max_qp;
++            else {
++                int t = f.min_qp;
++
++                f.min_qp = f.max_qp;
++                f.max_qp = t;
++                flags |= I6C_RC_F_SWAP;
++            }
++        }
++    }
++
++    if (ask_min_i)
++        f.min_iqp = i6c_rc_clamp(w->min_iqp, I6C_RC_QP_MIN, I6C_RC_QP_MAX, &flags, I6C_RC_F_RANGE);
++    if (ask_max_i)
++        f.max_iqp = i6c_rc_clamp(w->max_iqp, I6C_RC_QP_MIN, I6C_RC_QP_MAX, &flags, I6C_RC_F_RANGE);
++    if (w->has_delta)
++        f.ip_delta = i6c_rc_clamp(w->ip_delta, I6C_RC_DELTA_MIN, I6C_RC_DELTA_MAX, &flags,
++                                  I6C_RC_F_RANGE);
++    f.max_i_size = w->max_i_size;
++    f.max_p_size = w->max_p_size;
++
++    /* Only an asked side nests; a released one (full range) nests without news. */
++    if (arm != I6C_RC_ARM_CBR && w->min_qp >= 0 && w->max_qp >= w->min_qp) {
++        unsigned nest = 0, quiet = 0;
++
++        if (ask_min_i)
++            f.min_iqp = i6c_rc_clamp(f.min_iqp, w->min_qp, w->max_qp,
++                                     w->full_min_i ? &quiet : &nest, 1);
++        if (ask_max_i)
++            f.max_iqp = i6c_rc_clamp(f.max_iqp, w->min_qp, w->max_qp,
++                                     w->full_max_i ? &quiet : &nest, 1);
++        flags |= nest ? I6C_RC_F_NEST : 0;
++    }
++
++    /* Neither side asked: the driver's pair goes back as it is. */
++    if (f.min_iqp > f.max_iqp && (ask_min_i || ask_max_i)) {
++        if (ask_min_i && !ask_max_i)
++            f.max_iqp = f.min_iqp;
++        else
++            f.min_iqp = f.max_iqp;
++    }
++
++    i6c_rc_encode(arm, &f, out);
++    return flags;
++}
++
++#endif /* INFINITY6C_I6C_VENC_RC_H */
+diff --git a/src/infinity6c/infinity6c_state.h b/src/infinity6c/infinity6c_state.h
+index 7895587..e605c09 100644
+--- a/src/infinity6c/infinity6c_state.h
++++ b/src/infinity6c/infinity6c_state.h
+@@ -563,6 +563,18 @@ typedef struct {
+     infinity6c_fs_chn_t fs[I6C_MAX_CHN];
+     infinity6c_venc_chn_t enc[I6C_MAX_CHN];
+ 
++    /*
++     * The encoder rate-control extras each channel was asked for (I-frame cap,
++     * QP bounds, I/P delta, super frame), indexed like enc[]. Separate because
++     * hal_enc_destroy_channel clears enc[chn] and rvd re-creates a channel on
++     * set-resolution and set-codec; only i6c_teardown_all clears these. See
++     * i6c_venc_rc.h.
++     */
++    i6c_venc_rcx_t enc_rcx[I6C_MAX_CHN];
++
++    /* Bits per MaxISize/MaxPSize unit; 0 until RSS_VENC_SIZE_UNIT_BITS is read. */
++    uint32_t enc_size_unit_bits;
++
+     /*
+      * Audio capture -- src/infinity6c/hal_audio.c, and only ever touched by the
+      * audio archive. Both archives share this struct, as they do on the i6e
+diff --git a/tests/t_venc_rc_i6c.c b/tests/t_venc_rc_i6c.c
+new file mode 100644
+index 0000000..ba6b207
+--- /dev/null
++++ b/tests/t_venc_rc_i6c.c
+@@ -0,0 +1,384 @@
++/*
++ * t_venc_rc_i6c.c -- host test for the infinity6c encoder rate-control extras
++ * (src/infinity6c/i6c_venc_rc.h). No HAL, no MI, no target:
++ *
++ *   cc -std=c11 -Wall -Wextra -Werror -Iinclude -Isrc/infinity6c -o /tmp/t_venc_rc_i6c \
++ *      tests/t_venc_rc_i6c.c && /tmp/t_venc_rc_i6c
++ *
++ * Offsets are checked as raw words, the way the driver reads them, not through
++ * the struct that defines them.
++ */
++#include <stdio.h>
++
++#include "i6c_venc_rc.h"
++
++static int failures;
++
++#define CHECK(cond, ...)                                                        \
++    do {                                                                        \
++        if (!(cond)) {                                                          \
++            printf("FAIL %s:%d: ", __FILE__, __LINE__);                         \
++            printf(__VA_ARGS__);                                                \
++            printf("\n");                                                       \
++            failures++;                                                         \
++        }                                                                       \
++    } while (0)
++
++static uint32_t word(const i6c_venc_rcparam *p, unsigned off)
++{
++    uint32_t v;
++
++    memcpy(&v, (const char *)p + off, sizeof(v));
++    return v;
++}
++
++static void put(i6c_venc_rcparam *p, unsigned off, uint32_t v)
++{
++    memcpy((char *)p + off, &v, sizeof(v));
++}
++
++/* A base as GetRcParam returns it: the arm's words up to `upto`, the rest 0. */
++static void base_words(i6c_venc_rcparam *p, const uint32_t *w, unsigned n)
++{
++    unsigned i;
++
++    memset(p, 0, sizeof(*p));
++    for (i = 0; i < n; i++)
++        put(p, 12 + 4 * i, w[i]);
++}
++
++static void test_layout(void)
++{
++    CHECK(sizeof(i6c_venc_rcparam) == 56, "rcparam is %zu", sizeof(i6c_venc_rcparam));
++    CHECK(sizeof(i6c_venc_superfrm) == 16, "superfrm is %zu", sizeof(i6c_venc_superfrm));
++    CHECK(offsetof(i6c_venc_rcparam, avbr.minStillPercent) == 40, "AVBR still%% at +40");
++    CHECK(offsetof(i6c_venc_rcparam, vbr.minIQp) == 24, "VBR MinIQp at +24");
++    CHECK(offsetof(i6c_venc_rcparam, avbr.minIQp) == 20, "AVBR MinIQp at +20");
++    CHECK(offsetof(i6c_venc_rcparam, cbr.ipQpDelta) == 20, "CBR delta at +20");
++}
++
++static void test_arm_of(void)
++{
++    int m;
++
++    for (m = -1; m < 20; m++) {
++        i6c_rc_arm want = I6C_RC_ARM_NONE;
++
++        if (m == 1 || m == 10)
++            want = I6C_RC_ARM_CBR;
++        else if (m == 2 || m == 11)
++            want = I6C_RC_ARM_VBR;
++        else if (m == 6 || m == 14)
++            want = I6C_RC_ARM_AVBR;
++        CHECK(i6c_rc_arm_of(m) == want, "mode %d -> arm %d", m, i6c_rc_arm_of(m));
++    }
++}
++
++static void test_take_pair(void)
++{
++    int16_t lo, hi;
++    unsigned f;
++
++    f = 0;
++    CHECK(i6c_rc_take_pair(20, 40, &lo, &hi, &f) == RSS_OK && lo == 20 && hi == 40 && !f,
++          "plain pair");
++    f = 0;
++    CHECK(i6c_rc_take_pair(15, 51, &lo, &hi, &f) == RSS_OK && lo == 15 && hi == 48 &&
++              f == I6C_RC_F_RANGE,
++          "raptor's CBR default 15..51 clamps to 15..48");
++    f = 0;
++    CHECK(i6c_rc_take_pair(0, 5, &lo, &hi, &f) == RSS_OK && lo == 12 && hi == 12, "low clamps");
++    f = 0;
++    CHECK(i6c_rc_take_pair(-1, 30, &lo, &hi, &f) == RSS_OK && lo == -1 && hi == 30 && !f,
++          "negative releases a side");
++    f = 0;
++    lo = hi = 99;
++    CHECK(i6c_rc_take_pair(40, 20, &lo, &hi, &f) == RSS_ERR_INVAL && lo == 99 && hi == 99,
++          "inverted pair refused, nothing stored");
++    f = 0;
++    CHECK(i6c_rc_take_pair(50, 49, &lo, &hi, &f) == RSS_OK && lo == 48 && hi == 48,
++          "inverted only before clamping is accepted");
++}
++
++static void test_sizes(void)
++{
++    CHECK(i6c_rc_size_of_kbits(0, 1) == 0, "0 is no cap");
++    CHECK(i6c_rc_size_of_kbits(2700, I6C_RC_SIZE_UNIT_BITS) == 337500,
++          "2700 kbit in the driver's bytes");
++    CHECK(i6c_rc_size_of_kbits(2700, 1) == 2700000, "in bits");
++    CHECK(i6c_rc_size_of_kbits(2700, 1000) == 2700, "in kbits");
++    CHECK(i6c_rc_size_of_kbits(457, 8000) == 57, "in kB, rounded down");
++    CHECK(i6c_rc_size_of_kbits(1, 8000) == 1, "a cap never rounds to 0, which is no cap");
++    CHECK(i6c_rc_size_of_kbits(UINT32_MAX, 1) == UINT32_MAX, "saturates");
++    CHECK(i6c_rc_size_of_kbits(5, 0) == 5000, "a 0 unit is taken as bits");
++}
++
++static void test_frame_bounds(void)
++{
++    unsigned int lo, hi, f;
++
++    f = i6c_rc_frame_bounds(-1, -1, &lo, &hi);
++    CHECK(lo == 20 && hi == 48 && !f, "defaults 20..48 unchanged: %u..%u", lo, hi);
++    f = i6c_rc_frame_bounds(26, 30, &lo, &hi);
++    CHECK(lo == 26 && hi == 30 && !f, "config pair passes");
++    f = i6c_rc_frame_bounds(-1, 15, &lo, &hi);
++    CHECK(lo == 15 && hi == 15 && !f, "default floor yields to a low ceiling: %u..%u", lo, hi);
++    f = i6c_rc_frame_bounds(5, 51, &lo, &hi);
++    CHECK(lo == 12 && hi == 48 && f == I6C_RC_F_RANGE, "out of range clamps");
++    f = i6c_rc_frame_bounds(48, 20, &lo, &hi);
++    CHECK(lo == 20 && hi == 48 && (f & I6C_RC_F_SWAP), "inverted config swapped");
++}
++
++static void test_fixqp(void)
++{
++    i6c_venc_rcx_t x;
++    unsigned int i, p, f;
++
++    memset(&x, 0, sizeof(x));
++    f = i6c_rc_fixqp(-1, &x, -1, &i, &p);
++    CHECK(i == 30 && p == 30 && !f, "default 30/30");
++    f = i6c_rc_fixqp(50, &x, -1, &i, &p);
++    CHECK(i == 50 && p == 50 && !f, "nothing asked: init_qp as it always was, unclamped");
++
++    f = i6c_rc_fixqp(30, &x, 3, &i, &p);
++    CHECK(p == 30 && i == 27 && !f, "config ip_delta splits: I %u P %u", i, p);
++
++    x.delta_set = true;
++    x.ip_delta = -4;
++    f = i6c_rc_fixqp(30, &x, 3, &i, &p);
++    CHECK(p == 30 && i == 34, "runtime delta wins over the config's: I %u P %u", i, p);
++
++    x.qp_set = true;
++    x.qp = 46;
++    f = i6c_rc_fixqp(30, &x, -1, &i, &p);
++    CHECK(p == 46 && i == 48 && f == I6C_RC_F_RANGE, "I clamps to 48: I %u P %u", i, p);
++
++    x.delta_set = false;
++    x.qp = 20;
++    f = i6c_rc_fixqp(30, &x, -1, &i, &p);
++    CHECK(p == 20 && i == 20 && !f, "qp alone sets both");
++}
++
++static void test_priority(void)
++{
++    bool forced;
++
++    CHECK(i6c_rc_priority(RSS_SUPERFRM_REENCODE, RSS_RC_PRIO_BITRATE, &forced) ==
++                  I6C_VENC_RCPRIO_FRAMEBITS &&
++              forced,
++          "re-encode forces frame bits over rvd's bitrate");
++    CHECK(i6c_rc_priority(RSS_SUPERFRM_REENCODE, RSS_RC_PRIO_FRAMEBITS, &forced) ==
++                  I6C_VENC_RCPRIO_FRAMEBITS &&
++              !forced,
++          "frame bits asked: not forced");
++    CHECK(i6c_rc_priority(RSS_SUPERFRM_DISCARD, RSS_RC_PRIO_BITRATE, &forced) ==
++                  I6C_VENC_RCPRIO_BITRATE &&
++              !forced,
++          "discard keeps bitrate");
++    CHECK(i6c_rc_priority(RSS_SUPERFRM_NONE, RSS_RC_PRIO_RDO, &forced) == I6C_VENC_RCPRIO_BITRATE,
++          "RDO maps to bitrate");
++}
++
++static void test_want_of(void)
++{
++    i6c_venc_rcx_t x;
++    i6c_rc_want w;
++
++    memset(&x, 0, sizeof(x));
++    CHECK(!i6c_rc_want_of(&x, I6C_RC_ARM_CBR, -1, -1, -1, -1, -1, &w),
++          "nobody configured CBR: no push");
++    CHECK(!i6c_rc_want_of(&x, I6C_RC_ARM_VBR, 20, 40, -1, 20, 40, &w),
++          "VBR config bounds live in the attribute: no push");
++    CHECK(i6c_rc_want_of(&x, I6C_RC_ARM_CBR, 20, -1, -1, -1, -1, &w) && w.min_qp == 20 &&
++              w.max_qp == -1,
++          "CBR config bounds have nowhere else to go: push");
++    CHECK(i6c_rc_want_of(&x, I6C_RC_ARM_AVBR, -1, -1, 0, 20, 48, &w) && w.has_delta &&
++              w.ip_delta == 0,
++          "config ip_delta 0 is a real request");
++    CHECK(!i6c_rc_want_of(&x, I6C_RC_ARM_NONE, 20, 40, 2, -1, -1, &w), "fixed QP has no arm");
++
++    x.any = true;
++    x.max_i_size = 800000;
++    CHECK(i6c_rc_want_of(&x, I6C_RC_ARM_VBR, -1, -1, -1, 20, 48, &w) && w.min_qp == 20 &&
++              w.max_qp == 48 && w.max_i_size == 800000 && w.min_iqp == -1 && !w.has_delta,
++          "VBR request carries the attribute bounds and the cap");
++
++    /* Released by an op: MI's full range, not the driver's last value. */
++    x.frame_set = true;
++    x.min_qp = x.max_qp = -1;
++    x.iframe_set = true;
++    x.min_iqp = -1;
++    x.max_iqp = 34;
++    CHECK(i6c_rc_want_of(&x, I6C_RC_ARM_CBR, -1, -1, -1, -1, -1, &w) && w.min_qp == 12 &&
++              w.max_qp == 48 && w.min_iqp == 12 && w.full_min_i && w.max_iqp == 34 &&
++              !w.full_max_i,
++          "released sides: %d..%d, I %d..%d", w.min_qp, w.max_qp, w.min_iqp, w.max_iqp);
++}
++
++static void test_build_cbr(void)
++{
++    /* Get's six CBR words: MaxQp, MinQp, delta, MaxIQp, MinIQp, MaxIPProp. */
++    static const uint32_t get[] = {48, 12, 0, 48, 12, 80};
++    i6c_venc_rcparam base, out;
++    i6c_rc_want w;
++    unsigned f;
++
++    base_words(&base, get, 6);
++    put(&base, 0, 7); /* a common word the driver says it does not support */
++    put(&base, 52, 0xdeadbeef);
++    memset(&w, 0, sizeof(w));
++    w.min_qp = 20;
++    w.max_qp = 40;
++    w.min_iqp = 25;
++    w.max_iqp = 45;
++    w.has_delta = true;
++    w.ip_delta = 2;
++    w.max_i_size = 640000;
++    w.max_p_size = 0;
++
++    f = i6c_rc_build(I6C_RC_ARM_CBR, &base, &w, &out);
++    CHECK(!f, "clean CBR build, flags %#x", f);
++    CHECK(word(&out, 12) == 40 && word(&out, 16) == 20, "frame bounds at +12/+16");
++    CHECK((int32_t)word(&out, 20) == 2, "delta at +20");
++    CHECK(word(&out, 24) == 45 && word(&out, 28) == 25,
++          "CBR I bounds independent of the frame pair");
++    CHECK(word(&out, 32) == 80, "MaxIPProp kept from the driver");
++    CHECK(word(&out, 36) == 640000 && word(&out, 40) == 0,
++          "cap written though Get never returns it");
++    CHECK(word(&out, 0) == 0 && word(&out, 4) == 0 && word(&out, 8) == 0 && word(&out, 52) == 0,
++          "common words and the reserved pointer go out zero");
++
++    /* One side asked, the driver's other side in the way: the asked side wins. */
++    {
++        static const uint32_t get2[] = {40, 30, 0, 48, 12, 80};
++
++        base_words(&base, get2, 6);
++        memset(&w, 0, sizeof(w));
++        w.min_qp = -1;
++        w.max_qp = 25;
++        w.min_iqp = w.max_iqp = -1;
++        f = i6c_rc_build(I6C_RC_ARM_CBR, &base, &w, &out);
++        CHECK(word(&out, 12) == 25 && word(&out, 16) == 25 && !f, "min follows an asked max");
++    }
++
++    /* Asked values clamp; a wild delta clamps; size 0 clears a cap. */
++    base_words(&base, get, 6);
++    memset(&w, 0, sizeof(w));
++    w.min_qp = 10;
++    w.max_qp = 51;
++    w.min_iqp = w.max_iqp = -1;
++    w.has_delta = true;
++    w.ip_delta = 20;
++    f = i6c_rc_build(I6C_RC_ARM_CBR, &base, &w, &out);
++    CHECK(f == I6C_RC_F_RANGE, "flags %#x", f);
++    CHECK(word(&out, 12) == 48 && word(&out, 16) == 12 && (int32_t)word(&out, 20) == 12,
++          "clamped: %u %u %d", word(&out, 12), word(&out, 16), (int32_t)word(&out, 20));
++    CHECK(word(&out, 36) == 0, "no cap asked, none sent");
++}
++
++static void test_build_vbr(void)
++{
++    /* Get's five VBR words: delta, ChangePos, MaxIQp, MinIQp, MaxIPProp. */
++    static const uint32_t get[] = {0, 90, 48, 12, 80};
++    i6c_venc_rcparam base, out;
++    i6c_rc_want w;
++    unsigned f;
++
++    base_words(&base, get, 5);
++    put(&base, 32, 0x55555555); /* whatever sits past Get's five words */
++    memset(&w, 0, sizeof(w));
++    w.min_qp = 20; /* the channel attribute's */
++    w.max_qp = 40;
++    w.min_iqp = w.max_iqp = -1;
++    w.max_i_size = 1000000;
++
++    f = i6c_rc_build(I6C_RC_ARM_VBR, &base, &w, &out);
++    CHECK(!f, "flags %#x", f);
++    CHECK(word(&out, 16) == 90, "ChangePos kept at +16");
++    CHECK(word(&out, 20) == 48 && word(&out, 24) == 12,
++          "the driver's own I bounds go back untouched: max %u min %u", word(&out, 20),
++          word(&out, 24));
++    CHECK(word(&out, 32) == 1000000 && word(&out, 36) == 0, "VBR cap at +32, P at +36");
++
++    /*
++     * The bench case: MaxIPProp reported as 0, outside the doc's [5, 100]. It
++     * must go back as 0 -- raised to 5 it halved the I-frames.
++     */
++    put(&base, 28, 0);
++    f = i6c_rc_build(I6C_RC_ARM_VBR, &base, &w, &out);
++    CHECK(!f && word(&out, 28) == 0, "MaxIPProp 0 passes through: %u, flags %#x",
++          word(&out, 28), f);
++    put(&base, 28, 80);
++
++    /* A released I side is the full range, nested without a warning. */
++    w.min_iqp = 12;
++    w.full_min_i = true;
++    w.max_iqp = 45;
++    f = i6c_rc_build(I6C_RC_ARM_VBR, &base, &w, &out);
++    CHECK(f == I6C_RC_F_NEST && word(&out, 24) == 20 && word(&out, 20) == 40,
++          "released min nests quietly, asked max warns: flags %#x", f);
++    w.full_min_i = false;
++
++    w.min_iqp = 10;
++    w.max_iqp = 45;
++    f = i6c_rc_build(I6C_RC_ARM_VBR, &base, &w, &out);
++    CHECK((f & I6C_RC_F_NEST) && (f & I6C_RC_F_RANGE), "asked I bounds pulled in, flags %#x", f);
++    CHECK(word(&out, 20) == 40 && word(&out, 24) == 20, "max %u min %u", word(&out, 20),
++          word(&out, 24));
++
++    w.min_iqp = 28;
++    w.max_iqp = 34;
++    f = i6c_rc_build(I6C_RC_ARM_VBR, &base, &w, &out);
++    CHECK(!f && word(&out, 20) == 34 && word(&out, 24) == 28, "I bounds inside pass");
++
++    /* Any driver value nobody asked about goes back as reported. */
++    put(&base, 16, 0);
++    f = i6c_rc_build(I6C_RC_ARM_VBR, &base, &w, &out);
++    CHECK(!f && word(&out, 16) == 0, "ChangePos 0 kept, flags %#x", f);
++}
++
++static void test_build_avbr(void)
++{
++    /* All ten AVBR words come back. */
++    static const uint32_t get[] = {0, 80, 12, 70, 48, 0, 0, 30, 0, 100};
++    i6c_venc_rcparam base, out;
++    i6c_rc_want w;
++    unsigned f;
++
++    base_words(&base, get, 10);
++    memset(&w, 0, sizeof(w));
++    w.min_qp = 22;
++    w.max_qp = 44;
++    w.min_iqp = 30;
++    w.max_iqp = 40;
++    w.has_delta = true;
++    w.ip_delta = -3;
++    w.max_i_size = 500000;
++    w.max_p_size = 60000;
++
++    f = i6c_rc_build(I6C_RC_ARM_AVBR, &base, &w, &out);
++    CHECK(!f, "flags %#x", f);
++    CHECK((int32_t)word(&out, 12) == -3 && word(&out, 16) == 80, "delta, ChangePos");
++    CHECK(word(&out, 20) == 30 && word(&out, 24) == 70 && word(&out, 28) == 40,
++          "AVBR order: MinIQp +20, MaxIPProp +24, MaxIQp +28");
++    CHECK(word(&out, 32) == 500000 && word(&out, 36) == 60000, "caps at +32/+36");
++    CHECK(word(&out, 40) == 30 && word(&out, 48) == 100, "still%% and motion kept");
++}
++
++int main(void)
++{
++    test_layout();
++    test_arm_of();
++    test_take_pair();
++    test_sizes();
++    test_frame_bounds();
++    test_fixqp();
++    test_priority();
++    test_want_of();
++    test_build_cbr();
++    test_build_vbr();
++    test_build_avbr();
++
++    printf("%s: %d failure(s)\n", failures ? "FAIL" : "PASS", failures);
++    return failures ? 1 : 0;
++}
+-- 
+2.43.0
+
