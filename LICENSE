@@ -2,11 +2,6 @@ MIT License
 
 Copyright (c) 2026 andylee77
 
-Portions derived from Thingino (https://github.com/themactep/thingino-firmware),
-Copyright (c) 2024 thingino, MIT License, and from gtxaspec/raptor-hal. The
-SigmaStar Infinity6C HAL backend is the work of John Chia, included with
-attribution (see docs/raptor-hal-FORK.md).
-
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights
