@@ -1,0 +1,5 @@
+# onvif-zeep-async pinned to what Frigate 0.17.2 ships (docker/main/requirements-wheels.txt:
+# "onvif-zeep-async == 4.0.*"), so the zeep view matches Frigate's parse. It brings zeep,
+# httpx and lxml. Pillow is optional (X-IMG-EFFECT's snapshot luminance check).
+onvif-zeep-async==4.0.4
+pillow
