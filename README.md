@@ -66,6 +66,7 @@ README.md                      this file — the overview and discussion starter
 LICENSE, NOTICE.md, LICENSES/  which license covers which part, and the credits
 docs/
   WHAT-THIS-PORT-ADDS.md       exhaustive, per-patch breakdown (PR-split detail)
+  UPSTREAM-PLAN.md             the plan for landing the port upstream, PR by PR, and its state
   raptor-hal-FORK.md           the one fork: what is John Chia's, what is new here
   oem-reference/               reverse-engineered OEM lens/PTZ and IR-cut protocols
 patches/
@@ -234,7 +235,8 @@ concrete commitments behind it:
 - **Upstream-first.** The generic fixes (uhttpd, raptor, onvif, thingino) and the
   SigmaStar platform are prepared as separate patches so they can land in the
   project, not only ship here. The HAL backend is credited to John Chia and is
-  meant for `gtxaspec/raptor-hal` with that credit.
+  meant for `gtxaspec/raptor-hal` with that credit. The series, its order and
+  where each pull request stands are in [docs/UPSTREAM-PLAN.md](docs/UPSTREAM-PLAN.md).
 - **Maintained to Thingino's standards, not left to drift.** The layer is kept as
   an additive overlay on `themactep/master` with a small, labelled core patch set,
   so it can track upstream by periodic merge and ride the project's Buildroot and
