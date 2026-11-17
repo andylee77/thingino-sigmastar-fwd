@@ -15,15 +15,14 @@ from an input is run.
 
 Every model found is checked by md5 against KNOWN, the models ipud is known to
 decode; any other is reported and left out, unless --any is given. OUT
-(default ./ipud) then holds model.img, model.labels (the model's class names,
-one comma-separated line) and an empty ipu_firmware.bin: copy them into
-package/thingino-ipud/vendor/ of a firmware tree before a build, or the folder
-onto a camera's SD card as ipud/.
+(default ./ipud) then holds model.img and model.labels (the model's class
+names, one comma-separated line): copy them into package/thingino-ipud/vendor/
+of a firmware tree before a build, or the folder onto a camera's SD card as
+ipud/.
 
-No IPU firmware is extracted: ipud's runtime never reads the firmware file it
-is given (an empty and an all-zero file run the model the same). ipud still
-checks that the file exists, so the tool writes an empty one, and leaves alone
-an ipu_firmware.bin already in OUT.
+No IPU firmware is extracted or written: ipud needs none, since its runtime
+never reads the firmware file (an empty and an all-zero file run the model the
+same).
 
 Needs Python 3.8 or newer and unsquashfs 4.5 or newer (squashfs-tools).
 Exit status: 0 when OUT holds a model, 1 when it holds none or a file was
@@ -42,7 +41,7 @@ import tempfile
 import zipfile
 import zlib
 
-MODEL, LABELS, FIRMWARE = 'model.img', 'model.labels', 'ipu_firmware.bin'
+MODEL, LABELS = 'model.img', 'model.labels'
 
 # The models ipud is known to decode, by md5: the size, what it is, and its
 # class names (ipud reads them from model.labels, beside the model).
@@ -269,7 +268,7 @@ def report(out):
     """Print what out holds; True when it holds a model."""
     print(f'\n{out}:')
     have = set()
-    for name in (MODEL, LABELS, FIRMWARE):
+    for name in (MODEL, LABELS):
         p = os.path.join(out, name)
         if not os.path.isfile(p):
             print(f'  {name:<17} missing')
@@ -279,9 +278,6 @@ def report(out):
         have.add(name)
         if name == LABELS:
             print(f'  {name:<17} {blob.decode("utf-8", "replace").strip()}')
-        elif name == FIRMWARE:
-            print(f'  {name:<17} {len(blob):>8} B  ' + ('empty: ipud checks that it exists, its runtime never '
-                                                     'reads it' if not blob else 'not read by ipud\'s runtime'))
         else:
             known = KNOWN.get(md5(blob))
             what = f'known: {known[1]}' if known else 'not on the known list'
@@ -351,12 +347,6 @@ def main():
                       'write this model\'s classes there, or delete it')
 
     has_model = os.path.isfile(os.path.join(args.out, MODEL))
-    firmware = os.path.join(args.out, FIRMWARE)
-    if has_model and not os.path.exists(firmware):
-        open(firmware, 'wb').close()
-        print(f'{firmware}: written, empty (ipud checks that the file exists; its runtime never reads it)')
-    elif has_model:
-        print(f'{firmware}: already there, left as it is')
     report(args.out)
     if has_model:
         print('\nFor a build, copy the files into package/thingino-ipud/vendor/ of the firmware tree. '

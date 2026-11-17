@@ -18,10 +18,9 @@ or an SD card. It carries no vendor bytes of its own.
   `apt install squashfs-tools` on Debian and Ubuntu, `brew install squashfs`
   on macOS). On Windows, run it in WSL.
 
-No IPU firmware is needed: the IPU runtime these images carry never reads the
-firmware file ipud names (an empty and an all-zero file run the model the
-same). ipud still checks that the file exists, so the tool writes an empty
-one.
+No IPU firmware is needed: the IPU runtime these images carry never reads a
+firmware file (an empty and an all-zero file run the model the same), so ipud
+runs without one and the tool writes none.
 
 ## Run
 
@@ -38,14 +37,13 @@ input is run. It writes to `./ipud` (`-o` picks another folder):
 |---|---|
 | `model.img` | the detection model |
 | `model.labels` | its class names, `person,bicycle,car,motorcycle,bus,truck` |
-| `ipu_firmware.bin` | empty: ipud checks that it exists; an existing one is left as it is |
 
 Exit status 0 means the folder holds a model, 1 that it holds none or a file
 was refused.
 
 ## Use them
 
-- **In a build:** copy the three files into `package/thingino-ipud/vendor/` of
+- **In a build:** copy the two files into `package/thingino-ipud/vendor/` of
   the patched firmware tree (or point `-o` there). The package installs them
   to `/usr/share/ipud/`, and the image has a built-in model. The package's
   `.gitignore` keeps `vendor/` out of git: never commit the files.
