@@ -1,6 +1,6 @@
-From 2f8fbfd2f13111c8dab15671599520a178976f5f Mon Sep 17 00:00:00 2001
+From 4fb9f26f8b8b2ebc2904c12cace4295277d3f23b Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 11 Nov 2026 17:09:54 -0500
+Date: Tue, 17 Nov 2026 17:54:40 -0500
 Subject: [PATCH 10/22] thingino-raptor: non-Ingenic link fix and day/night for
  PWM IR banks (ric)
 

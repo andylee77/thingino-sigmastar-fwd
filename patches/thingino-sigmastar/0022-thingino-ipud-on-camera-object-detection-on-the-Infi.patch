@@ -1,6 +1,6 @@
-From ba3f9cff96cffae6094fab9562ea8144a163f681 Mon Sep 17 00:00:00 2001
+From 41354a385a8fb0b6abd8b8f0bba9c2aa0c9f9db6 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 11 Nov 2026 17:09:54 -0500
+Date: Tue, 17 Nov 2026 17:54:40 -0500
 Subject: [PATCH 22/22] thingino-ipud: on-camera object detection on the
  Infinity6C IPU
 
@@ -13,38 +13,39 @@ UNIX socket (/run/ipud.sock, read with ipucat) and MQTT. S35ipud starts it
 from the ipud block of /etc/thingino.json, and a raptor.d hook stops it
 before rvd tears the pipeline down and starts it again after.
 
-Every SigmaStar board ships it, off until enabled. The model and the IPU
-firmware are vendor files and are not included: the model is read from the
-image (when its build staged one), from a folder on the SD card, or from a
-custom path. A report class the model lacks is skipped with a warning.
+Every SigmaStar board ships it, off until enabled. The model is a vendor
+file and is not included: it is read from the image (when its build staged
+one), from a folder on the SD card, or from a custom path. No IPU firmware
+file is needed: the runtime never reads one. A report class the model lacks
+is skipped with a warning.
 ---
  package/thingino-ipud/.gitignore              |   2 +
  package/thingino-ipud/Config.in               |  19 +
- package/thingino-ipud/files/README.md         | 148 ++++
- package/thingino-ipud/files/S35ipud           | 182 ++++
- package/thingino-ipud/files/ipu_rt.c          | 206 +++++
- package/thingino-ipud/files/ipu_rt.h          |  63 ++
+ package/thingino-ipud/files/README.md         | 158 ++++
+ package/thingino-ipud/files/S35ipud           | 184 ++++
+ package/thingino-ipud/files/ipu_rt.c          | 219 +++++
+ package/thingino-ipud/files/ipu_rt.h          |  65 ++
  package/thingino-ipud/files/ipucat.c          |  39 +
  package/thingino-ipud/files/ipud-frigate      |  65 ++
  package/thingino-ipud/files/ipud-ha           | 126 +++
  package/thingino-ipud/files/ipud-onvif        |  88 ++
- package/thingino-ipud/files/ipud-paths        |  89 ++
- package/thingino-ipud/files/ipud.c            | 799 ++++++++++++++++++
+ package/thingino-ipud/files/ipud-paths        |  90 ++
+ package/thingino-ipud/files/ipud.c            | 801 ++++++++++++++++++
  package/thingino-ipud/files/ipud.json         |  24 +
  package/thingino-ipud/files/ipud.webui.json   |  34 +
  package/thingino-ipud/files/mi_ipu.h          |  67 ++
- package/thingino-ipud/files/mi_scl_sys.h      |  47 ++
+ package/thingino-ipud/files/mi_scl_sys.h      |  47 +
  package/thingino-ipud/files/raptor-hook       |   5 +
  package/thingino-ipud/files/scl_src.c         | 158 ++++
  package/thingino-ipud/files/scl_src.h         |  46 +
- .../thingino-ipud/files/www/a/config-ipud.js  | 167 ++++
+ .../thingino-ipud/files/www/a/config-ipud.js  | 166 ++++
  .../thingino-ipud/files/www/a/preview-ipud.js | 192 +++++
  .../thingino-ipud/files/www/config-ipud.html  | 192 +++++
  .../thingino-ipud/files/www/x/json-ipud.cgi   | 148 ++++
  package/thingino-ipud/files/yolo.c            | 106 +++
  package/thingino-ipud/files/yolo.h            |  45 +
- package/thingino-ipud/thingino-ipud.mk        |  80 ++
- 26 files changed, 3137 insertions(+)
+ package/thingino-ipud/thingino-ipud.mk        |  81 ++
+ 26 files changed, 3167 insertions(+)
  create mode 100644 package/thingino-ipud/.gitignore
  create mode 100644 package/thingino-ipud/Config.in
  create mode 100644 package/thingino-ipud/files/README.md
@@ -107,10 +108,10 @@ index 000000000..4078b87db
 +	  compiled for the IPU runtime the image's SigmaStar drop carries.
 diff --git a/package/thingino-ipud/files/README.md b/package/thingino-ipud/files/README.md
 new file mode 100644
-index 000000000..855f929dc
+index 000000000..2a6241990
 --- /dev/null
 +++ b/package/thingino-ipud/files/README.md
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,158 @@
 +# thingino-ipud
 +
 +On-camera object detection on the Infinity6C IPU, the SoC's neural-network unit.
@@ -129,8 +130,9 @@ index 000000000..855f929dc
 +  and 3 take at most 1920 wide. If raptor restarts, the port goes with its
 +  channel; ipud notices and opens it again.
 +- **Inference.** `libmi_ipu.so` from the SigmaStar drop, dlopened after its MI
-+  dependencies, after `MI_SYS_Init(0)`. `CreateDevice` loads the IPU firmware,
-+  `CreateCHN` the compiled model. `DevAttr.maxDynBufSize` must cover the model's
++  dependencies, after `MI_SYS_Init(0)`. `CreateDevice` opens the IPU (it also
++  takes a firmware file, which this runtime never reads: below), `CreateCHN`
++  loads the compiled model. `DevAttr.maxDynBufSize` must cover the model's
 +  variable buffer; ipud reads it from the model header with
 +  `MI_IPU_GetOfflineModeStaticInfo` (word 0 of a 92-byte info on this drop). The
 +  model must be compiled for the runtime the drop carries: a model from an older
@@ -171,6 +173,14 @@ index 000000000..855f929dc
 +  none either, `MI_SYS_SetChnOutputPortDepth` does. The frame fields' offsets in
 +  that struct are in `scl_src.c`.
 +- The output descriptor's `innerMost` is in bytes (22 for 11 INT16 channels).
++- The drop's `libmi_ipu.so` never reads the IPU firmware file `CreateDevice` is
++  given. On an SSC378DE camera an empty and an all-zero file ran the model just
++  as SigmaStar's Infinity6E firmware file did, and no read moved the file's
++  access time; on an SSC378QE and an SSC377D camera ipud ran with no file at
++  all, at the same `Invoke` time as with one. So ipud needs none: it passes a
++  file only when one is there (`-f`), and the built-in set has none. The
++  Infinity6E library opens `/config/dla/ipu_firmware.bin` itself, so a port to
++  that SoC would need one.
 +
 +## Outputs
 +
@@ -224,11 +234,11 @@ index 000000000..855f929dc
 +`ipud.source` picks it; `ipud-paths` (installed in `/usr/libexec/`) resolves it
 +for both `S35ipud` and the web UI's CGI:
 +
-+| `source` | Model | IPU firmware |
-+|---|---|---|
-+| `builtin` (default) | `/usr/share/ipud/model.img` | `/usr/share/ipud/ipu_firmware.bin` |
-+| `sdcard` | `<sd_dir>/<sd_model>`, the first `*.img` there when `sd_model` is empty; `sd_dir` defaults to `/mnt/mmcblk0p1/ipud` | `<sd_dir>/ipu_firmware.bin`, else the built-in one |
-+| `custom` | `model` | `firmware`, else the built-in one |
++| `source` | Model |
++|---|---|
++| `builtin` (default) | `/usr/share/ipud/model.img` |
++| `sdcard` | `<sd_dir>/<sd_model>`, the first `*.img` there when `sd_model` is empty; `sd_dir` defaults to `/mnt/mmcblk0p1/ipud` |
++| `custom` | `model` |
 +
 +A config from before `source` that names its own `model` counts as `custom`.
 +The class names come from a `<model>.labels` file beside the model (one
@@ -236,10 +246,16 @@ index 000000000..855f929dc
 +default, the built-in model's six classes in COCO order:
 +`person,bicycle,car,motorcycle,bus,truck`.
 +
-+The vendor files are never in this repository: no license lets us publish the
-+IPU firmware or a vendor model. A private build stages them in this package's
-+`vendor/` folder (git-ignored) before it builds, and the package installs them
-+to `/usr/share/ipud/`; an image built without them has no built-in model, and
++No IPU firmware is needed ([Facts found on hardware](#facts-found-on-hardware)).
++A firmware file that is there is still passed on (`ipud -f`):
++`<sd_dir>/ipu_firmware.bin` for `sdcard`, `firmware` for `custom`, and
++otherwise `/usr/share/ipud/ipu_firmware.bin`, which this package does not
++install.
++
++The model is never in this repository: no license lets us publish a vendor
++model. A private build stages it, with its `model.labels`, in this package's
++`vendor/` folder (git-ignored) before it builds, and the package installs both
++to `/usr/share/ipud/`; an image built without it has no built-in model, and
 +the web UI page says so. New models, ours or a vendor's, go on the SD card with
 +no rebuild: drop the `.img` (and a `.labels`) in the folder and pick it on the
 +page.
@@ -251,27 +267,23 @@ index 000000000..855f929dc
 +repository (<https://github.com/andylee77/thingino-sigmastar-fwd>; MIT, no
 +vendor bytes) takes the model out of the JL12D2's stock firmware (a full flash
 +read of the camera, or its vendor firmware download) and checks it against the
-+md5 ipud is known to run.
-+
-+No IPU firmware is needed: the runtime never reads the file ipud names (on an
-+SSC378DE camera an empty and an all-zero file ran the model the same). ipud
-+still checks that the file exists, so the tool writes an empty
-+`ipu_firmware.bin` beside `model.img` and `model.labels`: copy the three into
-+this package's `vendor/` before a build, or the folder onto the SD card as
-+`ipud/` and set the source to `sdcard`.
++md5 ipud is known to run. It writes `model.img` and `model.labels`: copy the
++two into this package's `vendor/` before a build, or the folder onto the SD
++card as `ipud/` and set the source to `sdcard`. No IPU firmware is needed.
 diff --git a/package/thingino-ipud/files/S35ipud b/package/thingino-ipud/files/S35ipud
 new file mode 100755
-index 000000000..2ba2ead2e
+index 000000000..33dab8e30
 --- /dev/null
 +++ b/package/thingino-ipud/files/S35ipud
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,184 @@
 +#!/bin/sh
 +# S35ipud -- on-camera object detection on the Infinity6C IPU (thingino-ipud).
 +# Settings: the "ipud" block of /etc/thingino.json. It starts only when
 +# ipud.enabled is true and the model its source names is there: built in
 +# (/usr/share/ipud, private images only), on the SD card, or a custom path
-+# (/usr/libexec/ipud-paths resolves it). MQTT, when ipud.mqtt is true, uses the
-+# broker of /etc/send2.json's "mqtt" block (send2mqtt's) and the topic
++# (/usr/libexec/ipud-paths resolves it). No IPU firmware file is needed; one
++# that ipud-paths finds is passed on with -f. MQTT, when ipud.mqtt is true,
++# uses the broker of /etc/send2.json's "mqtt" block (send2mqtt's) and the topic
 +# ipud.mqtt_topic (empty: thingino/<hostname>/ipud). Raptor's init script also
 +# stops ipud before rvd goes down and starts it once rvd is back
 +# (/etc/raptor.d/ipud). ipud.onvif adds ONVIF object events to /etc/onvif.json
@@ -338,10 +350,11 @@ index 000000000..2ba2ead2e
 +		return 0
 +	fi
 +
-+	set -- -f "$IPUD_FW" -m "$IPUD_MODEL" -Z -I 500 \
++	set -- -m "$IPUD_MODEL" -Z -I 500 \
 +		-c "$(num "$(get score)" 0.4)" -i "$(num "$(get iou)" 0.45)" \
 +		-r "$(num "$(get max_fps)" 10)" -H "$(num "$(get hold_ms)" 3000)" \
 +		-M "$(num "$(get mqtt_interval_ms)" 500)"
++	[ -f "$IPUD_FW" ] && set -- "$@" -f "$IPUD_FW"
 +	[ -n "$IPUD_LABELS" ] && set -- "$@" -L "$IPUD_LABELS"
 +	report=$(get report)
 +	[ -n "$report" ] && set -- "$@" -k "$report"
@@ -449,10 +462,10 @@ index 000000000..2ba2ead2e
 +exit 0
 diff --git a/package/thingino-ipud/files/ipu_rt.c b/package/thingino-ipud/files/ipu_rt.c
 new file mode 100644
-index 000000000..a8fed3ce1
+index 000000000..d24aee6b7
 --- /dev/null
 +++ b/package/thingino-ipud/files/ipu_rt.c
-@@ -0,0 +1,206 @@
+@@ -0,0 +1,219 @@
 +/* ipu_rt.c - MI_IPU runtime wrapper; see ipu_rt.h and README.md. */
 +#include <stdio.h>
 +#include <string.h>
@@ -460,10 +473,13 @@ index 000000000..a8fed3ce1
 +#include <sys/stat.h>
 +#include "ipu_rt.h"
 +
-+/* The lib calls this to pull firmware/model bytes; ctx is the path passed to
-+ * CreateDevice/CreateCHN (confirmed on N803, 2026-11-10). */
++/* The lib calls this to pull model bytes; ctx is the path passed to
++ * CreateDevice/CreateCHN (confirmed on N803, 2026-11-10). The Infinity6C
++ * runtime never reads the firmware through it (README.md). */
 +static int read_cb(void *data, int offset, int size, char *ctx)
 +{
++    if (!size) return 0;                    /* nothing to read (no firmware) */
++    if (size < 0 || !ctx || !*ctx) return -1;
 +    FILE *f = fopen(ctx, "rb");
 +    if (!f) return -1;
 +    if (fseek(f, offset, SEEK_SET)) { fclose(f); return -1; }
@@ -548,12 +564,22 @@ index 000000000..a8fed3ce1
 +
 +int ipu_rt_open(ipu_rt *rt, const char *fw, const char *model, unsigned int dynbuf)
 +{
++    static char no_fw[1];   /* "" in writable memory: the lib gets a char * */
++    unsigned int fw_size = 0;
 +    struct stat st;
 +    int r;
 +
 +    memset(rt, 0, sizeof *rt);
 +    rt->cache_mode = 3;     /* Invoke does not write the input back (README.md) */
-+    if (stat(fw, &st)) { perror(fw); return -1; }
++    /* The IPU firmware is optional: the Infinity6C runtime never reads the
++     * file (README.md). Without one, CreateDevice gets an empty path and
++     * size 0, as it does for an empty file. */
++    if (fw && *fw) {
++        if (stat(fw, &st)) { perror(fw); return -1; }
++        fw_size = (unsigned int)st.st_size;
++    } else {
++        fw = no_fw;
++    }
 +    if (load_libs(rt)) return -1;
 +
 +    if ((r = rt->SysInit(0))) { fprintf(stderr, "ipu: MI_SYS_Init = %d\n", r); return -1; }
@@ -578,8 +604,8 @@ index 000000000..a8fed3ce1
 +    memset(&dev, 0, sizeof dev);
 +    dev.maxDynBufSize = rt->dynbuf;
 +    dev.yuv420Walign = 2; dev.yuv420Halign = 2; dev.rgbWalign = 1;
-+    if ((r = rt->CreateDevice(&dev, read_cb, (char *)fw, (unsigned int)st.st_size))) {
-+        fprintf(stderr, "ipu: CreateDevice(%s) = %d\n", fw, r); return -1;
++    if ((r = rt->CreateDevice(&dev, read_cb, (char *)fw, fw_size))) {
++        fprintf(stderr, "ipu: CreateDevice(%s) = %d\n", *fw ? fw : "no firmware", r); return -1;
 +    }
 +    rt->dev_ok = 1;
 +    rt->model = model;
@@ -661,15 +687,16 @@ index 000000000..a8fed3ce1
 +}
 diff --git a/package/thingino-ipud/files/ipu_rt.h b/package/thingino-ipud/files/ipu_rt.h
 new file mode 100644
-index 000000000..0d0e73c75
+index 000000000..0b8810819
 --- /dev/null
 +++ b/package/thingino-ipud/files/ipu_rt.h
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,65 @@
 +/* ipu_rt.h - a thin MI_IPU runtime wrapper for Infinity6C (dlopen, one channel).
 + *
 + * Wraps the validated bring-up flow (README.md): the MI deps in global scope,
-+ * MI_SYS_Init(0), CreateDevice(firmware), CreateCHN(model), GetInOutTensorDesc,
-+ * GetInputTensors / GetOutputTensors once, then Invoke per frame.
++ * MI_SYS_Init(0), CreateDevice (the firmware file optional), CreateCHN(model),
++ * GetInOutTensorDesc, GetInputTensors / GetOutputTensors once, then Invoke per
++ * frame.
 + */
 +#ifndef IPU_RT_H
 +#define IPU_RT_H
@@ -706,8 +733,9 @@ index 000000000..0d0e73c75
 +    int sys_ok, dev_ok, chn_ok, in_ok, out_ok;
 +} ipu_rt;
 +
-+/* dynbuf: DevAttr.maxDynBufSize, >= the model's variable buffer (0 = read it
-+ * from the model header, else 4 MiB). */
++/* fw: the IPU firmware file for CreateDevice, or NULL or "" for none (the
++ * Infinity6C runtime never reads it). dynbuf: DevAttr.maxDynBufSize, >= the
++ * model's variable buffer (0 = read it from the model header, else 4 MiB). */
 +int  ipu_rt_open(ipu_rt *rt, const char *fw, const char *model, unsigned int dynbuf);
 +int  ipu_rt_invoke(ipu_rt *rt);
 +void ipu_rt_close(ipu_rt *rt);
@@ -1072,21 +1100,24 @@ index 000000000..899ca766d
 +exit 0
 diff --git a/package/thingino-ipud/files/ipud-paths b/package/thingino-ipud/files/ipud-paths
 new file mode 100644
-index 000000000..eb847668d
+index 000000000..673876719
 --- /dev/null
 +++ b/package/thingino-ipud/files/ipud-paths
-@@ -0,0 +1,89 @@
-+# ipud-paths -- which IPU firmware, model and class names ipud runs with.
+@@ -0,0 +1,90 @@
++# ipud-paths -- which model, class names and IPU firmware ipud runs with.
 +# Sourced by S35ipud and /var/www/x/json-ipud.cgi, so both resolve the same way.
 +#
 +# ipud.source in /etc/thingino.json picks the model:
-+#   builtin  /usr/share/ipud/model.img and ipu_firmware.bin, from the image (a
-+#            private build stages them; a public one has none)
++#   builtin  /usr/share/ipud/model.img, from the image (a private build stages
++#            it; a public one has none)
 +#   sdcard   <ipud.sd_dir>/<ipud.sd_model> on the SD card (the first *.img there
-+#            when sd_model is empty); the folder's ipu_firmware.bin if it has
-+#            one, else the built-in firmware
-+#   custom   the paths ipud.firmware and ipud.model
++#            when sd_model is empty)
++#   custom   the path ipud.model
 +# A config from before ipud.source that names its own ipud.model is custom.
++# No IPU firmware is needed: the Infinity6C runtime never reads the file (the
++# package README). One that is there is still passed on: for sdcard the
++# folder's ipu_firmware.bin, for custom ipud.firmware, and otherwise
++# /usr/share/ipud/ipu_firmware.bin.
 +# Class names: a <model>.labels file beside the model (one line, comma-separated)
 +# wins over ipud.labels. A key missing from thingino.json takes the package
 +# default (45-ipud.json): thingino-core merges defaults only at build time.
@@ -1106,8 +1137,9 @@ index 000000000..eb847668d
 +	[ -d "$1" ] && ls "$1" 2>/dev/null | grep '\.img$'
 +}
 +
-+# Sets IPUD_SOURCE, IPUD_FW, IPUD_MODEL, IPUD_LABELS, IPUD_LABELS_FILE (1 when a
-+# .labels file named them) and IPUD_MISSING (why it cannot run; empty if it can).
++# Sets IPUD_SOURCE, IPUD_MODEL, IPUD_FW (the firmware file when there is one,
++# else empty), IPUD_LABELS, IPUD_LABELS_FILE (1 when a .labels file named them)
++# and IPUD_MISSING (why it cannot run; empty if it can).
 +ipud_resolve() {
 +	IPUD_MISSING=
 +	IPUD_FW=
@@ -1150,12 +1182,9 @@ index 000000000..eb847668d
 +		[ -f "$IPUD_MODEL" ] || IPUD_MISSING="this image has no built-in model"
 +		;;
 +	esac
-+	if [ -z "$IPUD_MISSING" ]; then
-+		if [ ! -f "$IPUD_MODEL" ]; then
-+			IPUD_MISSING="model $IPUD_MODEL not found"
-+		elif [ ! -f "$IPUD_FW" ]; then
-+			IPUD_MISSING="IPU firmware $IPUD_FW not found"
-+		fi
++	[ -f "$IPUD_FW" ] || IPUD_FW=
++	if [ -z "$IPUD_MISSING" ] && [ ! -f "$IPUD_MODEL" ]; then
++		IPUD_MISSING="model $IPUD_MODEL not found"
 +	fi
 +	IPUD_LABELS=
 +	IPUD_LABELS_FILE=0
@@ -1167,10 +1196,10 @@ index 000000000..eb847668d
 +}
 diff --git a/package/thingino-ipud/files/ipud.c b/package/thingino-ipud/files/ipud.c
 new file mode 100644
-index 000000000..e03747a90
+index 000000000..fae36bfa6
 --- /dev/null
 +++ b/package/thingino-ipud/files/ipud.c
-@@ -0,0 +1,799 @@
+@@ -0,0 +1,801 @@
 +/* ipud.c - on-camera YOLO detection on the Infinity6C IPU.
 + *
 + * Frames come from a spare SCL output port at the model's input size (NV12,
@@ -1615,7 +1644,8 @@ index 000000000..e03747a90
 +static void usage(const char *a0)
 +{
 +    fprintf(stderr,
-+        "usage: %s -f ipu_firmware.bin -m model.img [options]\n"
++        "usage: %s -m model.img [-f ipu_firmware.bin] [options]\n"
++        "  -f file     IPU firmware for CreateDevice (optional: the Infinity6C runtime never reads it)\n"
 +        "  -L labels   class names in model order (person,bicycle,car,motorcycle,bus,truck)\n"
 +        "  -k labels   report only these (default all)\n"
 +        "  -c score    threshold (0.40)       -i iou      NMS IoU (0.45)\n"
@@ -1653,7 +1683,7 @@ index 000000000..e03747a90
 +
 +    while ((opt = getopt(argc, argv, "f:m:L:k:c:i:r:p:D:s:S:I:q:H:M:O:x:Zn:to:Fvh")) != -1) {
 +        switch (opt) {
-+        case 'f': c.fw = optarg; break;
++        case 'f': c.fw = *optarg ? optarg : NULL; break;
 +        case 'm': c.model = optarg; break;
 +        case 'L': parse_labels(&c, optarg); break;
 +        case 'k': keep = optarg; break;
@@ -1679,7 +1709,7 @@ index 000000000..e03747a90
 +        default: usage(argv[0]); return 2;
 +        }
 +    }
-+    if (!c.fw || !c.model) { usage(argv[0]); return 2; }
++    if (!c.model) { usage(argv[0]); return 2; }
 +    /* Each SCL port frame is the model's input size in MMA (576000 B at
 +     * 800x480). Depth 1 (two frames) keeps up with a 10/s cap; full rate
 +     * needs depth 2 (three): with one frame held through Invoke and one
@@ -1701,7 +1731,8 @@ index 000000000..e03747a90
 +
 +    if (ipu_rt_open(&rt, c.fw, c.model, 0)) {
 +        ipu_rt_close(&rt);
-+        return fail(&c, "the IPU refused the firmware or the model (a model built for another SGS release?)");
++        return fail(&c, c.fw ? "the IPU refused the firmware or the model (a model built for another SGS release?)"
++                             : "the IPU refused the model (a model built for another SGS release?)");
 +    }
 +    const MI_IPU_TensorDesc *in = &rt.desc.inDesc[0];
 +    unsigned in_h = in->shape[1], in_w = in->shape[2];
@@ -1730,8 +1761,8 @@ index 000000000..e03747a90
 +    for (int k = c.nlabels; k < heads[0].nch - 5; k++) snprintf(c.labels[k], sizeof c.labels[0], "c%d", k);
 +    if (c.nlabels < heads[0].nch - 5) c.nlabels = heads[0].nch - 5;
 +    if (keep) parse_keep(&c, keep);
-+    lg(LOG_INFO, "model %s: %ux%u NV12 in, %d heads, %d classes, variable buffer %u B",
-+       c.model, in_w, in_h, nh, heads[0].nch - 5, rt.dynbuf);
++    lg(LOG_INFO, "model %s: %ux%u NV12 in, %d heads, %d classes, variable buffer %u B; IPU firmware %s",
++       c.model, in_w, in_h, nh, heads[0].nch - 5, rt.dynbuf, c.fw ? c.fw : "none");
 +    lg(LOG_DEBUG, "input tensor va %p/%p pa 0x%llx/0x%llx", rt.in.tensor[0].data[0], rt.in.tensor[0].data[1],
 +       rt.in.tensor[0].phyAddr[0], rt.in.tensor[0].phyAddr[1]);
 +
@@ -2395,10 +2426,10 @@ index 000000000..4074a03b2
 +#endif
 diff --git a/package/thingino-ipud/files/www/a/config-ipud.js b/package/thingino-ipud/files/www/a/config-ipud.js
 new file mode 100644
-index 000000000..eae7c3b21
+index 000000000..b803f56be
 --- /dev/null
 +++ b/package/thingino-ipud/files/www/a/config-ipud.js
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,166 @@
 +/**
 + * Settings and status page for thingino-ipud (IPU object detection).
 + * Reads and writes the "ipud" block of /etc/thingino.json through
@@ -2455,7 +2486,6 @@ index 000000000..eae7c3b21
 +      if (el("sd_dir").value.trim() !== (a.sd_dir || "")) return [true, ""]; // checked after the save
 +      if (!a.sd_found) return [false, `The SD card folder ${a.sd_dir || ""} is not there`];
 +      if (!(a.sd_models || []).length) return [false, `No model (.img) in ${a.sd_dir}`];
-+      if (!a.sd_firmware && !a.builtin) return [false, "No IPU firmware on the card or built in"];
 +      return [true, ""];
 +    }
 +    return [true, ""]; // custom paths: checked when ipud starts
@@ -2470,10 +2500,10 @@ index 000000000..eae7c3b21
 +    if (src === "builtin") note = a.builtin ? "The model in this firmware." : "This firmware carries no model.";
 +    if (src === "sdcard") {
 +      const n = (a.sd_models || []).length;
-+      note = a.sd_found ? `${n} model${n === 1 ? "" : "s"} on the card; IPU firmware ${a.sd_firmware ? "from the card" : "built in"}.`
++      note = a.sd_found ? `${n} model${n === 1 ? "" : "s"} on the card.`
 +        : "The card folder is not there (is a card in?).";
 +    }
-+    if (src === "custom") note = "Any path on the camera; an empty firmware path uses the built-in one.";
++    if (src === "custom") note = "Any path on the camera.";
 +    setText("ipud-source-note", note);
 +    const [ok, why] = sourceReady();
 +    document.getElementById("ipud-files-alert").classList.toggle("d-none", ok);
@@ -2766,7 +2796,7 @@ index 000000000..200d4ba30
 +})();
 diff --git a/package/thingino-ipud/files/www/config-ipud.html b/package/thingino-ipud/files/www/config-ipud.html
 new file mode 100644
-index 000000000..dd4bfcb18
+index 000000000..28132aa63
 --- /dev/null
 +++ b/package/thingino-ipud/files/www/config-ipud.html
 @@ -0,0 +1,192 @@
@@ -2897,9 +2927,8 @@ index 000000000..dd4bfcb18
 +                  <p>
 +                    <label for="ipud_sd_model">Model on the card</label>
 +                    <select id="ipud_sd_model" class="form-select"></select>
-+                    <small class="text-secondary">A model's <code>.img</code> file in the folder; its IPU firmware is
-+                      the folder's <code>ipu_firmware.bin</code> if there is one, else the built-in one. Save the
-+                      folder to list a new one.</small>
++                    <small class="text-secondary">A model's <code>.img</code> file in the folder. Save the folder to
++                      list a new one.</small>
 +                  </p>
 +                </div>
 +                <div id="ipud-src-custom" class="d-none">
@@ -2908,8 +2937,9 @@ index 000000000..dd4bfcb18
 +                    <input type="text" id="ipud_model" class="form-control">
 +                  </p>
 +                  <p>
-+                    <label for="ipud_firmware">IPU firmware file</label>
-+                    <input type="text" id="ipud_firmware" class="form-control" placeholder="built-in">
++                    <label for="ipud_firmware">IPU firmware file (optional)</label>
++                    <input type="text" id="ipud_firmware" class="form-control" placeholder="none">
++                    <small class="text-secondary">Not needed: this camera's IPU runtime does not read it.</small>
 +                  </p>
 +                </div>
 +                <p>
@@ -2964,7 +2994,7 @@ index 000000000..dd4bfcb18
 +</html>
 diff --git a/package/thingino-ipud/files/www/x/json-ipud.cgi b/package/thingino-ipud/files/www/x/json-ipud.cgi
 new file mode 100755
-index 000000000..b4a429e65
+index 000000000..26c52c26f
 --- /dev/null
 +++ b/package/thingino-ipud/files/www/x/json-ipud.cgi
 @@ -0,0 +1,148 @@
@@ -3078,7 +3108,7 @@ index 000000000..b4a429e65
 +	ipud_resolve
 +	sd=$(ipud_get sd_dir)
 +	builtin=false
-+	[ -f "$IPUD_BUILTIN/model.img" ] && [ -f "$IPUD_BUILTIN/ipu_firmware.bin" ] && builtin=true
++	[ -f "$IPUD_BUILTIN/model.img" ] && builtin=true
 +	printf '{"config":%s,' "$(merged_config)"
 +	printf '"resolved":{"source":"%s","firmware":"%s","model":"%s","labels":"%s","labels_file":%s,"missing":"%s"},' \
 +		"$(esc "$IPUD_SOURCE")" "$(esc "$IPUD_FW")" "$(esc "$IPUD_MODEL")" "$(esc "$IPUD_LABELS")" \
@@ -3281,10 +3311,10 @@ index 000000000..94b1b0b10
 +#endif
 diff --git a/package/thingino-ipud/thingino-ipud.mk b/package/thingino-ipud/thingino-ipud.mk
 new file mode 100644
-index 000000000..2ae9d915e
+index 000000000..b853697cd
 --- /dev/null
 +++ b/package/thingino-ipud/thingino-ipud.mk
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,81 @@
 +################################################################################
 +#
 +# thingino-ipud
@@ -3327,14 +3357,15 @@ index 000000000..2ae9d915e
 +endef
 +endif
 +
-+# The built-in model: the IPU firmware and the model are vendor files that no
-+# license lets us publish, so they are never in the repository (vendor/ is
-+# git-ignored). A private build stages them in vendor/ first, with
-+# model.labels; whatever is there goes to /usr/share/ipud/. Without them the
-+# image has no built-in model, and ipud runs from the SD card or a custom path.
++# The built-in model: a vendor file that no license lets us publish, so it is
++# never in the repository (vendor/ is git-ignored). A private build stages it
++# in vendor/ first, with model.labels, and both go to /usr/share/ipud/. Without
++# it the image has no built-in model, and ipud runs from the SD card or a
++# custom path. No IPU firmware is installed: the Infinity6C runtime never reads
++# the file (files/README.md), so an ipu_firmware.bin in vendor/ stays there.
 +THINGINO_IPUD_VENDOR_DIR = $(THINGINO_IPUD_PKGDIR)/vendor
 +define THINGINO_IPUD_INSTALL_VENDOR_CMDS
-+	for f in ipu_firmware.bin model.img model.labels; do \
++	for f in model.img model.labels; do \
 +		if [ -f $(THINGINO_IPUD_VENDOR_DIR)/$$f ]; then \
 +			$(INSTALL) -D -m 0644 $(THINGINO_IPUD_VENDOR_DIR)/$$f \
 +				$(TARGET_DIR)/usr/share/ipud/$$f || exit 1; \

@@ -1,6 +1,6 @@
-From fddfd67d6a258dbb273d91de6c938e21c031ae99 Mon Sep 17 00:00:00 2001
+From d9989c597b1742708310a2e10397f606fa7ea635 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 11 Nov 2026 17:09:54 -0500
+Date: Tue, 17 Nov 2026 17:54:40 -0500
 Subject: [PATCH 17/22] thingino-sysupgrade: ship thingino-update, fence
  sysupgrade; dirty build-id
 

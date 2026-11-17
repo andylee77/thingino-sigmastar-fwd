@@ -1,6 +1,6 @@
-From bd75a0f981bfe14db74704c007357068559dc8d7 Mon Sep 17 00:00:00 2001
+From 0a8536cc5fabb57c542808bbee911f9ab4bc657c Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 11 Nov 2026 17:09:54 -0500
+Date: Tue, 17 Nov 2026 17:54:40 -0500
 Subject: [PATCH 19/22] cameras: Jennov JL12D2 / UVision MCL12D2
  (mcl12d2_ssc377d_imx335, PTZ)
 

@@ -1,6 +1,6 @@
-From 287095b6aab78f0733ee4ce36af6d6b024b653b5 Mon Sep 17 00:00:00 2001
+From 41e6b542e4d2e852bfaf74e9baabf0fddb8edd37 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 11 Nov 2026 17:09:54 -0500
+Date: Tue, 17 Nov 2026 17:54:40 -0500
 Subject: [PATCH 21/22] cameras: N803 PTZ (n803_ssc378qe_imx415, Pelco-D head)
 
 SSC378QE + IMX415, 3840x2160 + 1280x720, 5x zoom: its own board DTS, the

@@ -1,6 +1,6 @@
-From 6f5850bdfb7b68ac5793b287f687a6a84aeeb5cc Mon Sep 17 00:00:00 2001
+From 94b1fdc03fc81f79e7dd8adc62724501403d4197 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 11 Nov 2026 17:09:54 -0500
+Date: Tue, 17 Nov 2026 17:54:40 -0500
 Subject: [PATCH 02/22] sigmastar: Infinity6C board, SoC and kernel support
 
 board/sigmastar (the Infinity6C kernel config, the board DTS patch

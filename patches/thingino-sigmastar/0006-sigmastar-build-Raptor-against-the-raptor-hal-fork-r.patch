@@ -1,6 +1,6 @@
-From 1142957580d63ce94ef5825de96712ff770b476a Mon Sep 17 00:00:00 2001
+From 9a161c2ef76801cbd55bf4bb7986e76291f48756 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 11 Nov 2026 17:09:54 -0500
+Date: Tue, 17 Nov 2026 17:54:40 -0500
 Subject: [PATCH 06/22] sigmastar: build Raptor against the raptor-hal fork;
  reference target
 

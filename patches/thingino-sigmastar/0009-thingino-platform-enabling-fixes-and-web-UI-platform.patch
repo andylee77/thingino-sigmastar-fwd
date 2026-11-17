@@ -1,11 +1,9 @@
-From 5c8d71723bb06dd57fb8214f33ea5ae1a224b1de Mon Sep 17 00:00:00 2001
+From 1385ed4e0ebd62f0f3e941fe7aefe60bc66b6328 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 11 Nov 2026 17:09:54 -0500
+Date: Tue, 17 Nov 2026 17:54:40 -0500
 Subject: [PATCH 09/22] thingino: platform-enabling fixes and web UI platform
  flags
 
-- thingino-isp pulls no Ingenic ISP stack on other vendors;
-- thingino-ethernet selects the JZ MAC kernel options on Ingenic only;
 - the control bar links "Photosensing Config" only with thingino-daynightd,
   and hides the motion controls and locks the speaker where the platform's
   web UI flags say so;
@@ -22,8 +20,6 @@ The flags default to the old behaviour. The SigmaStar values are set in
 raptor-sigmastar.webui.json, in the streaming patch.
 ---
  overlay/usr/sbin/sensor-iq-name               |  4 +-
- package/thingino-ethernet/Config.in           |  4 +-
- package/thingino-isp/Config.in                |  2 +
  .../files/www/a/streamer-osd.js               | 69 +++++++++++++++++--
  .../files/www/streamer-osd.html               |  2 +-
  .../files/www/x/json-sensor-upload.cgi        |  7 +-
@@ -31,7 +27,7 @@ raptor-sigmastar.webui.json, in the streaming patch.
  .../thingino-webui/files/www/a/control-bar.js | 27 ++++++--
  package/thingino-webui/files/www/a/main.js    |  2 +-
  .../files/www/x/json-sensor-info.cgi          |  7 +-
- 10 files changed, 110 insertions(+), 18 deletions(-)
+ 8 files changed, 105 insertions(+), 17 deletions(-)
 
 diff --git a/overlay/usr/sbin/sensor-iq-name b/overlay/usr/sbin/sensor-iq-name
 index 962df9677..9ef362077 100755
@@ -54,41 +50,6 @@ index 962df9677..9ef362077 100755
 +	t10 | t20 | t30 | infinity*) printf '%s.bin\n' "$1" ;;
  	*) printf '%s-%s.bin\n' "$1" "$2" ;;
  esac
-diff --git a/package/thingino-ethernet/Config.in b/package/thingino-ethernet/Config.in
-index 6044f84b4..b740eab5c 100644
---- a/package/thingino-ethernet/Config.in
-+++ b/package/thingino-ethernet/Config.in
-@@ -1,7 +1,9 @@
- config BR2_PACKAGE_THINGINO_ETHERNET
- 	bool "thingino-ethernet"
- 	select BR2_PACKAGE_THINGINO_KOPT
--	select BR2_PACKAGE_THINGINO_KOPT_JZ_MAC
-+	# The Ingenic JZ MAC kernel options. Other vendors' kernel configs carry
-+	# their own MAC driver.
-+	select BR2_PACKAGE_THINGINO_KOPT_JZ_MAC if BR2_SOC_VENDOR_INGENIC
- #	select BR2_PACKAGE_THINGINO_KOPT_JZ_MAC_INTERNAL_PHY
- #	select BR2_PACKAGE_THINGINO_KOPT_JZ_MAC_V12
- #	select BR2_PACKAGE_THINGINO_KOPT_JZ_MAC_V13
-diff --git a/package/thingino-isp/Config.in b/package/thingino-isp/Config.in
-index 14f3655a6..44fe7eed4 100644
---- a/package/thingino-isp/Config.in
-+++ b/package/thingino-isp/Config.in
-@@ -6,6 +6,7 @@ choice
- 	default BR2_PACKAGE_THINGINO_ISP_NONE if BR2_THINGINO_TOOLCHAIN
- 	default BR2_PACKAGE_THINGINO_ISP_NONE if BR2_SOC_FAMILY = "a1"
- 	default BR2_PACKAGE_THINGINO_ISP_NONE if !BR2_THINGINO_DEV_CAMERA
-+	default BR2_PACKAGE_THINGINO_ISP_NONE if !BR2_SOC_VENDOR_INGENIC
- 	default BR2_PACKAGE_THINGINO_ISP_PROPRIETARY
- 	help
- 	  Select the ISP kernel and userspace implementation used by the
-@@ -18,6 +19,7 @@ config BR2_PACKAGE_THINGINO_ISP_NONE
- 
- config BR2_PACKAGE_THINGINO_ISP_PROPRIETARY
- 	bool "Proprietary Ingenic ISP stack"
-+	depends on BR2_SOC_VENDOR_INGENIC
- 	depends on !BR2_SOC_FAMILY = "a1"
- 	depends on BR2_THINGINO_DEV_CAMERA
- 	select BR2_PACKAGE_THINGINO_ISP
 diff --git a/package/thingino-raptor/files/www/a/streamer-osd.js b/package/thingino-raptor/files/www/a/streamer-osd.js
 index aa49fe514..a2b2a3caf 100644
 --- a/package/thingino-raptor/files/www/a/streamer-osd.js
@@ -294,10 +255,10 @@ index e07a68b19..204b45184 100644
        var wireguardBtn = createWireGuardButton();
        wireguardBtn.classList.add("flex-fill");
 diff --git a/package/thingino-webui/files/www/a/main.js b/package/thingino-webui/files/www/a/main.js
-index de1bd1ac0..1b26daab8 100644
+index 8b9f8ac86..d3eb7194a 100644
 --- a/package/thingino-webui/files/www/a/main.js
 +++ b/package/thingino-webui/files/www/a/main.js
-@@ -1046,7 +1046,7 @@ function updateHeartbeatUi(json) {
+@@ -1083,7 +1083,7 @@ function updateHeartbeatUi(json) {
    // Update speaker button
    if (typeof json.spk_enabled !== "undefined") {
      const spkBtn = $("#speaker");

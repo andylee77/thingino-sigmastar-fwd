@@ -1,6 +1,6 @@
-From d85a42f5d8bd40d461371cfca3b819f9b647c68f Mon Sep 17 00:00:00 2001
+From 681070a8da4084eb5f87af27e9a0c0c2aea7863e Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 11 Nov 2026 17:09:54 -0500
+Date: Tue, 17 Nov 2026 17:54:40 -0500
 Subject: [PATCH 13/22] thingino-raptor: raptor-watchdog fault reports and
  recovery
 
@@ -9,14 +9,95 @@ raptor-watchdog and S34raptor-watchdog, installed on SigmaStar builds. Every
 kept); a stalled encoder port, or rvd stuck in the driver, gets a report and
 a raptor restart, then a reboot, at most 3 an hour. The Infinity6C encoder
 can wedge while the camera stays up, and the kernel ring that holds the cause
-wraps within minutes.
+wraps within minutes. rvd gone for 15 s while rsd still runs (the kernel
+killed it for memory, on a 64 MB board) also gets a report and a restart. A
+quiet poll starts two processes, the sleep and one awk.
+
+For the same boards the agent listener answers at most 3 requests at once
+(AGENT_MAX_REQUESTS), and it and what it starts go before the video daemons
+when memory runs out.
 ---
+ package/thingino-agent/files/S95agent         |   4 +
+ package/thingino-agent/files/agentd-native.c  |  28 +-
  .../thingino-raptor/files/S34raptor-watchdog  |  39 +++
- package/thingino-raptor/files/raptor-watchdog | 232 ++++++++++++++++++
- 2 files changed, 271 insertions(+)
+ package/thingino-raptor/files/raptor-watchdog | 310 ++++++++++++++++++
+ 4 files changed, 379 insertions(+), 2 deletions(-)
  create mode 100755 package/thingino-raptor/files/S34raptor-watchdog
  create mode 100755 package/thingino-raptor/files/raptor-watchdog
 
+diff --git a/package/thingino-agent/files/S95agent b/package/thingino-agent/files/S95agent
+index eb0be7632..216ddeab9 100644
+--- a/package/thingino-agent/files/S95agent
++++ b/package/thingino-agent/files/S95agent
+@@ -1,6 +1,10 @@
+ #!/bin/sh
+ # shellcheck disable=SC2034,SC2086
+ 
++# When memory runs out the kernel should take the web UI's helpers, never the
++# video daemons: everything started from here inherits this score.
++echo 800 >/proc/self/oom_score_adj 2>/dev/null
++
+ DAEMON="agentd"
+ PIDFILE="/run/agentd.pid"
+ BOOTSTRAP_CONFIG="/etc/agent-bootstrap.json"
+diff --git a/package/thingino-agent/files/agentd-native.c b/package/thingino-agent/files/agentd-native.c
+index bf176dfb8..5cec55104 100644
+--- a/package/thingino-agent/files/agentd-native.c
++++ b/package/thingino-agent/files/agentd-native.c
+@@ -946,6 +946,9 @@ int main(int argc, char **argv)
+     const char *listen_addr = "127.0.0.1";
+     struct sockaddr_in addr;
+     int index;
++    int max_children = 3;
++    int active = 0;
++    pid_t child;
+ 
+     for (index = 1; index < argc; index++) {
+         if (strcmp(argv[index], "--listen") == 0 && index + 1 < argc) {
+@@ -957,7 +960,10 @@ int main(int argc, char **argv)
+ 
+     signal(SIGTERM, handle_signal);
+     signal(SIGINT, handle_signal);
+-    signal(SIGCHLD, SIG_IGN);
++    /* SIGCHLD stays at its default: the accept loop reaps and counts children. */
++    if (getenv("AGENT_MAX_REQUESTS") && atoi(getenv("AGENT_MAX_REQUESTS")) > 0) {
++        max_children = atoi(getenv("AGENT_MAX_REQUESTS"));
++    }
+ 
+     listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+     if (listen_fd < 0) {
+@@ -993,12 +999,30 @@ int main(int argc, char **argv)
+             perror("accept");
+             break;
+         }
+-        if (fork() == 0) {
++        /* At most max_children requests at once: each one runs the adapter, a
++         * large shell script that forks a subshell per substitution, and a page
++         * that fires a dozen requests in parallel ran a 64 MB camera out of
++         * memory. The rest wait here and in the listen backlog. */
++        while (waitpid(-1, NULL, WNOHANG) > 0) {
++            if (active > 0) active--;
++        }
++        while (active >= max_children) {
++            if (waitpid(-1, NULL, 0) > 0) {
++                active--;
++            } else if (errno != EINTR) {
++                active = 0;
++            }
++        }
++        child = fork();
++        if (child == 0) {
++            /* serve_client and its helpers were written with SIGCHLD ignored */
++            signal(SIGCHLD, SIG_IGN);
+             close(listen_fd);
+             serve_client(client_fd);
+             close(client_fd);
+             _exit(0);
+         }
++        if (child > 0) active++;
+         close(client_fd);
+     }
+ 
 diff --git a/package/thingino-raptor/files/S34raptor-watchdog b/package/thingino-raptor/files/S34raptor-watchdog
 new file mode 100755
 index 000000000..eff877f27
@@ -64,10 +145,10 @@ index 000000000..eff877f27
 +esac
 diff --git a/package/thingino-raptor/files/raptor-watchdog b/package/thingino-raptor/files/raptor-watchdog
 new file mode 100755
-index 000000000..f81414f82
+index 000000000..fee8ff318
 --- /dev/null
 +++ b/package/thingino-raptor/files/raptor-watchdog
-@@ -0,0 +1,232 @@
+@@ -0,0 +1,310 @@
 +#!/bin/sh
 +# raptor-watchdog -- keep the video pipeline alive, and keep the evidence when
 +# it fails. Started by S34raptor-watchdog; every POLL seconds:
@@ -81,13 +162,21 @@ index 000000000..f81414f82
 +# - if the restart does not bring frames back, it reboots, unless it has
 +#   already rebooted MAX_REBOOTS times in the last hour.
 +#
-+# Deliberate stops are left alone: nothing is judged while rvd is not running,
++# - rvd gone for GONE seconds while rsd still runs (killed or crashed) saves a
++#   report and restarts raptor, once.
++#
++# Deliberate stops are left alone: nothing is judged while the stack is stopped,
 +# while S31raptor runs, while the web UI's stream apply holds its lock, or in
 +# the first GRACE seconds after rvd starts.
 +#
 +# Reports: $DIR/<date>-<reason>.txt.gz, newest KEEP kept (the overlay is ~1 MB
 +# of flash). "raptor-watchdog report [reason]" writes one by hand.
 +# Tunables: /etc/default/raptor-watchdog; RAPTOR_WATCHDOG=0 turns it off.
++#
++# A poll that finds nothing wrong starts two processes, the sleep and one awk
++# over the encoder's table; the rest is read with the shell's own read. The
++# kernel log is searched every ERR_POLL seconds, not at every poll: it costs
++# four processes and a copy of the whole ring.
 +
 +[ -r /etc/default/raptor-watchdog ] && . /etc/default/raptor-watchdog
 +: "${RAPTOR_WATCHDOG:=1}"
@@ -98,6 +187,8 @@ index 000000000..f81414f82
 +: "${KEEP:=5}"
 +: "${MAX_REBOOTS:=3}"
 +: "${ERR_GAP:=600}"
++: "${ERR_POLL:=15}"
++: "${GONE:=15}"
 +: "${DIR:=/root/raptor-faults}"
 +: "${VENC:=/proc/mi_modules/mi_venc/mi_venc0}"
 +APPLY_LOCK=/run/agent/stream-apply.lock
@@ -152,11 +243,42 @@ index 000000000..f81414f82
 +		END { exit !(n > 0 && ok == n) }'
 +}
 +
++# The same two for the poll loop, read without a process: after "pid (comm) "
++# the state is the first field and the start time the twentieth. Sets _state
++# and _age (seconds, from $now).
++rvd_stat() {
++	_state=
++	_age=$now
++	_s=
++	read -r _s <"/proc/$1/stat" || return 1
++	# shellcheck disable=SC2086
++	set -- ${_s##*) }
++	_state=$1
++	_age=$((now - ${20:-0} / 100))
++} 2>/dev/null
++
++# rvd's pid for the poll loop: the one already known while /proc still calls
++# it rvd, and pidof only when it is not.
++rvd_now() {
++	_c=
++	[ -n "$pid" ] && read -r _c <"/proc/$pid/comm"
++	[ "$_c" = rvd ] || pid=$(rvd_pid)
++} 2>/dev/null
++
 +# A restart of raptor is under way, by S31raptor or the web UI's stream apply.
++# The command lines are read with the shell's read, which drops the NULs
++# between the words, in place of "ps | grep".
 +busy() {
 +	[ -d "$APPLY_LOCK" ] && return 0
-+	ps | grep -q "[S]31raptor"
-+}
++	for _d in /proc/[0-9]*; do
++		_c=
++		read -r _c <"$_d/cmdline"
++		case "$_c" in
++			*S31raptor*) return 0 ;;
++		esac
++	done
++	return 1
++} 2>/dev/null
 +
 +report() {
 +	mkdir -p "$DIR"
@@ -244,41 +366,78 @@ index 000000000..f81414f82
 +	dmesg | grep -F '[MI ERR]' | tail -n 3
 +}
 +
-+errsig=$(errors | md5sum)
++# Errors already in the log when the watchdog starts are reported at its
++# first look, as before.
++errtext=
++err_at=-$ERR_POLL
 +last_err=-$ERR_GAP
++pid=
 +d_since=
 +gave_up=
++gone_since=
++gone_tried=
 +rm -f "$STATE"
 +log "watching rvd: stall ${STALL}s, poll ${POLL}s, reports in $DIR"
 +
 +while :; do
 +	sleep "$POLL"
-+	now=$(uptime_s)
++	read -r _u _ </proc/uptime
++	now=${_u%.*}
 +
 +	# Save the kernel log while it still holds the first errors.
-+	_e=$(errors)
-+	_sig=$(printf '%s' "$_e" | md5sum)
-+	if [ -n "$_e" ] && [ "$_sig" != "$errsig" ] && [ $((now - last_err)) -ge "$ERR_GAP" ]; then
-+		last_err=$now
-+		report mi-error
++	if [ $((now - err_at)) -ge "$ERR_POLL" ]; then
++		err_at=$now
++		_e=$(errors)
++		if [ -n "$_e" ] && [ "$_e" != "$errtext" ] && [ $((now - last_err)) -ge "$ERR_GAP" ]; then
++			last_err=$now
++			report mi-error
++		fi
++		errtext=$_e
 +	fi
-+	errsig=$_sig
 +
-+	pid=$(rvd_pid)
-+	if [ -z "$pid" ] || busy || [ "$(rvd_age "$pid")" -lt "$GRACE" ]; then
-+		rm -f "$STATE"
++	rvd_now
++	# rvd gone while the rest of the stack still runs: it was killed (the OOM
++	# killer takes it first, it is the largest process) or it crashed. A stop
++	# by S31raptor takes rsd with it and is left alone. One restart per
++	# disappearance: a configuration rvd cannot start with is not looped on.
++	if [ -z "$pid" ] && ! busy && [ -n "$(pidof rsd)" ]; then
++		gone_since=${gone_since:-$now}
++		if [ -z "$gone_tried" ] && [ $((now - gone_since)) -ge "$GONE" ]; then
++			gone_tried=1
++			log "rvd is gone while rsd runs: restarting raptor"
++			report rvd-gone
++			/etc/init.d/S31raptor restart >/dev/null 2>&1
++		fi
++	else
++		gone_since=
++	fi
++	[ -n "$pid" ] && rvd_stat "$pid"
++	if [ -z "$pid" ] || busy || [ "$_age" -lt "$GRACE" ]; then
++		[ -e "$STATE" ] && rm -f "$STATE"
 +		d_since=
 +		continue
 +	fi
++	gone_tried=
 +
-+	# Per channel: its frame count and when that count last moved.
-+	frames | awk -v now="$now" -v st="$STATE" '
-+		BEGIN { while ((getline l < st) > 0) { split(l, f, " "); c[f[1]] = f[2]; s[f[1]] = f[3] } }
-+		{ print $1, $2, ($1 in c && c[$1] == $2) ? s[$1] : now }' >"$STATE.new"
-+	mv "$STATE.new" "$STATE"
-+	stalled=$(awk -v now="$now" -v lim="$STALL" 'now - $3 >= lim { printf "%s%s", (n++ ? "-" : ""), $1 }' "$STATE")
++	# Per channel: its frame count and when that count last moved, kept in
++	# $STATE; the channels whose count stood still for STALL seconds are
++	# printed. One awk does what frames() and two more did: the same rows of
++	# the same table.
++	stalled=$(awk -v now="$now" -v lim="$STALL" -v st="$STATE" '
++		BEGIN { while ((getline l < st) > 0) { split(l, f, " "); c[f[1]] = f[2]; s[f[1]] = f[3] }; close(st) }
++		/GetTotalCnt/ { t = 1; next }
++		t && $1 ~ /^[0-9]+$/ && NF >= 8 {
++			if ($(NF - 1) + 0 > 0) {
++				k = $1 "." $3; v = $(NF - 3); w = (k in c && c[k] == v) ? s[k] : now
++				keep = keep k " " v " " w "\n"
++				if (now - w >= lim) list = list (n++ ? "-" : "") k
++			}
++			next
++		}
++		t && NF == 0 { exit }
++		END { printf "%s", keep >st; close(st); printf "%s", list }' "$VENC" 2>/dev/null)
 +
-+	if [ "$(rvd_state "$pid")" = D ]; then
++	if [ "$_state" = D ]; then
 +		d_since=${d_since:-$now}
 +	else
 +		d_since=

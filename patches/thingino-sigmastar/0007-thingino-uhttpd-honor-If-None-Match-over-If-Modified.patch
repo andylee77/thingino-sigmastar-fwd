@@ -1,6 +1,6 @@
-From f0f4e5f19508561502475f4a7fe07c583d83f3ea Mon Sep 17 00:00:00 2001
+From d0ae411208ce789e8ffde6d2765db78dd2c94f24 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 11 Nov 2026 17:09:54 -0500
+Date: Tue, 17 Nov 2026 17:54:40 -0500
 Subject: [PATCH 07/22] thingino-uhttpd: honor If-None-Match over
  If-Modified-Since; cache policy
 
@@ -9,15 +9,27 @@ tested the date first, so a browser that last saw another device at the same
 address kept that device's files.
 
 A cache policy (uhttpd -H /etc/uhttpd-cache.json): runtime-config.js and the
-/x/ CGIs are no-store, the versioned /a/ scripts and styles are cached
-far-future, and the rest is revalidated.
+/x/ CGIs are no-store, /a/ scripts and styles are cached far-future at
+addresses that carry a ?ts= stamp only, and the rest is revalidated. Upstream
+has since gained -M and -F (max-age for /a/, no-cache for the rest); they are
+left unset here, so that a response carries one Cache-Control header. The two
+no-store rules are what the handler adds to upstream's policy.
+
+thingino-webui stamps every page once all packages have installed theirs,
+with a hash of every /a/ script and stylesheet in the image; upstream's final
+asset tag then stamps the image's copy again.
+
+On boards with less than 48 MB of RAM uhttpd runs 6 CGI scripts at once in
+place of 20, and uhttpd and what it starts are the kernel's first choice when
+memory runs out, ahead of the video daemons.
 ---
  ...ne-match-overrides-if-modified-since.patch | 24 +++++++++++++++++++
- package/thingino-uhttpd/files/S60uhttpd       |  8 +++++++
- package/thingino-uhttpd/files/uhttpd          |  3 +++
+ package/thingino-uhttpd/files/S60uhttpd       | 20 +++++++++++++++-
+ package/thingino-uhttpd/files/uhttpd          | 11 +++++----
  .../thingino-uhttpd/files/uhttpd-cache.json   | 19 +++++++++++++++
  package/thingino-uhttpd/thingino-uhttpd.mk    |  3 +++
- 5 files changed, 57 insertions(+)
+ package/thingino-webui/thingino-webui.mk      | 21 ++++++++++++++--
+ 6 files changed, 91 insertions(+), 7 deletions(-)
  create mode 100644 package/thingino-uhttpd/0007-file-if-none-match-overrides-if-modified-since.patch
  create mode 100644 package/thingino-uhttpd/files/uhttpd-cache.json
 
@@ -52,10 +64,25 @@ index 000000000..a1cd75df1
 + 
 + 	t = uh_file_date2unix(hdr);
 diff --git a/package/thingino-uhttpd/files/S60uhttpd b/package/thingino-uhttpd/files/S60uhttpd
-index d09528bef..57c36223b 100644
+index d09528bef..6b8dbda6f 100644
 --- a/package/thingino-uhttpd/files/S60uhttpd
 +++ b/package/thingino-uhttpd/files/S60uhttpd
-@@ -17,6 +17,7 @@ UHTTPD_HTTPS_LISTEN="${UHTTPD_HTTPS_LISTEN:-443}"
+@@ -11,12 +11,21 @@ PORTAL_PENDING_FLAG="/run/portal_pending"
+ UHTTPD_DOCROOT="${UHTTPD_DOCROOT:-/var/www}"
+ UHTTPD_PORTAL_DOCROOT="${UHTTPD_PORTAL_DOCROOT:-/var/www-portal}"
+ UHTTPD_CGI_PREFIX="${UHTTPD_CGI_PREFIX:-/x}"
+-UHTTPD_COMMON_ARGS="${UHTTPD_COMMON_ARGS:--t 0 -T 15 -k 10 -n 20 -N 100}"
++# When memory runs out the kernel should take CGI scripts, never the video
++# daemons: uhttpd and everything it starts inherit this score.
++echo 800 >/proc/self/oom_score_adj 2>/dev/null
++# -n: CGI scripts running at once. 20 of them ran a 64 MB camera out of memory
++# (each is a shell with its own children), so small boards get 6; an open page
++# holds one for its heartbeat stream.
++UHTTPD_MAX_CGI=20
++[ "$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)" -lt 49152 ] && UHTTPD_MAX_CGI=6
++UHTTPD_COMMON_ARGS="${UHTTPD_COMMON_ARGS:--t 0 -T 15 -k 10 -n $UHTTPD_MAX_CGI -N 100}"
+ UHTTPD_HTTP_LISTEN="${UHTTPD_HTTP_LISTEN:-80}"
+ UHTTPD_HTTPS_LISTEN="${UHTTPD_HTTPS_LISTEN:-443}"
  UHTTPD_PORTAL_HTTP_LISTEN="${UHTTPD_PORTAL_HTTP_LISTEN:-172.16.0.1:80}"
  UHTTPD_PORTAL_HTTPS_LISTEN="${UHTTPD_PORTAL_HTTPS_LISTEN:-172.16.0.1:443}"
  UHTTPD_ERROR_HANDLER="${UHTTPD_ERROR_HANDLER:-/x/legacy-url-recovery.cgi}"
@@ -63,13 +90,15 @@ index d09528bef..57c36223b 100644
  
  build_uhttpd_args() {
  	local docroot="$1"
-@@ -37,6 +38,13 @@ build_uhttpd_args() {
+@@ -37,6 +46,15 @@ build_uhttpd_args() {
  		args="$args -E $error_handler"
  	fi
  
-+	# Cache policy: runtime config and CGI answers are never cached, the
-+	# rest is revalidated on every use. Without it a browser that last saw
-+	# another camera at this address keeps that camera's footer and config.
++	# Cache policy: runtime config and CGI answers are never cached, /a/
++	# scripts and styles with a ?ts= version are kept (the build changes the
++	# version with their content), the rest is revalidated on every use.
++	# Without it a browser that last saw another camera at this address
++	# keeps that camera's footer and config.
 +	if [ -r "$UHTTPD_HANDLER" ]; then
 +		args="$args -H $UHTTPD_HANDLER"
 +	fi
@@ -78,10 +107,10 @@ index d09528bef..57c36223b 100644
  		args="$args $EXTRA_ARGS"
  	fi
 diff --git a/package/thingino-uhttpd/files/uhttpd b/package/thingino-uhttpd/files/uhttpd
-index 29edccb0d..86978a8bf 100644
+index 86392f6e8..5bdbf5b44 100644
 --- a/package/thingino-uhttpd/files/uhttpd
 +++ b/package/thingino-uhttpd/files/uhttpd
-@@ -32,6 +32,9 @@ UHTTPD_HTTPS_LISTEN="443"
+@@ -32,9 +32,12 @@ UHTTPD_HTTPS_LISTEN="443"
  UHTTPD_PORTAL_HTTP_LISTEN="172.16.0.1:80"
  UHTTPD_ERROR_HANDLER="/x/legacy-url-recovery.cgi"
  
@@ -90,10 +119,17 @@ index 29edccb0d..86978a8bf 100644
 +
  # Additional uhttpd arguments
  # Add any extra arguments here
- EXTRA_ARGS=""
+-# -M 600 -F /a/: cache /a/ for 10 min. The JS and CSS URLs carry ?ts=<tag>,
+-# which changes with any asset; other /a files update within the window.
+-# Every file outside /a gets no-cache, so pages are always revalidated (0008)
+-EXTRA_ARGS="-M 600 -F /a/"
++# Upstream sets -M 600 -F /a/ here (0008: max-age for /a/, no-cache for the
++# rest). Not set in this tree: UHTTPD_HANDLER above already gives every static
++# file its Cache-Control, and with both a response would carry two.
++EXTRA_ARGS=""
 diff --git a/package/thingino-uhttpd/files/uhttpd-cache.json b/package/thingino-uhttpd/files/uhttpd-cache.json
 new file mode 100644
-index 000000000..ddd948470
+index 000000000..b60dfcefb
 --- /dev/null
 +++ b/package/thingino-uhttpd/files/uhttpd-cache.json
 @@ -0,0 +1,19 @@
@@ -104,7 +140,7 @@ index 000000000..ddd948470
 +				[ "no-cache" ],
 +				[ "add-header", "Cache-Control", "no-store" ]
 +			],
-+			[ "if", [ "regex", "REQUEST_URI", "^/a/.*\\.(js|css)" ],
++			[ "if", [ "regex", "REQUEST_URI", "^/a/[^?]*\\.(js|css)\\?ts=" ],
 +				[ "add-header", "Cache-Control", "public, max-age=31536000, immutable" ],
 +				[ "if", [ "regex", "REQUEST_URI", "^/x/" ],
 +					[ "add-header", "Cache-Control", "no-store" ],
@@ -117,7 +153,7 @@ index 000000000..ddd948470
 +	]
 +}
 diff --git a/package/thingino-uhttpd/thingino-uhttpd.mk b/package/thingino-uhttpd/thingino-uhttpd.mk
-index 6faf10809..8f1460168 100644
+index 1c9c611ed..acfeee726 100644
 --- a/package/thingino-uhttpd/thingino-uhttpd.mk
 +++ b/package/thingino-uhttpd/thingino-uhttpd.mk
 @@ -77,6 +77,9 @@ define THINGINO_UHTTPD_INSTALL_CONFIG
@@ -130,6 +166,43 @@ index 6faf10809..8f1460168 100644
  endef
  
  THINGINO_UHTTPD_POST_INSTALL_TARGET_HOOKS += THINGINO_UHTTPD_INSTALL_CONFIG
+diff --git a/package/thingino-webui/thingino-webui.mk b/package/thingino-webui/thingino-webui.mk
+index 959d05299..9661e1373 100644
+--- a/package/thingino-webui/thingino-webui.mk
++++ b/package/thingino-webui/thingino-webui.mk
+@@ -386,8 +386,8 @@ ROOTFS_PRE_CMD_HOOKS += THINGINO_WEBUI_FINAL_ASSET_TAG
+ endif
+ 
+ # Plugin assembly finalize hook — runs after every package is installed,
+-# discovers *.webui.json manifests, merges nav/scripts/styles, and re-applies
+-# asset tags and CDN fallbacks.
++# discovers *.webui.json manifests, merges nav/scripts/styles and injects them
++# into the pages (THINGINO_WEBUI_STAMP_PAGES below stamps their asset tags).
+ #
+ # Failures are fatal on purpose: every error assemble_plugins.py raises is a
+ # manifest conflict (duplicate plugin name, two plugins claiming the same page,
+@@ -398,4 +398,21 @@ define THINGINO_WEBUI_ASSEMBLE_PLUGINS
+ endef
+ THINGINO_WEBUI_TARGET_FINALIZE_HOOKS += THINGINO_WEBUI_ASSEMBLE_PLUGINS
+ 
++# Stamp every page again now that all of them are in place. The install step's
++# stamp misses the pages other packages install (raptor's, its preview.html
++# from a finalize hook, the plugin pages) and the tags the plugin assembly
++# injects, and its tag follows only this package's files. This tag is a hash of
++# every /a/ script and stylesheet in the image, so the asset URLs change
++# exactly when an asset does.
++define THINGINO_WEBUI_STAMP_PAGES
++	@root="$(TARGET_DIR)/var/www"; \
++	if [ -d "$$root/a" ]; then \
++		tag=$$(cd "$$root" && find a -type f \( -name '*.js' -o -name '*.css' \) \
++			! -name runtime-config.js -print0 | LC_ALL=C sort -z | \
++			xargs -0 -r sha256sum | sha256sum | cut -c1-12); \
++		python3 "$(THINGINO_WEBUI_PKGDIR)/scripts/apply_asset_tag.py" "$$tag" "$$root"; \
++	fi
++endef
++THINGINO_WEBUI_TARGET_FINALIZE_HOOKS += THINGINO_WEBUI_STAMP_PAGES
++
+ $(eval $(generic-package))
 -- 
 2.43.0
 

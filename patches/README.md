@@ -15,7 +15,7 @@ paths below are the development repo's, which is not published.
 
 | Directory | Patches | Applies onto | Made from |
 |---|---|---|---|
-| [`thingino-sigmastar/`](thingino-sigmastar/) | 22 | `themactep/thingino-firmware` at `b9b040f33` | branch `sigmastar-clean2`: the tree of the publish branch `sigmastar-publish`, cut by path into one commit per group |
+| [`thingino-sigmastar/`](thingino-sigmastar/) | 22 | `themactep/thingino-firmware` at `0f9de1434` | branch `sigmastar-clean2`: the tree of the publish branch `sigmastar-publish`, cut by path into one commit per group |
 | [`raptor-hal/`](raptor-hal/) | 13 | bare `gtxaspec/raptor-hal` at `9f09664` | the fork's branch `sigmastar-publish`: the tree of its `sigmastar` tip, with the commits that touch only `FORK.md` folded into one |
 
 - `sigmastar-publish` is its own merge of the upstream base plus the SigmaStar
@@ -26,7 +26,7 @@ paths below are the development repo's, which is not published.
   Thingino packages to one patch per camera profile.
 - The raptor-hal series carries the two commits that vendor John Chia's MI
   headers and Infinity6C backend, so it applies to the bare upstream and gives
-  the fork tree the firmware series pins (`6f00723`, read 2026-11-11).
+  the fork tree the firmware series pins (`6f00723`, read 2026-11-17).
 
 ## Base and drift
 
@@ -36,12 +36,15 @@ rewrites this section by hand (the bases and the dated drift note) before the
 series is published, in the refresh step of "Regenerate the export" in the
 development repo's publishing guide.
 
-- **Bases of this export** (cut 2026-11-11, last after that day's landing of
-  ipud's outputs and lensd's absolute zoom): `thingino-sigmastar/` on upstream
-  master `b9b040f33` (2026-11-11; `sigmastar-clean2~22`), `raptor-hal/` on
-  gtxaspec `main` `9f09664` (2026-10-31). The HAL series is 13 patches. The
-  export before it was cut on 2026-11-06, on `13ad43c31`, with 21 patches; the
-  22nd is new, `thingino-ipud`.
+- **Bases of this export** (cut 2026-11-17): `thingino-sigmastar/` on upstream
+  master `0f9de1434` (2026-11-17; `sigmastar-clean2~22`), `raptor-hal/` on
+  gtxaspec `main` `9f09664` (2026-10-31), unchanged. Both series keep their
+  counts, 22 and 13. The export before it was cut on 2026-11-11, on
+  `b9b040f33`. Since then upstream merged three of the series' vendor guards
+  (the ISP choice, the JZ MAC select, the Ingenic `lib-serial-mac`), so they
+  left patches 0005 and 0009; patch 0007 gained the page stamp, 0012 two
+  raptor patches (0112, 0113), and 0013 the watchdog's and the agent's part
+  of running on a 64 MB board.
 - **Drift.** The development branch keeps moving; the export moves only when
   it is regenerated, and the automatic upstream sync does not advance the
   publish branch. `thingino/scripts/check-bundle-drift.sh` (WSL; its header
@@ -51,14 +54,18 @@ development repo's publishing guide.
   to its base and gives the tree of the fork commit the publish branch pins
   in `thingino-raptor-hal.mk` (and of the fork's `sigmastar` tip); every
   development commit is on the publish branch and listed `include` in
-  `commits.txt`, or listed `exclude`, and every publish-only commit is listed
-  `publish`; every fork commit is a patch of the HAL series or touches only
+  `commits.txt`, or listed `exclude`, or `recut` (on the publish branch as the
+  same change in other surrounding lines), and every other publish-only commit
+  is listed `publish`; every fork commit is a patch of the HAL series or touches only
   `FORK.md`. It commits, moves and pushes nothing.
-- **On 2026-11-11** the drift check passes every test: both series apply
+- **On 2026-11-17** the drift check passes every test: both series apply
   cleanly to their bases and give the trees named above, and every
-  development commit is classified. `2b353000b`, four schema-order fixes to
-  thingino-onvif's answers, is in neither series: it goes to thingino-onvif
-  upstream on its own.
+  development commit is classified (68 in the bundle, one more re-cut there,
+  72 left out). Left out as generic work for upstream pull requests of their
+  own: the web UI and agent speed-ups, the state daemon `thingino-camd`, the
+  detection settings page, and `2b353000b`, four schema-order fixes to
+  thingino-onvif's answers. One camera profile, the TP-Link Tapo C120, is
+  not in this export yet.
 - **The current bases** are on the development repo's generated state page,
   in its Publishing section, read from the `BASE` and `HAL_BASE` defaults of
   `bundle-regen.sh`. The drift result is not there: only a run of the drift
@@ -75,9 +82,9 @@ SHAs. It replaces every `*.patch` here (this file stays), runs
 
 Every new development commit is classified first in
 `thingino/scripts/bundle/commits.txt`: SigmaStar work is cherry-picked onto
-`sigmastar-publish` and listed `include`, generic work `exclude`, and a commit
-made on the publish branch first `publish` until it lands on the development
-branch. The drift check fails until each one is classified.
+`sigmastar-publish` and listed `include` (`recut` when the pick's surrounding
+lines differ), generic work `exclude`, and a commit made on the publish branch
+first `publish` until it lands on the development branch. The drift check fails until each one is classified.
 
 The full procedure (tagging the replaced refs `bundle/pre-*`, merging a new
 base, fixing a scrub hit at its source, assembling and checking the public

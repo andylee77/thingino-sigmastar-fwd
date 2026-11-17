@@ -1,6 +1,6 @@
-From e0db43a08ca3472b10b57167b45f0b0fdfad3f30 Mon Sep 17 00:00:00 2001
+From 33024797a0dd509b8e9821e1a44598f3731796b0 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 11 Nov 2026 17:09:54 -0500
+Date: Tue, 17 Nov 2026 17:54:40 -0500
 Subject: [PATCH 12/22] thingino-raptor: streaming and encoder rate-control,
  Image Quality, motion gating
 
@@ -15,10 +15,16 @@ no on-camera motion controls where the HAL has no IVS
 (raptor-sigmastar.webui.json, S32raptor-motion, raptor-motion-watch). The
 agent adapter carries the server side of these and of the Ch1 preview
 fallback: the stream state with its video-memory cost, the ISP caps, motion.
+
+raptor patches 0112-0113, two rvd fixes for the full-frame overlay rod adds
+for detections: the OSD pool is sized for it, and a region as large as the
+frame is placed at the frame's corner in place of 10 pixels in.
 ---
  ...ngs-for-the-largest-JPEG-not-the-ave.patch |  42 +
  ...rt-etc-default-raptor-to-the-daemons.patch |  33 +
  ...-reports-which-ISP-controls-the-HAL-.patch |  91 ++
+ ...region-that-fills-the-frame-inside-i.patch |  69 ++
+ ...-pool-for-the-detection-overlay-ROD-.patch |  39 +
  .../thingino-raptor/files/S32raptor-motion    |   4 +-
  package/thingino-raptor/files/agent-adapter   | 818 +++++++++++++++---
  .../thingino-raptor/files/raptor-motion-watch |  22 +
@@ -26,12 +32,14 @@ fallback: the stream state with its video-memory cost, the ISP caps, motion.
  .../files/www/a/streamer-image.js             | 387 +++++++--
  .../files/www/a/streamer-stream.js            | 488 +++++++++++
  .../files/www/streamer-image.html             | 236 +++--
- .../files/www/streamer-main.html              | 157 ++--
- .../files/www/streamer-substream.html         | 157 ++--
- 12 files changed, 2022 insertions(+), 422 deletions(-)
+ .../files/www/streamer-main.html              | 165 ++--
+ .../files/www/streamer-substream.html         | 165 ++--
+ 14 files changed, 2130 insertions(+), 438 deletions(-)
  create mode 100755 package/thingino-raptor/0109-rvd-size-JPEG-rings-for-the-largest-JPEG-not-the-ave.patch
  create mode 100755 package/thingino-raptor/0110-S31raptor-export-etc-default-raptor-to-the-daemons.patch
  create mode 100644 package/thingino-raptor/0111-rvd-get-isp-caps-reports-which-ISP-controls-the-HAL-.patch
+ create mode 100644 package/thingino-raptor/0112-rvd-keep-an-OSD-region-that-fills-the-frame-inside-i.patch
+ create mode 100644 package/thingino-raptor/0113-rvd-size-the-OSD-pool-for-the-detection-overlay-ROD-.patch
  create mode 100644 package/thingino-raptor/files/raptor-sigmastar.webui.json
  create mode 100755 package/thingino-raptor/files/www/a/streamer-stream.js
 
@@ -219,6 +227,126 @@ index 000000000..c9825dd70
 +-- 
 +2.43.0
 +
+diff --git a/package/thingino-raptor/0112-rvd-keep-an-OSD-region-that-fills-the-frame-inside-i.patch b/package/thingino-raptor/0112-rvd-keep-an-OSD-region-that-fills-the-frame-inside-i.patch
+new file mode 100644
+index 000000000..d1555cc6e
+--- /dev/null
++++ b/package/thingino-raptor/0112-rvd-keep-an-OSD-region-that-fills-the-frame-inside-i.patch
+@@ -0,0 +1,69 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: Andy <andylee77@users.noreply.github.com>
++Date: Tue, 17 Nov 2026 01:18:06 -0500
++Subject: [PATCH 1/2] rvd: keep an OSD region that fills the frame inside it
++
++rvd_osd_calc_position holds every region OSD_MARGIN pixels off the
++frame's edges. A region that cannot fit inside that margin was still
++pushed to it: the detection overlay, 640x360 on a 640x360 stream, was
++created at (10,10) and so reached 10 pixels past the right and bottom
++edges. On a T31 it is then drawn sheared: in place of the boxes, green
++dashes run across the whole picture.
++
++A region too large for the margin on an axis now gets no margin on that
++axis and is kept inside the frame. Regions that fit are placed as
++before.
++---
++ rvd/rvd_osd.c | 32 ++++++++++++++++++++------------
++ 1 file changed, 20 insertions(+), 12 deletions(-)
++
++diff --git a/rvd/rvd_osd.c b/rvd/rvd_osd.c
++index 218fe7a..c966783 100644
++--- a/rvd/rvd_osd.c
+++++ b/rvd/rvd_osd.c
++@@ -64,6 +64,8 @@ static const char *resolve_position(rss_config_t *cfg, int s, const char *name)
++ void rvd_osd_calc_position(int stream_w, int stream_h, int region_w, int region_h,
++ 			   const char *pos_str, int *out_x, int *out_y)
++ {
+++	int margin_x, margin_y;
+++
++ 	if (pos_str) {
++ 		int x, y;
++ 		if (sscanf(pos_str, "%d,%d", &x, &y) == 2) {
++@@ -108,18 +110,24 @@ void rvd_osd_calc_position(int stream_w, int stream_h, int region_w, int region_
++ 	}
++ 
++ clamp:
++-	if (*out_x < OSD_MARGIN)
++-		*out_x = OSD_MARGIN;
++-	if (*out_y < OSD_MARGIN)
++-		*out_y = OSD_MARGIN;
++-	if (*out_x + region_w > stream_w - OSD_MARGIN)
++-		*out_x = stream_w - region_w - OSD_MARGIN;
++-	if (*out_y + region_h > stream_h - OSD_MARGIN)
++-		*out_y = stream_h - region_h - OSD_MARGIN;
++-	if (*out_x < OSD_MARGIN)
++-		*out_x = OSD_MARGIN;
++-	if (*out_y < OSD_MARGIN)
++-		*out_y = OSD_MARGIN;
+++	/*
+++	 * The margin keeps a label off the frame's edge, but a region that
+++	 * cannot fit inside it (a full-frame overlay such as the detection
+++	 * boxes) must still lie inside the frame: pushed to the margin it
+++	 * ends past the right and bottom edges and is drawn sheared (T31).
+++	 * Such a region gets no margin on that axis.
+++	 */
+++	margin_x = region_w + 2 * OSD_MARGIN <= stream_w ? OSD_MARGIN : 0;
+++	margin_y = region_h + 2 * OSD_MARGIN <= stream_h ? OSD_MARGIN : 0;
+++
+++	if (*out_x + region_w > stream_w - margin_x)
+++		*out_x = stream_w - region_w - margin_x;
+++	if (*out_y + region_h > stream_h - margin_y)
+++		*out_y = stream_h - region_h - margin_y;
+++	if (*out_x < margin_x)
+++		*out_x = margin_x;
+++	if (*out_y < margin_y)
+++		*out_y = margin_y;
++ 	*out_x &= ~1;
++ 	*out_y &= ~1;
++ }
+diff --git a/package/thingino-raptor/0113-rvd-size-the-OSD-pool-for-the-detection-overlay-ROD-.patch b/package/thingino-raptor/0113-rvd-size-the-OSD-pool-for-the-detection-overlay-ROD-.patch
+new file mode 100644
+index 000000000..69beb995d
+--- /dev/null
++++ b/package/thingino-raptor/0113-rvd-size-the-OSD-pool-for-the-detection-overlay-ROD-.patch
+@@ -0,0 +1,39 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: Andy <andylee77@users.noreply.github.com>
++Date: Tue, 17 Nov 2026 01:34:16 -0500
++Subject: [PATCH 2/2] rvd: size the OSD pool for the detection overlay ROD adds
++ by itself
++
++The OSD pool is sized from the [osd.*] sections of raptor.conf. With
++[motion] enabled ROD adds a full-frame "detect" overlay over each sub
++stream when no section declares one, and nothing counted it: the pool
++stayed at its 448 KB floor while a 640x360 overlay needs 900 KB, the
++region got no memory, and no detection box was ever drawn into the
++stream. Declaring [osd.detect] with type = overlay made them appear,
++which is how the miss shows.
++
++The pool now counts that overlay when [motion] is enabled and
++raptor.conf has no [osd.detect] of its own.
++---
++ rvd/rvd_pipeline.c | 8 ++++++++
++ 1 file changed, 8 insertions(+)
++
++diff --git a/rvd/rvd_pipeline.c b/rvd/rvd_pipeline.c
++index e15ce76..cc89a6c 100644
++--- a/rvd/rvd_pipeline.c
+++++ b/rvd/rvd_pipeline.c
++@@ -1022,6 +1022,14 @@ int rvd_pipeline_init(rvd_state_t *st)
++ 		rss_config_foreach_section(cfg, "osd.", osd_pool_cb, &pctx);
++ 		osd_pool = pctx.total;
++ 
+++		/* With [motion] enabled ROD adds a "detect" overlay over each
+++		 * sub stream by itself when raptor.conf declares none; the
+++		 * sections above do not have it, and its buffer comes from
+++		 * this pool like any other region's. */
+++		if (has_sub && rss_config_get_bool(cfg, "motion", "enabled", false) &&
+++		    !rss_config_get_str(cfg, "osd.detect", "type", NULL))
+++			osd_pool += (uint32_t)(sub_w * sub_h * 4);
+++
++ 		/* Privacy cover regions (no bitmap, just color — negligible) */
++ 		/* 25% headroom for SDK alignment + metadata */
++ 		osd_pool = osd_pool * 5 / 4;
 diff --git a/package/thingino-raptor/files/S32raptor-motion b/package/thingino-raptor/files/S32raptor-motion
 index 60075b5d7..0830304fb 100644
 --- a/package/thingino-raptor/files/S32raptor-motion
@@ -235,7 +363,7 @@ index 60075b5d7..0830304fb 100644
  	else
  		killall raptor-motion-watch 2>/dev/null || true
 diff --git a/package/thingino-raptor/files/agent-adapter b/package/thingino-raptor/files/agent-adapter
-index 243df735f..5012652e3 100644
+index 475f6bb76..b1f02833e 100644
 --- a/package/thingino-raptor/files/agent-adapter
 +++ b/package/thingino-raptor/files/agent-adapter
 @@ -4,6 +4,12 @@
@@ -250,7 +378,7 @@ index 243df735f..5012652e3 100644
 +AGENT_STREAM_BACKUP="${AGENT_STREAM_BACKUP:-/run/agent/raptor.conf.before-apply}"
  
  # The adapter owns the EXIT trap of the agentctl shell that sources it.
- trap 'rm -f /tmp/agent-raptor-isp.$$ /tmp/agent-raptor-wb.$$' EXIT
+ trap 'rm -f /tmp/agent-raptor-isp.$$ /tmp/agent-raptor-wb.$$ /tmp/agent-raptor-rvdconfig.$$' EXIT
 @@ -143,7 +149,19 @@ agent_ctl() {
  		echo "raptorctl is not available" >&2
  		return 1
@@ -330,7 +458,7 @@ index 243df735f..5012652e3 100644
  # Map UI / prudynt-style WB mode integers onto raptor set-wb names (and back).
  agent_wb_mode_to_int() {
  	mode=$(printf '%s' "$1" | tr 'A-Z' 'a-z' | tr '-' '_')
-@@ -775,6 +844,521 @@ agent_stream_mode() {
+@@ -911,6 +980,521 @@ agent_stream_mode() {
  	esac
  }
  
@@ -852,7 +980,7 @@ index 243df735f..5012652e3 100644
  agent_rtsp_port() {
  	port=$(agent_config_get rtsp port)
  	if [ -n "$port" ]; then
-@@ -1282,14 +1866,21 @@ agent_get_events() {
+@@ -1440,14 +2024,21 @@ agent_get_events() {
  	done
  }
  
@@ -876,7 +1004,7 @@ index 243df735f..5012652e3 100644
  			printf '"daynight":{"enabled":%s,"force_mode":%s,"modes":["auto","day","night"]},' \
  				"$(agent_json_bool "$(agent_has_daynight)")" \
  				"$(agent_json_bool "$(agent_has_daynight)")"
-@@ -1307,10 +1898,12 @@ agent_get_capabilities() {
+@@ -1465,10 +2056,12 @@ agent_get_capabilities() {
  			printf '}\n'
  			;;
  		image)
@@ -891,7 +1019,7 @@ index 243df735f..5012652e3 100644
  			;;
  		daynight)
  			printf '{"enabled":%s,"force_mode":%s,"modes":["auto","day","night"]}\n' \
-@@ -1351,6 +1944,23 @@ agent_get_capabilities() {
+@@ -1509,6 +2102,23 @@ agent_get_capabilities() {
  	esac
  }
  
@@ -915,7 +1043,7 @@ index 243df735f..5012652e3 100644
  agent_get_runtime() {
  	resource=${1:-all}
  	case "$resource" in
-@@ -1412,6 +2022,10 @@ agent_get_runtime() {
+@@ -1570,6 +2180,10 @@ agent_get_runtime() {
  			agent_print_runtime_streaming_service
  			printf '\n'
  			;;
@@ -926,7 +1054,7 @@ index 243df735f..5012652e3 100644
  		streams/0)
  			agent_print_stream_runtime 0
  			printf '\n'
-@@ -1493,16 +2107,26 @@ agent_print_config() {
+@@ -1651,16 +2265,26 @@ agent_print_config() {
  	printf '"brightness":%s,' "$(agent_json_value_or "$(agent_image_raw brightness)" null)"
  	printf '"contrast":%s,' "$(agent_json_value_or "$(agent_image_raw contrast)" null)"
  	printf '"saturation":%s,' "$(agent_json_value_or "$(agent_image_raw saturation)" null)"
@@ -961,7 +1089,7 @@ index 243df735f..5012652e3 100644
  	printf '},'
  	printf '"motion":{"enabled":%s},' "$(agent_motion_enabled)"
  	printf '"daynight":{"enabled":%s,"force_mode":%s},' \
-@@ -2132,7 +2756,13 @@ agent_get_setting() {
+@@ -2290,7 +2914,13 @@ agent_get_setting() {
  			agent_print_setting_leaf saturation "$(agent_json_value_or "$(agent_image_raw saturation)" null)"
  			;;
  		image/sharpness)
@@ -976,7 +1104,7 @@ index 243df735f..5012652e3 100644
  			;;
  		image/noise-reduction)
  			agent_print_setting_leaf noise_reduction "$(agent_json_value_or "$(agent_config_get image sinter)" null)"
-@@ -2235,6 +2865,13 @@ agent_get_setting() {
+@@ -2393,6 +3023,13 @@ agent_get_setting() {
  		storage/*)
  			agent_print_storage_setting "$path"
  			;;
@@ -990,7 +1118,7 @@ index 243df735f..5012652e3 100644
  		streams/[01]/enabled)
  			stream_id=${path#streams/}
  			stream_id=${stream_id%/enabled}
-@@ -2328,6 +2965,25 @@ agent_get_setting() {
+@@ -2486,6 +3123,25 @@ agent_get_setting() {
  	esac
  }
  
@@ -1016,7 +1144,7 @@ index 243df735f..5012652e3 100644
  agent_set_setting() {
  	path=$1
  	body_file=$2
-@@ -2380,6 +3036,12 @@ agent_set_setting() {
+@@ -2538,6 +3194,12 @@ agent_set_setting() {
  			agent_config_save
  			agent_print_setting_update "$path" sharpness "$value"
  			;;
@@ -1029,7 +1157,7 @@ index 243df735f..5012652e3 100644
  		image/anti-flicker)
  			value=$(agent_setting_value "$body_file" anti_flicker) || return 1
  			agent_validate_int "$value" || return 1
-@@ -2388,23 +3050,27 @@ agent_set_setting() {
+@@ -2546,23 +3208,27 @@ agent_set_setting() {
  			agent_config_save
  			agent_print_setting_update "$path" anti_flicker "$value"
  			;;
@@ -1071,7 +1199,7 @@ index 243df735f..5012652e3 100644
  			;;
  		image/ae-compensation)
  			value=$(agent_setting_value "$body_file" ae_compensation) || return 1
-@@ -2571,6 +3237,10 @@ agent_set_setting() {
+@@ -2729,6 +3395,10 @@ agent_set_setting() {
  			;;
  		motion/enabled)
  			value=$(agent_setting_value "$body_file" enabled) || return 1
@@ -1082,7 +1210,7 @@ index 243df735f..5012652e3 100644
  			agent_validate_bool "$value" || return 1
  			agent_motion_set_enabled "$value" || return 1
  			agent_print_setting_update "$path" enabled "$value"
-@@ -2685,6 +3355,11 @@ agent_set_setting() {
+@@ -2843,6 +3513,11 @@ agent_set_setting() {
  		storage/*)
  			agent_set_storage_setting "$path" "$body_file"
  			;;
@@ -1094,7 +1222,7 @@ index 243df735f..5012652e3 100644
  		streams/[01]/enabled)
  			stream_id=${path#streams/}
  			stream_id=${stream_id%/enabled}
-@@ -2697,13 +3372,7 @@ agent_set_setting() {
+@@ -2855,13 +3530,7 @@ agent_set_setting() {
  					agent_ctl rvd stream-stop 0 >/dev/null 2>&1 || true
  				fi
  			else
@@ -1109,7 +1237,7 @@ index 243df735f..5012652e3 100644
  			fi
  			agent_print_setting_update "$path" enabled "$value"
  			;;
-@@ -2714,59 +3383,16 @@ agent_set_setting() {
+@@ -2872,59 +3541,16 @@ agent_set_setting() {
  			agent_config_save
  			agent_print_setting_update "$path" audio_enabled "$value"
  			;;
@@ -1177,7 +1305,7 @@ index 243df735f..5012652e3 100644
  			;;
  		streams/[01]/buffers)
  			stream_id=${path#streams/}
-@@ -2784,9 +3410,7 @@ agent_set_setting() {
+@@ -2942,9 +3568,7 @@ agent_set_setting() {
  			value=$(agent_setting_value "$body_file" profile) || return 1
  			profile_int=$(agent_profile_to_int "$value") || return 1
  			profile_name=$(agent_profile_to_name "$profile_int")
@@ -1188,7 +1316,7 @@ index 243df735f..5012652e3 100644
  			agent_print_setting_update "$path" profile "$(agent_json_string "$profile_name")"
  			;;
  		streams/[01]/rtsp-endpoint)
-@@ -2816,10 +3440,7 @@ agent_set_setting() {
+@@ -2974,10 +3598,7 @@ agent_set_setting() {
  			stream_id=${stream_id%/format}
  			value=$(agent_setting_value "$body_file" format) || return 1
  			value=$(agent_validate_stream_format "$value") || return 1
@@ -1200,7 +1328,7 @@ index 243df735f..5012652e3 100644
  			agent_print_setting_update "$path" format "$(agent_json_string "$value")"
  			;;
  		streams/[01]/mode)
-@@ -2827,12 +3448,7 @@ agent_set_setting() {
+@@ -2985,12 +3606,7 @@ agent_set_setting() {
  			stream_id=${stream_id%/mode}
  			value=$(agent_setting_value "$body_file" mode) || return 1
  			value=$(agent_validate_stream_mode "$value") || return 1
@@ -1214,7 +1342,7 @@ index 243df735f..5012652e3 100644
  			agent_print_setting_update "$path" mode "$(agent_json_string "$value")"
  			;;
  		streams/[01]/osd/*)
-@@ -2939,6 +3555,10 @@ agent_apply_config() {
+@@ -3097,6 +3713,10 @@ agent_apply_config() {
  
  agent_snapshot() {
  	channel=${1:-0}
@@ -1274,7 +1402,7 @@ index 000000000..91cbd756f
 +  }
 +}
 diff --git a/package/thingino-raptor/files/www/a/streamer-image.js b/package/thingino-raptor/files/www/a/streamer-image.js
-index ce72e00bc..4d470d2ef 100644
+index 58c818012..4d470d2ef 100644
 --- a/package/thingino-raptor/files/www/a/streamer-image.js
 +++ b/package/thingino-raptor/files/www/a/streamer-image.js
 @@ -1,121 +1,336 @@
@@ -1312,8 +1440,8 @@ index ce72e00bc..4d470d2ef 100644
 -    image_ae_compensation: "ae_compensation",
 -    image_hflip: "hflip",
 -    image_vflip: "vflip",
--    noise_reduction: "sinter",
--    temporal_noise_reduction: "temper",
+-    noise_reduction: "noise_reduction",
+-    temporal_noise_reduction: "temporal_noise_reduction",
 -  };
 -
 -  // field id -> agent settings endpoint (own save path; preview.js does not
@@ -2466,10 +2594,10 @@ index 2744c463c..1e38c2705 100644
  <script src="/a/streamer-image.js"></script>
  </body>
 diff --git a/package/thingino-raptor/files/www/streamer-main.html b/package/thingino-raptor/files/www/streamer-main.html
-index bc268ba99..9ec97c361 100644
+index dd947ac39..9ec97c361 100644
 --- a/package/thingino-raptor/files/www/streamer-main.html
 +++ b/package/thingino-raptor/files/www/streamer-main.html
-@@ -22,89 +22,96 @@
+@@ -22,97 +22,96 @@
    <div class="container">
      <div data-app-controls></div>
  
@@ -2515,6 +2643,8 @@ index bc268ba99..9ec97c361 100644
 -                <label for="stream0_format">Format</label>
 -                <select class="form-select" id="stream0_format" name="stream0_format">
 -                  <option value="">- Select -</option>
+-                  <option value="H264">H264</option>
+-                  <option value="H265">H265</option>
 -                </select>
 -              </p>
 +
@@ -2555,6 +2685,12 @@ index bc268ba99..9ec97c361 100644
 -                <label for="stream0_mode">Mode</label>
 -                <select class="form-select" id="stream0_mode" name="stream0_mode">
 -                  <option value="">- Select -</option>
+-                  <option value="CBR">CBR</option>
+-                  <option value="VBR">VBR</option>
+-                  <option value="FIXQP">FIXQP</option>
+-                  <option value="SMART">SMART</option>
+-                  <option value="CAPPED_VBR">CAPPED_VBR</option>
+-                  <option value="CAPPED_QUALITY">CAPPED_QUALITY</option>
 -                </select>
 -              </p>
 -              <p>
@@ -2639,7 +2775,7 @@ index bc268ba99..9ec97c361 100644
      </section>
    </div>
  </main>
-@@ -118,8 +125,6 @@
+@@ -126,8 +125,6 @@
  <script src="/a/control-bar.js"></script>
  <script src="/a/navigation.js"></script>
  <script src="/a/footer.js"></script>
@@ -2650,10 +2786,10 @@ index bc268ba99..9ec97c361 100644
  </body>
  </html>
 diff --git a/package/thingino-raptor/files/www/streamer-substream.html b/package/thingino-raptor/files/www/streamer-substream.html
-index 56c62edda..bcafd185c 100644
+index aabacdd73..bcafd185c 100644
 --- a/package/thingino-raptor/files/www/streamer-substream.html
 +++ b/package/thingino-raptor/files/www/streamer-substream.html
-@@ -22,89 +22,96 @@
+@@ -22,97 +22,96 @@
    <div class="container">
      <div data-app-controls></div>
  
@@ -2699,6 +2835,8 @@ index 56c62edda..bcafd185c 100644
 -                <label for="stream1_format">Format</label>
 -                <select class="form-select" id="stream1_format" name="stream1_format">
 -                  <option value="">- Select -</option>
+-                  <option value="H264">H264</option>
+-                  <option value="H265">H265</option>
 -                </select>
 -              </p>
 +
@@ -2739,6 +2877,12 @@ index 56c62edda..bcafd185c 100644
 -                <label for="stream1_mode">Mode</label>
 -                <select class="form-select" id="stream1_mode" name="stream1_mode">
 -                  <option value="">- Select -</option>
+-                  <option value="CBR">CBR</option>
+-                  <option value="VBR">VBR</option>
+-                  <option value="FIXQP">FIXQP</option>
+-                  <option value="SMART">SMART</option>
+-                  <option value="CAPPED_VBR">CAPPED_VBR</option>
+-                  <option value="CAPPED_QUALITY">CAPPED_QUALITY</option>
 -                </select>
 -              </p>
 -              <p>
@@ -2823,7 +2967,7 @@ index 56c62edda..bcafd185c 100644
      </section>
    </div>
  </main>
-@@ -118,8 +125,6 @@
+@@ -126,8 +125,6 @@
  <script src="/a/control-bar.js"></script>
  <script src="/a/navigation.js"></script>
  <script src="/a/footer.js"></script>

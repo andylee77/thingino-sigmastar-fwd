@@ -1,6 +1,6 @@
-From 7737fdf321acaf7ebe1b8cbb40b9d133340b646e Mon Sep 17 00:00:00 2001
+From b7ace8fb83c25e33c9fe9a32d21990d79eae1c47 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Wed, 11 Nov 2026 17:09:54 -0500
+Date: Tue, 17 Nov 2026 17:54:40 -0500
 Subject: [PATCH 03/22] sigmastar: config fragments and Config/Makefile wiring
 
 The soc- and core-sigmastar fragments (re-synced with core.fragment); the
@@ -90,10 +90,10 @@ index 49105ddfc..b4e9b45a7 100644
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-uboot/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-ubus/Config.in"
 diff --git a/Config.soc.in b/Config.soc.in
-index ab5bcedb9..41b26b332 100644
+index ef768feab..fd03f537d 100644
 --- a/Config.soc.in
 +++ b/Config.soc.in
-@@ -44,10 +44,21 @@ config BR2_SIGMASTAR_SOC_MODEL
+@@ -38,10 +38,21 @@ config BR2_SIGMASTAR_SOC_MODEL
  	  Enter the SigmaStar SoC model name for your device (e.g., ssc30kq).
  	  This value is used to automatically derive the SoC family.
  
@@ -116,16 +116,16 @@ index ab5bcedb9..41b26b332 100644
  config BR2_SOC_FAMILY
  	string
  	default "t10" if BR2_INGENIC_SOC_MODEL = "t10l" || BR2_INGENIC_SOC_MODEL = "t10n" || BR2_INGENIC_SOC_MODEL = "t10a"
-@@ -64,6 +75,7 @@ config BR2_SOC_FAMILY
- 	# Only one vendor's model symbol is ever non-empty, so the two halves of
- 	# this chain cannot both match and their order does not matter.
+@@ -59,6 +70,7 @@ config BR2_SOC_FAMILY
+ 	# so the two halves of this chain cannot both match and their order does
+ 	# not matter.
  	default "infinity6e" if BR2_SIGMASTAR_SOC_MODEL = "ssc30kq"
 +	default "infinity6c" if BR2_SIGMASTAR_SOC_MODEL = "ssc377" || BR2_SIGMASTAR_SOC_MODEL = "ssc377d" || BR2_SIGMASTAR_SOC_MODEL = "ssc377de" || BR2_SIGMASTAR_SOC_MODEL = "ssc377qe" || BR2_SIGMASTAR_SOC_MODEL = "ssc378de" || BR2_SIGMASTAR_SOC_MODEL = "ssc378qe"
  
  config BR2_SOC_RAM_MB
  	int "RAM size in MB"
 diff --git a/Makefile b/Makefile
-index 86f21483d..d2c04e9f4 100644
+index 98a5e3208..061ebbbdc 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -300,6 +300,8 @@ NPROC := $(shell nproc)
@@ -138,7 +138,7 @@ index 86f21483d..d2c04e9f4 100644
  	 s/\$$[(]TOOLCHAIN_SOC_TAG[)]/$(TOOLCHAIN_SOC_TAG)/g; \
  	 s/\$$[(]SOC_MODEL[)]/$(SOC_MODEL)/g; \
 diff --git a/Makefile.ota b/Makefile.ota
-index 297eb63fc..59d5b2685 100644
+index afcb1e06a..3f1fab2a1 100644
 --- a/Makefile.ota
 +++ b/Makefile.ota
 @@ -84,6 +84,13 @@ else ifeq ($(BR2_THINGINO_FLASH_NAND),y)
@@ -156,7 +156,7 @@ index 297eb63fc..59d5b2685 100644
  	$(info Aligned at: $(ALIGN_BLOCK))
  	$(info U-Boot Env: $(shell strings $(UB_ENV_BIN) 2>/dev/null | grep "^mtdparts" || echo "mtdparts not found"))
 diff --git a/Makefile.utils b/Makefile.utils
-index 3acc8ca2e..eb987da76 100644
+index 798225ced..b99fb214b 100644
 --- a/Makefile.utils
 +++ b/Makefile.utils
 @@ -45,7 +45,26 @@ $(OUTPUT_DIR)/.config:
@@ -187,7 +187,7 @@ index 3acc8ca2e..eb987da76 100644
  # MMC SD card image layout:
  #   Block 0:      INGE header (total size + descriptor terminator)
  #   Block 1-33:   Reserved
-@@ -272,10 +291,21 @@ endif
+@@ -285,10 +304,21 @@ endif
  	fi
  	exit
  
