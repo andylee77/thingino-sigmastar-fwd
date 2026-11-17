@@ -19,8 +19,8 @@ Last updated 2026-11-17.
 | The vendor follows from the SoC model | [#2068](https://github.com/themactep/thingino-firmware/pull/2068) | merged |
 | `lib-serial-mac` goes with the Ingenic files | [#2069](https://github.com/themactep/thingino-firmware/pull/2069) | merged |
 | The JZ MAC select moves to the Ingenic block | [#2070](https://github.com/themactep/thingino-firmware/pull/2070) | merged |
-| The JZ options are Ingenic's (follow-ups to #2070) | [#2082](https://github.com/themactep/thingino-firmware/pull/2082) | open |
-| The Infinity6C family (FW-1 below) | [#2083](https://github.com/themactep/thingino-firmware/pull/2083) | open |
+| The JZ options are Ingenic's (follow-ups to #2070) | [#2082](https://github.com/themactep/thingino-firmware/pull/2082) | merged |
+| The Infinity6C family (FW-1 below) | [#2083](https://github.com/themactep/thingino-firmware/pull/2083) | merged |
 
 ## What upstream already has
 
@@ -69,7 +69,7 @@ against, and leaves every existing board unchanged.
 ### Stage 0: vendor guards (done)
 
 Places in shared files that assumed Ingenic silicon whatever the vendor.
-PRs #2063, #2068, #2069 and #2070 are merged; #2082 is open.
+PRs #2063, #2068, #2069, #2070 and #2082 are merged.
 
 ### Stage 1: the HAL backend, in gtxaspec/raptor-hal
 
@@ -92,7 +92,7 @@ a SigmaStar image, and none changes an Ingenic configuration.
 
 | PR | Contents | Depends on |
 |---|---|---|
-| FW-1 | the family's facts: `soc/sigmastar/infinity6c.mk`, the six models, the SoC fragment ([#2083](https://github.com/themactep/thingino-firmware/pull/2083)) | |
+| FW-1 | the family's facts: `soc/sigmastar/infinity6c.mk`, the six models, the SoC fragment ([#2083](https://github.com/themactep/thingino-firmware/pull/2083), merged) | |
 | FW-2 | the ARM toolchain: a CI defconfig, the asset name in the toolchain workflows | |
 | FW-3 | the vendor packages | FW-1 |
 | FW-4 | `thingino-system`'s SigmaStar half | FW-3 |
@@ -118,9 +118,9 @@ a SigmaStar image, and none changes an Ingenic configuration.
   byte for byte. A PR that has to change a line says which, in every
   configuration.
 - **The other vendor.** A SigmaStar configuration resolved on master and with
-  the branch, to show the fault and its absence. Until FW-1 merges that
-  configuration is a scratch one; after it, a three-line profile resolves for
-  real.
+  the branch, to show the fault and its absence. Before FW-1 merged that
+  configuration was a scratch one; since it, a three-line profile resolves
+  for real.
 - **Alternatives.** The other ways to write the change are tried, and the PR
   text says which were and why one was kept.
 - Each PR text says what was not tested. Nothing is called built or run on a

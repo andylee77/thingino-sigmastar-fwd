@@ -11,10 +11,18 @@ stay upstream's, at Thingino's own pins; what this port changes in them is a set
 of small patches, listed below.
 
 **Status.** Each of the four camera profiles below has run on its hardware.
-Nothing from these two patch series has been submitted upstream yet; this
-repository is the starting point for that. Generic fixes found along the way
-went to the upstream projects separately, as pull requests opened on
-2026-11-11: themactep/thingino-firmware
+The platform has started going upstream as a series of small pull requests:
+the vendor guards are merged
+([#2063](https://github.com/themactep/thingino-firmware/pull/2063),
+[#2068](https://github.com/themactep/thingino-firmware/pull/2068) to
+[#2070](https://github.com/themactep/thingino-firmware/pull/2070),
+[#2082](https://github.com/themactep/thingino-firmware/pull/2082)), and so
+is the first piece of the platform itself, the Infinity6C family file
+([#2083](https://github.com/themactep/thingino-firmware/pull/2083)), which
+landed after the commit this series is cut on.
+[docs/UPSTREAM-PLAN.md](docs/UPSTREAM-PLAN.md) has the series and where each
+piece stands. Generic fixes found along the way go to the upstream projects
+separately: themactep/thingino-firmware
 [#1990](https://github.com/themactep/thingino-firmware/pull/1990) to
 [#1997](https://github.com/themactep/thingino-firmware/pull/1997),
 themactep/thingino-onvif
@@ -33,7 +41,7 @@ thingino/ingenic-sdk [#13](https://github.com/thingino/ingenic-sdk/pull/13).
 ## The shape of it
 
 ```text
-[UPSTREAM]   themactep/thingino-firmware  master  (b9b040f33, 2026-11-11)
+[UPSTREAM]   themactep/thingino-firmware  master  (0f9de1434, 2026-11-17)
    │           + raptor / raptor-ipc / raptor-common / compy  — at upstream pins
    │             (raptor with the package patches listed below)
    │           + thingino web UI + its Raptor plugin           — upstream's
@@ -134,13 +142,18 @@ PR. Full list with rationale in [docs/WHAT-THIS-PORT-ADDS.md](docs/WHAT-THIS-POR
   reply in one piece (Happytime/NVR clients stalled); rsd answers DESCRIBE *with*
   SPS/PPS (no 4:3 squish in go2rtc/Frigate); JPEG rings sized for the largest
   JPEG, not the average; `/etc/default/raptor` exported to the daemons;
-  `get-isp-caps` reports which ISP controls the HAL has.
+  `get-isp-caps` reports which ISP controls the HAL has; the OSD pool and
+  placement fit the full-frame overlay rod adds for detections.
 - **themactep/thingino-onvif** — emit each zoom default space in schema order, or
   zeep (Frigate's parser) drops the pan/tilt spaces.
-- **themactep/thingino-firmware** — don't default the ISP to Ingenic's stack on
-  other vendors; really disable submodules when `_GIT_SUBMODULES = NO`; per-vendor
-  `lib-serial-mac`; hide the day/night web link without `thingino-daynightd`;
-  keep the digital zoom bar off where the streamer cannot zoom.
+- **themactep/thingino-firmware** — really disable submodules when
+  `_GIT_SUBMODULES = NO`; hide the day/night web link without
+  `thingino-daynightd`; keep the digital zoom bar off where the streamer cannot
+  zoom; stamp every page's `/a/` addresses once all packages have installed
+  theirs; on boards with little memory, fewer CGI scripts and agent requests at
+  once. Three earlier entries of this list are upstream now and left the
+  series: the ISP choice no longer pulls Ingenic's stack on other vendors, the
+  JZ MAC select and `lib-serial-mac` are installed per vendor.
 
 ## New package: thingino-lensd `[THIS PORT]`
 
@@ -212,7 +225,7 @@ checkouts of the two upstream trees at the commits the series were cut on:
 ```sh
 # SigmaStar platform + camera profiles, onto thingino-firmware master
 cd thingino-firmware
-git checkout b9b040f33
+git checkout 0f9de1434
 git am /path/to/patches/thingino-sigmastar/*.patch
 
 # the HAL fork, onto gtxaspec/raptor-hal
@@ -244,13 +257,14 @@ concrete commitments behind it:
   one-off that rots.
 - **Scripted checks over manual passes.** Every camera image is checked by
   script before it is staged for a unit (partition fit, rootfs contents,
-  `raptor.conf` against the profile's settings, the compiled device tree), and an
-  upstream merge lands only after each of the four camera profiles builds and
-  passes them.
+  `raptor.conf` against the profile's settings, the compiled device tree). An
+  upstream merge is checked on the host before it lands (each profile against
+  the settings every camera must state, the agent's answers against ones saved
+  from cameras); an image is built and checked when a camera is to be flashed.
   The series also carries a SigmaStar build workflow for CI. Per-unit bench work
   stays limited to the irreducible sensor and optics bring-up.
 - **Align with official SigmaStar support.** Thingino's tree already carries the
-  vendor seams a SigmaStar port builds on (`BR2_SOC_VENDOR_SIGMASTAR`,
+  vendor seams a SigmaStar port builds on (`BR2_SIGMASTAR_SOC_MODEL`,
   `soc/<vendor>/`, the per-vendor raptor-hal symbol). If and as the project takes
   up first-class SigmaStar support, the aim is to contribute to it — patches, the
   reverse-engineering notes under `docs/`, and test hardware for each of the four
