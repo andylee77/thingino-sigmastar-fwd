@@ -2,7 +2,7 @@
 
 This firmware is upstream Thingino plus a SigmaStar Infinity6C layer. It ships
 as two patch series: 22 patches onto `themactep/thingino-firmware` master
-(`0f9de1434`, 2026-11-17) and 13 onto `gtxaspec/raptor-hal` main (`9f09664`,
+(`b8bcd6740`, 2026-11-17) and 13 onto `gtxaspec/raptor-hal` main (`9f09664`,
 2026-10-31). Together they bring up four camera models and a board-less
 reference target, add three feature packages (`thingino-lensd`,
 `thingino-nettest`, `thingino-ipud`), and carry a set of general fixes meant to
@@ -33,16 +33,17 @@ three of this port's vendor guards
 the vendor choice by symbols derived from the SoC model
 ([#2068](https://github.com/themactep/thingino-firmware/pull/2068)), and
 merged the first piece of the platform itself, the Infinity6C family file
-([#2083](https://github.com/themactep/thingino-firmware/pull/2083)). That
-merge came after the commit this series is cut on, so patches 0002 and 0003
-still carry the family file and its lines in `Config.soc.in`.
+([#2083](https://github.com/themactep/thingino-firmware/pull/2083)). The
+series is cut on a master that has all of these, so it carries none of them:
+the profiles name upstream's `soc-infinity6c` fragment, and patch 0002 adds to
+upstream's family file only what it does not hold yet.
 [UPSTREAM-PLAN.md](UPSTREAM-PLAN.md) has the planned series and where each piece
 stands. Generic fixes found along the way go upstream separately, as the pull
 requests the [README](../README.md) lists. A *Verified* note names the camera
 model a change was checked on.
 
 **Since the cut of 2026-11-11** (on `b9b040f33`): the three merged guards left
-patches 0005 and 0009; patch 0007 gained the page stamp, the CGI cap for small
+patches 0005 and 0009, and the merged family file left 0002 and 0003; patch 0007 gained the page stamp, the CGI cap for small
 boards and a single `Cache-Control` header beside upstream's new cache
 switches; patch 0012 gained raptor patches 0112 and 0113; patch 0013 gained the
 watchdog's restart of a vanished `rvd`, a cheaper poll and the agent listener's
@@ -61,7 +62,7 @@ keep their counts.
 
 ## Patch map
 
-The 22 patches onto `themactep/thingino-firmware` master `0f9de1434`, in
+The 22 patches onto `themactep/thingino-firmware` master `b8bcd6740`, in
 [`patches/thingino-sigmastar/`](../patches/thingino-sigmastar/). The last
 column says whether a patch only matters to SigmaStar builds or is generic
 (useful on Ingenic too).
@@ -355,9 +356,15 @@ Merged upstream since the previous cut, and no longer in the series:
   hostname suffix came out empty. Merged as PR #2069; the move left patch
   0005, which keeps the SigmaStar copy (1.5.3).
 - The vendor choice the profiles answered is gone: upstream derives the
-  vendor from the SoC model (PR #2068). The profiles of this series still
-  carry their `BR2_SOC_VENDOR_SIGMASTAR=y` lines, which are dead and still
-  to be removed (part 3).
+  vendor from the SoC model (PR #2068), and the profiles of this series no
+  longer set it.
+- The Infinity6C family: `soc/sigmastar/infinity6c.mk` with the six models
+  and their RAM sizes, the models' `BR2_SOC_FAMILY` line in `Config.soc.in`,
+  and the SoC fragment `soc-infinity6c` (cortex-a7, neon-vfpv4, Thumb-2, to
+  match the vendor's ARMv7 modules and libraries). Merged as PR #2083; it
+  left patches 0002 and 0003, and the series' own SoC fragment, which took
+  the core and FPU from the family file through two substitutions in the
+  `Makefile`, is gone with it.
 
 #### 1.5.2 Web UI platform flags and the pages that follow the HAL
 
@@ -434,17 +441,17 @@ series of small pull requests, crediting his work;
   ([NOTICE.md](../NOTICE.md)). `[0001]`
 - **Board, SoC and kernel:** `board/sigmastar` (the Infinity6C kernel config,
   the board DTS patch directory, the post-image script, toolchain notes, a
-  vendor overlay), `soc/sigmastar/infinity6c.mk` with the vendor-drop
-  variables exported, and `kernels/sigmastar.mk`: one `johnchia/linux` branch
+  vendor overlay), what upstream's `soc/sigmastar/infinity6c.mk` does not
+  hold yet (the bootloader image name, the vendor-drop variables, exported,
+  and the sensor-source switch), and `kernels/sigmastar.mk`: one `johnchia/linux` branch
   per family, pinned by hash, since upstream moved kernel selection
   ([#1442](https://github.com/themactep/thingino-firmware/pull/1442)) and
   requires `KERNEL_BRANCH`. `[0002]`
-- **Config and wiring:** the `soc-` and `core-sigmastar` fragments, re-synced
-  with `core.fragment`; `Config.in` sources the SigmaStar packages and the
-  three new ones, with `BR2_TARGET_UBOOT` kept Ingenic-only; `Config.soc.in`
-  maps the six Infinity6C parts (SSC377, SSC377D, SSC377DE, SSC377QE,
-  SSC378DE, SSC378QE) to `BR2_SOC_FAMILY`; image assembly in the split
-  Makefiles. One package set on every SigmaStar board (the PWM light tool,
+- **Config and wiring:** the `core-sigmastar` fragment, re-synced with
+  `core.fragment` (the SoC fragment is upstream's `soc-infinity6c`);
+  `Config.in` sources the SigmaStar packages and the three new ones, with
+  `BR2_TARGET_UBOOT` kept Ingenic-only; `Config.soc.in` gains the
+  sensor-source option; image assembly in the split Makefiles. One package set on every SigmaStar board (the PWM light tool,
   `lensd`, the block-device automount, the sensor sources, and `ipud`, off
   until enabled); what a board has is config in its defconfig: the light
   channels, the lensd mode, the microSD modules. `[0003]`
@@ -752,9 +759,6 @@ The SoC, sensor and default streams of each are in the README's
   reading that disagrees is unresolved. `[0015]`
 - **The digital zoom probe** has a host test only; it has not run on a
   camera. `[0009]`
-- **Dead vendor lines.** Since upstream derives the vendor from the SoC model
-  (PR #2068), the `BR2_SOC_VENDOR_SIGMASTAR=y` line in each profile's
-  defconfig is dead and still to be removed. `[0006, 0018 to 0021]`
 - **CI.** The series adds a SigmaStar build workflow, but no run of it is on
   record. `[0004]`
 - **OEM-layout updates.** Whether upstream wants `thingino-update`, or the

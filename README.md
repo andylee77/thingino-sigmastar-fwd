@@ -18,8 +18,8 @@ the vendor guards are merged
 [#2070](https://github.com/themactep/thingino-firmware/pull/2070),
 [#2082](https://github.com/themactep/thingino-firmware/pull/2082)), and so
 is the first piece of the platform itself, the Infinity6C family file
-([#2083](https://github.com/themactep/thingino-firmware/pull/2083)), which
-landed after the commit this series is cut on.
+([#2083](https://github.com/themactep/thingino-firmware/pull/2083)). This
+series is cut on a master that has all of them, so it no longer carries them.
 [docs/UPSTREAM-PLAN.md](docs/UPSTREAM-PLAN.md) has the series and where each
 piece stands. Generic fixes found along the way go to the upstream projects
 separately: themactep/thingino-firmware
@@ -41,7 +41,7 @@ thingino/ingenic-sdk [#13](https://github.com/thingino/ingenic-sdk/pull/13).
 ## The shape of it
 
 ```text
-[UPSTREAM]   themactep/thingino-firmware  master  (0f9de1434, 2026-11-17)
+[UPSTREAM]   themactep/thingino-firmware  master  (b8bcd6740, 2026-11-17)
    │           + raptor / raptor-ipc / raptor-common / compy  — at upstream pins
    │             (raptor with the package patches listed below)
    │           + thingino web UI + its Raptor plugin           — upstream's
@@ -225,7 +225,7 @@ checkouts of the two upstream trees at the commits the series were cut on:
 ```sh
 # SigmaStar platform + camera profiles, onto thingino-firmware master
 cd thingino-firmware
-git checkout 0f9de1434
+git checkout b8bcd6740
 git am /path/to/patches/thingino-sigmastar/*.patch
 
 # the HAL fork, onto gtxaspec/raptor-hal
