@@ -8,7 +8,7 @@ behind one web UI overlay:
 | Detector | raptor's own: the IVS detection in `rvd`, upstream in Thingino | `thingino-ipud`, on the SoC's IPU |
 | Where it is | upstream's build option; this repository adds the settings page, the preview overlay and the agent's settings for it | patch 0022 of `patches/thingino-sigmastar/` |
 | Model | public models from the `magik-models` package | a file from the camera's own firmware, taken out with [tools/ipu-extract](../tools/ipu-extract/README.md) |
-| Runs on | the CPU, through Ingenic's JZDL engine | the IPU, the SoC's neural-network unit |
+| Runs on | the CPU, through Ingenic's JZDL engine, also on SoCs that have a neural accelerator (see [the Wyze Cam v4](#the-wyze-cam-v4-and-its-accelerator)) | the IPU, the SoC's neural-network unit |
 
 The rest of this page is about the first column: what an upstream Thingino
 build for an Ingenic camera needs to run the detection patches. The Wyze Cam v4
@@ -165,17 +165,26 @@ Two switches are separate from the detector's own keys:
 
 ### The Wyze Cam v4 and its accelerator
 
-JZDL runs on the CPU. The T41's neural accelerator is reached through a
-different Ingenic runtime, and raptor's HAL has no backend for it: its one
-detection backend is `src/hal_ivs_jzdl.cpp`. So on a Wyze Cam v4 these patches
-give CPU detection through JZDL, and using the accelerator needs a new backend
-in raptor-hal first. That is read from the sources; neither path has been run
-on a T41 here.
+The T41 does have a neural accelerator, Ingenic's NNA, and the kernel side is
+already there: Thingino builds the `soc-nna` driver for the T40, T41 and A1
+families (`BR2_INGENIC_SDK_SOC_NNA`, on by default for them) and loads it at
+boot on a T41.
+
+What is missing is everything above the driver. JZDL, the engine raptor's HAL
+links, runs on the CPU and does not use the NNA. The accelerator is reached
+through a different Ingenic runtime with its own model format, and raptor's HAL
+has no backend for it: its one detection backend is `src/hal_ivs_jzdl.cpp`. So
+on a Wyze Cam v4 these patches give CPU detection through JZDL, and detection
+on the NNA needs three things first: a backend in raptor-hal for that runtime,
+the runtime's library in the image, and a model in its format. The web UI and
+the agent of this series would not change: they read `rvd`'s detections,
+whichever backend produced them. All of this is read from the sources; neither
+path has been run on a T41 here.
 
 There is also no model to reuse from the camera itself. The stock image of the
 Wyze Cam v4 unit examined for this port (a factory build dated 2024-04-29)
-holds no neural model and no inference engine: its application links only
-Ingenic's motion library. On the Infinity6C cameras it is the other way round,
+ships the NNA's kernel driver but no neural model and no inference library:
+its application links only Ingenic's motion library. On the Infinity6C cameras it is the other way round,
 which is why `thingino-ipud` takes its model from the camera's own firmware.
 
 ## What was tested, and what was not
