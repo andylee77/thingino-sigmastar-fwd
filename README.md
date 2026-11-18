@@ -76,6 +76,7 @@ docs/
   WHAT-THIS-PORT-ADDS.md       exhaustive, per-patch breakdown (PR-split detail)
   UPSTREAM-PLAN.md             the plan for landing the port upstream, PR by PR, and its state
   DETECTION-GUIDE.md           on-camera detection: what an image needs, models, how to run it
+  EMULATED-CAMERA.md           notes on an emulated Ingenic camera as a test unit, its accelerator included
   raptor-hal-FORK.md           the one fork: what is John Chia's, what is new here
   oem-reference/               reverse-engineered OEM lens/PTZ and IR-cut protocols
 patches/
@@ -225,6 +226,10 @@ image needs (the build options, the libraries, the models), how to apply the
 patches to upstream for an Ingenic camera such as the Wyze Cam v4, and what was
 tested; the patch detail is in
 [docs/WHAT-THIS-PORT-ADDS.md](docs/WHAT-THIS-PORT-ADDS.md#4-the-generic-series).
+
+Generic work can be tried without a camera: [docs/EMULATED-CAMERA.md](docs/EMULATED-CAMERA.md)
+has notes on an emulated Ingenic camera as a test unit, and on running a
+detection model through the emulated T41's accelerator.
 
 ## Protocol references
 
