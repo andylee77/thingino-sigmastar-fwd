@@ -12,6 +12,7 @@ elsewhere below.
 | Path | License | Why |
 |---|---|---|
 | `patches/thingino-sigmastar/` | per path inside each patch; see its [`LICENSE.md`](patches/thingino-sigmastar/LICENSE.md). Mostly MIT; the embedded raptor and ONVIF patches GPL-3.0; the kernel and sensor-driver patches GPL-2.0 | they patch Thingino (MIT), and through it raptor, thingino-onvif, uhttpd, Linux and U-Boot |
+| `patches/thingino-generic/` | MIT; see its [`LICENSE.md`](patches/thingino-generic/LICENSE.md) | they patch Thingino's own files only |
 | `patches/raptor-hal/` | per file patched; see its [`LICENSE.md`](patches/raptor-hal/LICENSE.md). GPL-3.0-or-later for the Infinity6C backend, MIT where a file says MIT, otherwise GPL-3.0 | they patch gtxaspec/raptor-hal (GPL-3.0) |
 | `docs/`, `tools/`, `README.md`, `NOTICE.md` | MIT (`LICENSE`) | written for this repository |
 | `LICENSES/` | the license texts themselves | GPL-2.0 and GPL-3.0, for the patches above |

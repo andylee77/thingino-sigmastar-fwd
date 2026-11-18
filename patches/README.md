@@ -11,16 +11,23 @@ into its source before the series is regenerated. This file is published with
 the series unchanged, so it names no private path or document; the script
 paths below are the development repo's, which is not published.
 
-## The two series
+## The three series
 
 | Directory | Patches | Applies onto | Made from |
 |---|---|---|---|
 | [`thingino-sigmastar/`](thingino-sigmastar/) | 22 | `themactep/thingino-firmware` at `b8bcd6740` | branch `sigmastar-clean2`: the tree of the publish branch `sigmastar-publish`, cut by path into one commit per group |
+| [`thingino-generic/`](thingino-generic/) | 2 | the tree the `thingino-sigmastar/` series gives | branch `sigmastar-generic-clean`: the tree of `sigmastar-publish-generic`, cut by path with `groups-generic.txt` |
 | [`raptor-hal/`](raptor-hal/) | 13 | bare `gtxaspec/raptor-hal` at `9f09664` | the fork's branch `sigmastar-publish`: the tree of its `sigmastar` tip, with the commits that touch only `FORK.md` folded into one |
 
 - `sigmastar-publish` is its own merge of the upstream base plus the SigmaStar
   commits of `sigmastar-fwd`, cherry-picked in order. Generic fixes stay out of
-  the bundle, kept for upstream pull requests of their own.
+  that series, kept for upstream pull requests of their own.
+- `thingino-generic/` is where generic work that is not upstream yet can be
+  read meanwhile (since 2026-11-17). It applies on top of the first series
+  and holds the development tree's files: today the raptor agent adapter with
+  its faster reads and detection settings, and the detection settings page
+  and preview overlay. `sigmastar-publish-generic` is `sigmastar-publish`
+  plus those commits.
 - The groups run from the platform (vendor packages, board and kernel, config,
   toolchain, utilities, the raptor-hal build) through the changes to shared
   Thingino packages to one patch per camera profile.
@@ -61,7 +68,11 @@ development repo's publishing guide.
   `commits.txt`, or listed `exclude`, or `recut` (on the publish branch as the
   same change in other surrounding lines), and every other publish-only commit
   is listed `publish`; every fork commit is a patch of the HAL series or touches only
-  `FORK.md`. It commits, moves and pushes nothing.
+  `FORK.md`; and the generic series applies on top of the first, gives the
+  tree of `sigmastar-publish-generic`, and holds the development tree's
+  content in every path it changes, apart from the paths
+  `generic-differs.txt` lists with their reason. It commits, moves and pushes
+  nothing.
 - **On 2026-11-17** the drift check passes every test: both series apply
   cleanly to their bases and give the trees named above, and every
   development commit is classified (68 in the bundle, two more re-cut there,

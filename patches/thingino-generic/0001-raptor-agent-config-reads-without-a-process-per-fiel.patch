@@ -1,0 +1,1258 @@
+From 7ecbb096ae2b55edb567be40e25a9a2fe4a58d26 Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 20:05:17 -0500
+Subject: [PATCH 1/2] raptor agent: config reads without a process per field;
+ detection settings
+
+The agent adapter and agent-lib as the port's development tree runs them. On
+top of the adapter of the Thingino series:
+
+- GET /config, the stream blocks and the image block are printed through
+  helpers that hand their result back in a variable, from sections read once
+  and an ISP state parsed once, so a field no longer costs a copy of the shell
+  (and often a tr or an awk). agent-lib quotes a string that has nothing to
+  escape without awk.
+- Detection, for rvd's IVS: settings/motion/algorithm, model, num-classes,
+  conf-threshold and nms-threshold, beside the sensitivity and cooldown
+  settings the agent already had; rvd reads them at its start, so each
+  answers that a stream restart applies it. settings/motion/draw-boxes
+  switches the boxes rod burns into the sub stream, at once;
+  settings/motion/labels gives the class names (a <model>.txt beside the
+  model, else the public models' names). The capabilities list the
+  algorithms whose libraries the image has and the model files; the runtime
+  read "detections" gives rvd's current boxes with the sub stream's size.
+
+Generic: none of it depends on the SigmaStar platform. On the host the
+adapter's answers match ones saved from two Infinity6C cameras, which have
+no IVS, and its detection answers pass a test against a stand-in raptorctl.
+---
+ package/thingino-agent/files/agent-lib      |  12 +
+ package/thingino-raptor/files/agent-adapter | 971 ++++++++++++++++----
+ 2 files changed, 824 insertions(+), 159 deletions(-)
+
+diff --git a/package/thingino-agent/files/agent-lib b/package/thingino-agent/files/agent-lib
+index 1608d45ae..4642e6f47 100644
+--- a/package/thingino-agent/files/agent-lib
++++ b/package/thingino-agent/files/agent-lib
+@@ -5,6 +5,18 @@ OS_RELEASE_FILE="${OS_RELEASE_FILE:-/etc/os-release}"
+ THINGINO_CONFIG_FILE="${THINGINO_CONFIG_FILE:-/etc/thingino.json}"
+ 
+ agent_json_string() {
++	# Most values (numbers, names, addresses, URLs, dates) have nothing to
++	# escape: quote them as they are instead of forking a printf|awk pipeline
++	# for each one -- an adapter reply builds dozens of strings. Anything
++	# outside this set takes the awk path, which escapes it.
++	case "$1" in
++		*[!A-Za-z0-9._:/@,+=\ -]*) ;;
++		*)
++			value=$1
++			printf '"%s"' "$value"
++			return 0
++			;;
++	esac
+ 	value=$(printf '%s' "$1" | awk 'BEGIN { ORS="" } {
+ 		gsub(/\\/, "\\\\");
+ 		gsub(/"/, "\\\"");
+diff --git a/package/thingino-raptor/files/agent-adapter b/package/thingino-raptor/files/agent-adapter
+index 352b00d08..9ac7c0e5d 100644
+--- a/package/thingino-raptor/files/agent-adapter
++++ b/package/thingino-raptor/files/agent-adapter
+@@ -11,8 +11,12 @@ AGENT_STREAM_OPTIONS_LOCAL="${AGENT_STREAM_OPTIONS_LOCAL:-/etc/raptor-streams.co
+ AGENT_STREAM_LOCK="${AGENT_STREAM_LOCK:-/run/agent/stream-apply.lock}"
+ AGENT_STREAM_BACKUP="${AGENT_STREAM_BACKUP:-/run/agent/raptor.conf.before-apply}"
+ 
+-# The adapter owns the EXIT trap of the agentctl shell that sources it.
+-trap 'rm -f /tmp/agent-raptor-isp.$$ /tmp/agent-raptor-wb.$$ /tmp/agent-raptor-rvdconfig.$$' EXIT
++# The per-invocation caches below (get-isp, get-wb, stream section dumps, the
++# live encoder state) are keyed by this shell's PID so command substitutions
++# share them; drop them on exit, or every agent request leaves its files
++# behind in /tmp. The adapter owns the EXIT trap of the agentctl shell that
++# sources it, so this is the one.
++trap 'rm -f /tmp/agent-raptor-isp.$$ /tmp/agent-raptor-wb.$$ /tmp/agent-raptor-stream0.$$ /tmp/agent-raptor-stream1.$$ /tmp/agent-raptor-rvdconfig.$$' EXIT
+ 
+ agent_name() {
+ 	printf 'raptor'
+@@ -57,6 +61,10 @@ agent_config_get() {
+ 	if agent_config_get_cached "$section" "$key"; then
+ 		return 0
+ 	fi
++	# A preloaded listing holds every effective key of its section, set or
++	# default, so a key it lacks has no value: asking raptorctl again (a
++	# single-key get, then the listing) would only come back empty.
++	eval "[ -z \"\${$_var+x}\" ]" || return 0
+ 	value=$(raptorctl config get "$section" "$key" 2>/dev/null | tr -d '\r\n"')
+ 	# A single-key get only finds keys set in raptor.conf; the section listing
+ 	# also carries the defaults the daemons run with.
+@@ -85,13 +93,19 @@ agent_config_var() {
+ agent_config_preload() {
+ 	for _section in "$@"; do
+ 		agent_config_var "$_section"
+-		# A failed read stays uncached so its keys fall back to single gets.
+-		_listing=$(raptorctl config get "$_section" 2>/dev/null) &&
++		# A failed read stays uncached so its keys fall back to single gets,
++		# unless raptorctl printed the section header: then it read the
++		# config and the section has no entries ("Section not found"), so
++		# every key is empty and the single gets would say so too.
++		if _listing=$(raptorctl config get "$_section" 2>/dev/null) ||
++			[ "$_listing" = "[$_section]" ]; then
+ 			eval "$_var=\$_listing"
++		fi
+ 	done
+ }
+ 
+-agent_config_get_cached() {
++# Sets $value; agent_config_get_cached prints it.
++agent_config_lookup() {
+ 	agent_config_var "$1"
+ 	eval "[ -n \"\${$_var+x}\" ]" || return 1
+ 	eval "_listing=\$$_var"
+@@ -107,6 +121,9 @@ agent_config_get_cached() {
+ 			*) break ;;
+ 		esac
+ 	done
++}
++agent_config_get_cached() {
++	agent_config_lookup "$1" "$2" || return 1
+ 	printf '%s' "$value"
+ }
+ 
+@@ -444,17 +461,38 @@ agent_isp_json() {
+ 	cat "$_isp_cache" 2>/dev/null
+ }
+ 
++# Parse the flat ISP dump once per adapter invocation into _isp_<key> vars, so
++# callers read a shell variable instead of sed-ing the whole blob for every
++# field (the Image Quality / config pages read ~13 of them). The dump is flat
++# JSON of integer fields (plus wb_mode, a string handled separately); only keys
++# matching [a-z_] with an integer value are imported, so the eval is safe.
++agent_isp_load() {
++	[ "$_isp_loaded" = 1 ] && return 0
++	_isp_loaded=1
++	eval "$(agent_isp_json | awk '
++		{
++			gsub(/[{}"]/, "")
++			_n = split($0, _p, ",")
++			for (_i = 1; _i <= _n; _i++) {
++				_c = index(_p[_i], ":")
++				if (_c == 0) continue
++				_k = substr(_p[_i], 1, _c - 1)
++				_v = substr(_p[_i], _c + 1)
++				if (_k ~ /^[a-z_][a-z0-9_]*$/ && _v ~ /^-?[0-9]+$/)
++					printf "_isp_%s=%s\n", _k, _v
++			}
++		}')"
++}
++
+ agent_image_raw() {
+ 	key=$1
+-	isp=$(agent_isp_json)
+-	if [ -n "$isp" ]; then
+-		value=$(agent_json_number_field "$key" "$isp")
+-		if [ -n "$value" ]; then
+-			printf '%s' "$value"
+-			return 0
+-		fi
+-		# Some ISP dumps use nested objects; fall through to config.
++	agent_isp_load
++	eval "value=\${_isp_$key:-}"
++	if [ -n "$value" ]; then
++		printf '%s' "$value"
++		return 0
+ 	fi
++	# Not an integer field in the ISP dump (nested/absent); fall through to config.
+ 	agent_config_get image "$key"
+ }
+ 
+@@ -678,6 +716,172 @@ agent_motion_active() {
+ 	printf 'false'
+ }
+ 
++# The detection algorithms rvd can run on this image: the SDK's motion grid
++# always, the vendor's person detector and a JZDL model when their libraries
++# are installed.
++agent_motion_algorithms() {
++	_ma='"move","base_move"'
++	[ -e /usr/lib/libpersonDet_inf.so ] && _ma="$_ma,\"persondet\""
++	[ -e /usr/lib/libjzdl.m.so ] && _ma="$_ma,\"yolo\""
++	printf '[%s]' "$_ma"
++}
++
++# The model files a JZDL run can load.
++agent_motion_models() {
++	_mm=
++	for _mf in /usr/share/models/*.bin; do
++		[ -f "$_mf" ] || continue
++		_mm="$_mm${_mm:+,}\"$_mf\""
++	done
++	printf '[%s]' "$_mm"
++}
++
++# section key default -> _cv, a whole number (the default when the file has
++# none or something else).
++agent_cfg_int() {
++	agent_cfg "$1" "$2"
++	case "$_cv" in
++		'' | *[!0-9]*) _cv=$3 ;;
++	esac
++}
++
++# PATCH one whole-number [motion] key that rvd reads at its start.
++agent_set_motion_int() {
++	value=$(agent_setting_value "$2" "$3") || return 1
++	agent_validate_int "$value" || return 1
++	if [ "$value" -lt "$5" ] || [ "$value" -gt "$6" ]; then
++		echo "$3 must be $5-$6" >&2
++		return 1
++	fi
++	agent_config_set motion "$4" "$value" || return 1
++	agent_config_save
++	agent_print_setting_restart "$1" "$3" "$value"
++}
++
++# rod draws rvd's detections into the sub stream whenever [motion] is on: it
++# adds an overlay element named "detect" unless raptor.conf declares one, and
++# draws only while that element is visible. So the switch is that element's
++# section. It is written only to turn the boxes off (and back on once it
++# exists): a declared element is created at rod's start even with detection
++# off, a full-frame buffer of the sub stream.
++agent_motion_draw_boxes() {
++	agent_config_bool osd.detect visible true
++}
++
++agent_motion_set_draw_boxes() {
++	_db_have=$(raptorctl config get osd.detect 2>/dev/null || true)
++	if [ "$1" = false ] || [ -n "$_db_have" ]; then
++		agent_osd_ensure_section osd.detect || return 1
++		agent_config_set osd.detect visible "$1" || return 1
++		agent_config_save
++	fi
++	# Live while rod has the element; a rod that starts later reads the file.
++	if [ "$1" = true ]; then
++		agent_ctl rod show-element detect >/dev/null 2>&1 || true
++	else
++		agent_ctl rod hide-element detect >/dev/null 2>&1 || true
++	fi
++}
++
++# The class names of the model in use, in class order: one a line in a file
++# beside it, <model>.txt for <model>.bin. A model without that file gets the
++# names the public Magik models were trained on (COCO's order: the four-class
++# model has its first four, the person detector its first), as many as the
++# model has classes.
++AGENT_MOTION_COCO='person,bicycle,car,motorcycle,airplane,bus,train,truck,boat,traffic light,fire hydrant,stop sign,parking meter,bench,bird,cat,dog,horse,sheep,cow,elephant,bear,zebra,giraffe,backpack,umbrella,handbag,tie,suitcase,frisbee,skis,snowboard,sports ball,kite,baseball bat,baseball glove,skateboard,surfboard,tennis racket,bottle,wine glass,cup,fork,knife,spoon,bowl,banana,apple,sandwich,orange,broccoli,carrot,hot dog,pizza,donut,cake,chair,couch,potted plant,bed,dining table,toilet,tv,laptop,mouse,remote,keyboard,cell phone,microwave,oven,toaster,sink,refrigerator,book,clock,vase,scissors,teddy bear,hair drier,toothbrush'
++
++agent_motion_labels() {
++	_ml=$(agent_config_get motion model)
++	_ml=${_ml:-/usr/share/models/magik_model_yolov5.bin}
++	_ml=${_ml%.bin}.txt
++	_mo=
++	_mn=0
++	if [ -f "$_ml" ]; then
++		while IFS= read -r _mline || [ -n "$_mline" ]; do
++			_mline=$(printf '%s' "$_mline" | tr -cd 'A-Za-z0-9 _-')
++			[ -n "$_mline" ] || continue
++			_mo="$_mo${_mo:+,}\"$_mline\""
++			_mn=$((_mn + 1))
++			[ "$_mn" -ge 80 ] && break
++		done <"$_ml"
++	else
++		agent_cfg_int motion num_classes 4
++		_mold=$IFS
++		IFS=,
++		for _mline in $AGENT_MOTION_COCO; do
++			[ "$_mn" -ge "$_cv" ] && break
++			_mo="$_mo${_mo:+,}\"$_mline\""
++			_mn=$((_mn + 1))
++		done
++		IFS=$_mold
++	fi
++	printf '[%s]' "$_mo"
++}
++
++# The [motion] values, as the inside of a JSON object: "enabled" always, the
++# detection values on an image with IVS (rvd's defaults where raptor.conf has
++# none).
++agent_print_motion_fields() {
++	agent_cfg_bool motion enabled false
++	printf '"enabled":%s' "$_cv"
++	if agent_isp_has ivs; then
++		agent_cfg motion algorithm
++		agent_jstr "${_cv:-move}"
++		printf ',"algorithm":%s' "$_js"
++		agent_cfg_int motion sensitivity 3
++		printf ',"sensitivity":%s' "$_cv"
++		agent_cfg_int motion cooldown_sec 10
++		printf ',"cooldown_time":%s' "$_cv"
++		agent_cfg motion model
++		agent_jstr "${_cv:-/usr/share/models/magik_model_yolov5.bin}"
++		printf ',"model":%s' "$_js"
++		agent_cfg_int motion num_classes 4
++		printf ',"num_classes":%s' "$_cv"
++		agent_cfg_int motion conf_threshold 40
++		printf ',"conf_threshold":%s' "$_cv"
++		agent_cfg_int motion nms_threshold 50
++		printf ',"nms_threshold":%s' "$_cv"
++		printf ',"draw_boxes":%s' "$(agent_motion_draw_boxes)"
++	fi
++}
++
++# settings/motion: everything the Detection page shows, in one answer.
++agent_print_motion_settings() {
++	printf '{'
++	agent_print_motion_fields
++	if agent_isp_has ivs; then
++		printf ',"supported":true,"algorithms":%s,"models":%s,"labels":%s' \
++			"$(agent_motion_algorithms)" "$(agent_motion_models)" "$(agent_motion_labels)"
++	else
++		printf ',"supported":false'
++	fi
++	printf '}\n'
++}
++
++# What rvd detects right now: its boxes are in sub-stream pixels, so that
++# stream's size goes with them. An image without IVS has none.
++agent_print_runtime_detections() {
++	agent_cfg_int stream1 width 0
++	_dw=$_cv
++	agent_cfg_int stream1 height 0
++	_dh=$_cv
++	_dj=
++	if agent_isp_has ivs && command -v raptorctl >/dev/null 2>&1; then
++		_dj=$(raptorctl rvd ivs-detections 2>/dev/null) || _dj=
++	fi
++	case "$_dj" in
++		*'"detections":['*)
++			_dc=$(printf '%s' "$_dj" | sed -n 's/.*"count": *\([0-9]*\).*/\1/p')
++			_dl=${_dj#*\"detections\":}
++			_dl=${_dl%\}*}
++			printf '{"width":%s,"height":%s,"count":%s,"detections":%s}' "$_dw" "$_dh" "${_dc:-0}" "$_dl"
++			;;
++		*)
++			printf '{"width":%s,"height":%s,"count":0,"detections":[]}' "$_dw" "$_dh"
++			;;
++	esac
++}
++
+ agent_daynight_mode_config() {
+ 	if agent_has_daynightd; then
+ 		agent_daynightd_target_mode
+@@ -962,6 +1166,23 @@ agent_stream_audio_enabled() {
+ 	agent_config_bool audio enabled true
+ }
+ 
++agent_stream_section_dump() {
++	# Cache one `raptorctl config get streamN` per adapter invocation, for the
++	# one-pass stream readers (agent_stream_state_load, agent_stream_dump_values).
++	# The section dump carries the EFFECTIVE config, every key with its running
++	# value, defaults included, as agent_config_get's listing fallback does.
++	stream_id=$1
++	_sd_cache="/tmp/agent-raptor-stream$stream_id.$$"
++	if [ ! -s "$_sd_cache" ]; then
++		command -v raptorctl >/dev/null 2>&1 || return 0
++		raptorctl config get "$(agent_stream_section "$stream_id")" >"$_sd_cache" 2>/dev/null || {
++			rm -f "$_sd_cache"
++			return 0
++		}
++	fi
++	cat "$_sd_cache" 2>/dev/null
++}
++
+ agent_stream_field() {
+ 	stream_id=$1
+ 	field=$2
+@@ -1106,26 +1327,63 @@ agent_stream_mma_kib() {
+ 
+ agent_stream_state_load() {
+ 	# Effective settings of stream $1 (rvd's defaults merged) into _st_*.
+-	_st_w=$(agent_stream_field "$1" width)
+-	_st_h=$(agent_stream_field "$1" height)
+-	_st_fps=$(agent_stream_field "$1" fps)
+-	_st_bitrate=$(agent_stream_field "$1" bitrate)
+-	_st_maxbr=$(agent_stream_field "$1" max_bitrate)
+-	[ -n "$_st_maxbr" ] || _st_maxbr=0
+-	_st_gop=$(agent_stream_field "$1" gop)
+-	_st_codec=$(agent_stream_field "$1" codec | tr 'A-Z' 'a-z')
+-	_st_profile=$(agent_profile_to_name "$(agent_stream_field "$1" profile)")
+-	_st_rc=$(agent_stream_field "$1" rc_mode | tr 'A-Z' 'a-z')
++	#
++	# One raptorctl section dump, parsed by a single awk pass -- not a
++	# printf|sed|head|sed|tr pipeline per field. The old per-field reader forked
++	# roughly ninety busybox processes per stream (~0.6 s on an Infinity6C core,
++	# and the Streamer page reads both streams at once), which is what made the
++	# settings pages take seconds to load. This forks a handful.
++	_sl_id=$1
++	_sl_jpeg_gate=$(agent_config_bool jpeg enabled true)
++	_sl_fields=$(agent_stream_section_dump "$_sl_id" | awk -F'=' '
++		{
++			key = $1; val = $2
++			gsub(/[ \t\r]/, "", key)
++			sub(/^[ \t]+/, "", val); sub(/[ \t\r]+$/, "", val); gsub(/"/, "", val)
++			m[key] = val
++		}
++		END {
++			print m["width"]; print m["height"]; print m["fps"]
++			print m["bitrate"]; print (m["max_bitrate"] == "" ? 0 : m["max_bitrate"])
++			print m["gop"]; print tolower(m["codec"]); print m["profile"]
++			print tolower(m["rc_mode"]); print m["jpeg"]
++			print m["jpeg_quality"]; print m["enabled"]
++		}')
++	# Pull the fixed-order lines into vars with read builtins (no forks); the
++	# heredoc keeps the reads in this shell, unlike a pipe.
++	{
++		read -r _st_w
++		read -r _st_h
++		read -r _st_fps
++		read -r _st_bitrate
++		read -r _st_maxbr
++		read -r _st_gop
++		read -r _st_codec
++		read -r _sl_profile_raw
++		read -r _st_rc
++		read -r _sl_jpeg_raw
++		read -r _st_jq
++		read -r _sl_enabled_raw
++	} <<-EOF
++	$_sl_fields
++	EOF
++	_st_profile=$(agent_profile_to_name "$_sl_profile_raw")
+ 	# rvd pairs a JPEG channel with every stream unless [jpeg] or the stream
+ 	# says otherwise.
+-	if [ "$(agent_config_bool jpeg enabled true)" = true ]; then
+-		_st_jpeg=$(agent_bool_word "$(agent_stream_field "$1" jpeg)" true)
++	if [ "$_sl_jpeg_gate" = true ]; then
++		_st_jpeg=$(agent_bool_word "$_sl_jpeg_raw" true)
+ 	else
+ 		_st_jpeg=false
+ 	fi
+-	_st_jq=$(agent_stream_field "$1" jpeg_quality)
+ 	[ -n "$_st_jq" ] || _st_jq=$(agent_config_get jpeg quality)
+-	_st_enabled=$(agent_stream_enabled "$1")
++	[ -n "$_st_maxbr" ] || _st_maxbr=0
++	# Stream 0 is always on; stream 1's enabled key (default true) came out of
++	# the section dump above, so there is no need to read the config again.
++	if [ "$_sl_id" = 0 ]; then
++		_st_enabled=true
++	else
++		_st_enabled=$(agent_bool_word "$_sl_enabled_raw" true)
++	fi
+ }
+ 
+ agent_print_stream_state() {
+@@ -1573,7 +1831,7 @@ agent_stream_rtsp_url() {
+ }
+ 
+ agent_rtsp_listening() {
+-	port=$(agent_rtsp_port)
++	port=${1:-$(agent_rtsp_port)}
+ 	if command -v netstat >/dev/null 2>&1; then
+ 		netstat -lnt 2>/dev/null | grep -q ":${port} " && printf 'true' && return 0
+ 	fi
+@@ -1585,8 +1843,9 @@ agent_rtsp_listening() {
+ 
+ agent_recording_active() {
+ 	status=$(agent_daemon_status rmr)
+-	if agent_json_bool_field recording "$status" >/dev/null 2>&1; then
+-		agent_json_bool_field recording "$status"
++	# One extraction, not a test run and then the same run again.
++	if _ra_value=$(agent_json_bool_field recording "$status" 2>/dev/null); then
++		printf '%s' "$_ra_value"
+ 		return 0
+ 	fi
+ 	printf 'false'
+@@ -1716,49 +1975,192 @@ agent_print_runtime_recording() {
+ 	printf '}'
+ }
+ 
++# ---- GET /config without a shell copy per field ---------------------------
++# agent_print_config and the stream blocks under it printed every field as
++#   "$(agent_json_x "$(agent_config_get section key)")"
++# which is two or three copies of the shell (and often a tr) per field: about
++# 390 processes for one config read, though every section is already in
++# memory after agent_config_preload. The helpers below hand their result back
++# in a variable (_cv, _js) instead of on stdout, so a field costs none. The
++# printing helpers stay as they are for every other caller.
++
++# section key -> _cv, as agent_config_get.
++agent_cfg() {
++	if agent_config_lookup "$1" "$2"; then
++		_cv=$value
++		return 0
++	fi
++	_cv=
++	# A preloaded listing that lacks the key: no value (see agent_config_get).
++	eval "[ -z \"\${$_var+x}\" ]" || return 0
++	_cv=$(agent_config_get "$1" "$2")
++}
++
++# value default -> _cv true/false, as agent_bool01_to_json and agent_config_bool.
++agent_bool_val() {
++	case "$1" in
++		1 | [Tt][Rr][Uu][Ee] | [Yy][Ee][Ss] | [Oo][Nn]) _cv=true ;;
++		0 | [Ff][Aa][Ll][Ss][Ee] | [Nn][Oo] | [Oo][Ff][Ff]) _cv=false ;;
++		*) _cv=${2:-false} ;;
++	esac
++}
++
++# section key default -> _cv true/false.
++agent_cfg_bool() {
++	agent_cfg "$1" "$2"
++	agent_bool_val "$_cv" "$3"
++}
++
++# value -> _js: its JSON string, or null when empty (agent_json_string_or_null).
++# Only a value with something to escape takes agent_json_string's awk.
++agent_jstr() {
++	if [ -z "$1" ]; then
++		_js=null
++		return 0
++	fi
++	case "$1" in
++		*[\\\"]* | *[[:cntrl:]]*) _js=$(agent_json_string "$1") ;;
++		*) _js="\"$1\"" ;;
++	esac
++}
++
++# value -> _cv in upper case; the encoder's own words need no tr.
++agent_upper_val() {
++	case "$1" in
++		h264) _cv=H264 ;;
++		h265) _cv=H265 ;;
++		cbr) _cv=CBR ;;
++		vbr) _cv=VBR ;;
++		smart) _cv=SMART ;;
++		fixqp) _cv=FIXQP ;;
++		capped) _cv=CAPPED ;;
++		capped_vbr) _cv=CAPPED_VBR ;;
++		capped_quality) _cv=CAPPED_QUALITY ;;
++		*[a-z]*) _cv=$(printf '%s' "$1" | tr 'a-z' 'A-Z') ;;
++		*) _cv=$1 ;;
++	esac
++}
++
++# key -> _cv, as agent_image_raw.
++agent_image_val() {
++	agent_isp_load
++	eval "_cv=\${_isp_$1:-}"
++	[ -n "$_cv" ] || agent_cfg image "$1"
++}
++
++# agent_isp_has with the capability list read once for this config read.
++agent_isp_has_once() {
++	if [ "$_isp_caps_loaded" != 1 ]; then
++		_isp_caps_loaded=1
++		_isp_caps=$(agent_isp_caps_json)
++	fi
++	case "$_isp_caps" in
++		*"\"$1\":false"*) return 1 ;;
++	esac
++	return 0
++}
++
++# capability key -> _cv: the value or null, as agent_image_knob.
++agent_knob_val() {
++	if agent_isp_has_once "$1"; then
++		agent_image_val "$2"
++		_cv=${_cv:-null}
++	else
++		_cv=null
++	fi
++}
++
++# raw color -> _js, as agent_json_string_or_null of agent_osd_color_to_ui:
++# 0xAARRGGBB / #AARRGGBB -> "#RRGGBBAA".
++agent_osd_color_js() {
++	if [ -z "$1" ]; then
++		_js=null
++		return 0
++	fi
++	_oc_hex=${1#0[xX]}
++	_oc_hex=${_oc_hex#\#}
++	case "$_oc_hex" in
++		????????)
++			case "$_oc_hex" in
++				*[a-f]*) _oc_hex=$(printf '%s' "$_oc_hex" | tr 'a-f' 'A-F') ;;
++			esac
++			agent_jstr "#${_oc_hex#??}${_oc_hex%??????}"
++			;;
++		*) agent_jstr "$1" ;;
++	esac
++}
++
+ agent_print_stream_config() {
+ 	stream_id=$1
+-	printf '{'
+-	printf '"id":%s,' "$stream_id"
+-	printf '"enabled":%s,' "$(agent_stream_enabled "$stream_id")"
+-	printf '"audio_enabled":%s,' "$(agent_stream_audio_enabled)"
+-	_width=$(agent_stream_field "$stream_id" width)
+-	[ -n "$_width" ] || _width=$(agent_runtime_stream_field "$stream_id" w)
+-	printf '"width":%s,' "$(agent_json_value_or "$_width" null)"
+-	_height=$(agent_stream_field "$stream_id" height)
+-	[ -n "$_height" ] || _height=$(agent_runtime_stream_field "$stream_id" h)
+-	printf '"height":%s,' "$(agent_json_value_or "$_height" null)"
+-	_fps=$(agent_stream_field "$stream_id" fps)
+-	[ -n "$_fps" ] || _fps=$(agent_runtime_stream_field "$stream_id" fps)
+-	printf '"fps":%s,' "$(agent_json_value_or "$_fps" null)"
+-	_bitrate=$(agent_stream_field "$stream_id" bitrate)
+-	[ -n "$_bitrate" ] || _bitrate=$(agent_runtime_stream_field "$stream_id" bitrate)
+-	printf '"bitrate":%s,' "$(agent_json_value_or "$_bitrate" null)"
+-	_gop=$(agent_stream_field "$stream_id" gop)
+-	[ -n "$_gop" ] || _gop=$(agent_runtime_stream_field "$stream_id" gop)
+-	printf '"gop":%s,' "$(agent_json_value_or "$_gop" null)"
+-	printf '"buffers":%s,' "$(agent_json_value_or "$(agent_stream_nr_vbs "$stream_id")" null)"
+-	_profile_raw=$(agent_stream_field "$stream_id" profile)
+-	_profile_name=""
+-	if [ -n "$_profile_raw" ]; then
+-		_profile_name=$(agent_profile_to_name "$_profile_raw")
+-	elif _profile_name=$(agent_runtime_profile_name "$stream_id") && [ -n "$_profile_name" ]; then
+-		:
++	_sc_sec="stream$stream_id"
++	# Stream 0 is always on; stream 1's enabled key defaults to true.
++	if [ "$stream_id" = 0 ]; then
++		_sc_enabled=true
+ 	else
+-		_profile_name=""
++		agent_cfg_bool "$_sc_sec" enabled true
++		_sc_enabled=$_cv
+ 	fi
+-	if [ -n "$_profile_name" ]; then
+-		printf '"profile":%s,' "$(agent_json_string "$_profile_name")"
++	printf '{"id":%s,"enabled":%s,' "$stream_id" "$_sc_enabled"
++	agent_cfg_bool audio enabled true
++	printf '"audio_enabled":%s,' "$_cv"
++	agent_cfg "$_sc_sec" width
++	[ -n "$_cv" ] || _cv=$(agent_runtime_stream_field "$stream_id" w)
++	printf '"width":%s,' "${_cv:-null}"
++	agent_cfg "$_sc_sec" height
++	[ -n "$_cv" ] || _cv=$(agent_runtime_stream_field "$stream_id" h)
++	printf '"height":%s,' "${_cv:-null}"
++	agent_cfg "$_sc_sec" fps
++	[ -n "$_cv" ] || _cv=$(agent_runtime_stream_field "$stream_id" fps)
++	printf '"fps":%s,' "${_cv:-null}"
++	agent_cfg "$_sc_sec" bitrate
++	[ -n "$_cv" ] || _cv=$(agent_runtime_stream_field "$stream_id" bitrate)
++	printf '"bitrate":%s,' "${_cv:-null}"
++	agent_cfg "$_sc_sec" gop
++	[ -n "$_cv" ] || _cv=$(agent_runtime_stream_field "$stream_id" gop)
++	printf '"gop":%s,' "${_cv:-null}"
++	agent_cfg "$_sc_sec" nr_vbs
++	case "$_cv" in
++		[1-9]*) ;;
++		*) _cv=$(agent_stream_nr_vbs "$stream_id") ;;
++	esac
++	printf '"buffers":%s,' "${_cv:-null}"
++	agent_cfg "$_sc_sec" profile
++	if [ -n "$_cv" ]; then
++		case "$_cv" in
++			0 | base | baseline) _js='"baseline"' ;;
++			1 | main) _js='"main"' ;;
++			2 | high) _js='"high"' ;;
++			*) agent_jstr "$(agent_profile_to_name "$_cv")" ;;
++		esac
++		printf '"profile":%s,' "$_js"
+ 	else
+-		printf '"profile":null,'
+-	fi
+-	printf '"rtsp_endpoint":%s,' "$(agent_json_string_or_null "$(agent_rtsp_endpoint "$stream_id")")"
+-	_format=$(agent_stream_format "$stream_id")
+-	[ -n "$_format" ] || _format=$(agent_runtime_codec_name "$stream_id")
+-	printf '"format":%s,' "$(agent_json_string_or_null "$_format")"
+-	_mode=$(agent_stream_mode "$stream_id")
+-	[ -n "$_mode" ] || _mode=$(agent_runtime_rc_mode_name "$stream_id")
+-	printf '"mode":%s,' "$(agent_json_string_or_null "$_mode")"
++		agent_jstr "$(agent_runtime_profile_name "$stream_id")"
++		printf '"profile":%s,' "$_js"
++	fi
++	case "$stream_id" in
++		0)
++			agent_cfg rtsp endpoint_main
++			_cv=${_cv:-ch0}
++			;;
++		1)
++			agent_cfg rtsp endpoint_sub
++			_cv=${_cv:-ch1}
++			;;
++		*) _cv= ;;
++	esac
++	agent_jstr "${_cv#/}"
++	printf '"rtsp_endpoint":%s,' "$_js"
++	agent_cfg "$_sc_sec" codec
++	agent_upper_val "$_cv"
++	[ -n "$_cv" ] || _cv=$(agent_runtime_codec_name "$stream_id")
++	agent_jstr "$_cv"
++	printf '"format":%s,' "$_js"
++	agent_cfg "$_sc_sec" rc_mode
++	agent_upper_val "$_cv"
++	[ "$_cv" = CAPPED ] && _cv=CAPPED_VBR
++	[ -n "$_cv" ] || _cv=$(agent_runtime_rc_mode_name "$stream_id")
++	agent_jstr "$_cv"
++	printf '"mode":%s,' "$_js"
+ 	printf '"osd":'
+ 	agent_print_stream_osd "$stream_id"
+ 	printf '}'
+@@ -1768,68 +2170,154 @@ agent_print_stream_osd() {
+ 	# Raptor ROD is mostly global; streamN only owns osd_enabled. Both streams
+ 	# still expose the same element tree so OSD pages can hydrate via GET /config.
+ 	stream_id=$1
+-	printf '{'
+-	printf '"enabled":%s,' "$(agent_config_bool "$(agent_stream_section "$stream_id")" osd_enabled true)"
+-	printf '"font_path":%s,' "$(agent_json_string_or_null "$(agent_config_get osd font)")"
+-	printf '"font_size":%s,' "$(agent_json_value_or "$(agent_config_get osd font_size)" null)"
+-	printf '"stroke_size":%s,' "$(agent_json_value_or "$(agent_config_get osd font_stroke)" null)"
+-	printf '"logo":{'
+-	printf '"enabled":%s,' "$(agent_config_bool osd.logo visible false)"
+-	printf '"position":%s,' "$(agent_json_string_or_null "$(agent_config_get osd.logo position)")"
+-	printf '"path":%s,' "$(agent_json_string_or_null "$(agent_config_get osd.logo path)")"
+-	printf '"width":%s,' "$(agent_json_value_or "$(agent_config_get osd.logo width)" null)"
+-	printf '"height":%s' "$(agent_json_value_or "$(agent_config_get osd.logo height)" null)"
+-	printf '},'
+-	printf '"time":{'
+-	printf '"enabled":%s,' "$(agent_config_bool osd.timestamp visible false)"
+-	printf '"format":%s,' "$(agent_json_string_or_null "$(agent_config_get osd time_format)")"
+-	printf '"position":%s,' "$(agent_json_string_or_null "$(agent_config_get osd.timestamp position)")"
+-	_fill=$(agent_config_get osd font_color)
+-	_stroke=$(agent_config_get osd stroke_color)
+-	_fill=$(agent_json_string_or_null "$([ -n "$_fill" ] && agent_osd_color_to_ui "$_fill")")
+-	_stroke=$(agent_json_string_or_null "$([ -n "$_stroke" ] && agent_osd_color_to_ui "$_stroke")")
+-	printf '"fill_color":%s,' "$_fill"
+-	printf '"stroke_color":%s' "$_stroke"
+-	printf '},'
+-	printf '"uptime":{'
+-	printf '"enabled":%s,' "$(agent_config_bool osd.uptime visible false)"
+-	printf '"format":%s,' "$(agent_json_string_or_null "$(agent_config_get osd.uptime template)")"
+-	printf '"position":%s,' "$(agent_json_string_or_null "$(agent_config_get osd.uptime position)")"
+-	printf '"fill_color":%s,' "$_fill"
+-	printf '"stroke_color":%s' "$_stroke"
+-	printf '},'
+-	printf '"usertext":{'
+-	printf '"enabled":%s,' "$(agent_config_bool osd.camera visible false)"
+-	printf '"format":%s,' "$(agent_json_string_or_null "$(agent_config_get osd.camera template)")"
+-	printf '"position":%s,' "$(agent_json_string_or_null "$(agent_config_get osd.camera position)")"
+-	printf '"fill_color":%s,' "$_fill"
+-	printf '"stroke_color":%s' "$_stroke"
+-	printf '}'
+-	printf '}'
++	agent_cfg_bool "stream$stream_id" osd_enabled true
++	printf '{"enabled":%s,' "$_cv"
++	agent_cfg osd font
++	agent_jstr "$_cv"
++	printf '"font_path":%s,' "$_js"
++	agent_cfg osd font_size
++	printf '"font_size":%s,' "${_cv:-null}"
++	agent_cfg osd font_stroke
++	printf '"stroke_size":%s,' "${_cv:-null}"
++	agent_cfg_bool osd.logo visible false
++	printf '"logo":{"enabled":%s,' "$_cv"
++	agent_cfg osd.logo position
++	agent_jstr "$_cv"
++	printf '"position":%s,' "$_js"
++	agent_cfg osd.logo path
++	agent_jstr "$_cv"
++	printf '"path":%s,' "$_js"
++	agent_cfg osd.logo width
++	printf '"width":%s,' "${_cv:-null}"
++	agent_cfg osd.logo height
++	printf '"height":%s},' "${_cv:-null}"
++	agent_cfg osd font_color
++	agent_osd_color_js "$_cv"
++	_fill=$_js
++	agent_cfg osd stroke_color
++	agent_osd_color_js "$_cv"
++	_stroke=$_js
++	agent_cfg_bool osd.timestamp visible false
++	printf '"time":{"enabled":%s,' "$_cv"
++	agent_cfg osd time_format
++	agent_jstr "$_cv"
++	printf '"format":%s,' "$_js"
++	agent_cfg osd.timestamp position
++	agent_jstr "$_cv"
++	printf '"position":%s,"fill_color":%s,"stroke_color":%s},' "$_js" "$_fill" "$_stroke"
++	agent_cfg_bool osd.uptime visible false
++	printf '"uptime":{"enabled":%s,' "$_cv"
++	agent_cfg osd.uptime template
++	agent_jstr "$_cv"
++	printf '"format":%s,' "$_js"
++	agent_cfg osd.uptime position
++	agent_jstr "$_cv"
++	printf '"position":%s,"fill_color":%s,"stroke_color":%s},' "$_js" "$_fill" "$_stroke"
++	agent_cfg_bool osd.camera visible false
++	printf '"usertext":{"enabled":%s,' "$_cv"
++	agent_cfg osd.camera template
++	agent_jstr "$_cv"
++	printf '"format":%s,' "$_js"
++	agent_cfg osd.camera position
++	agent_jstr "$_cv"
++	printf '"position":%s,"fill_color":%s,"stroke_color":%s}}' "$_js" "$_fill" "$_stroke"
++}
++
++# What the runtime object of every stream shares, read once per request:
++# runtime/all prints two streams, and each used to read all of it again.
++# Call before agent_print_stream_runtime.
++agent_stream_runtime_shared_load() {
++	_rt_audio=$(agent_stream_audio_enabled)
++	_rt_port=$(agent_rtsp_port)
++	_rt_scheme=$(agent_rtsp_scheme)
++	_rt_ip=$(agent_network_ip)
++	_rt_listening=$(agent_rtsp_listening "$_rt_port")
++	_rt_running=$(agent_streamer_running)
++	_rt_recording=$(agent_recording_active)
++	_rt_record_channel=
++	[ "$_rt_recording" = true ] && _rt_record_channel=$(agent_record_channel)
++}
++
++# Values of several keys of stream $1's section dump in one awk pass, one line
++# each in the order asked, read the way agent_stream_field reads one: the
++# first "key = value" line, the value trimmed, quotes and CRs dropped. A key
++# written "upper:<key>" comes out upper-cased (agent_stream_format/_mode).
++# A key the dump does not carry gives an empty line: the caller falls back to
++# agent_config_get, as agent_stream_field does. This replaces a
++# printf|sed|head|sed|tr pipeline per field.
++agent_stream_dump_values() {
++	_dv_id=$1
++	shift
++	agent_stream_section_dump "$_dv_id" | awk -v keys="$*" '
++		{
++			i = index($0, "=")
++			if (!i) next
++			key = substr($0, 1, i - 1)
++			gsub(/^[ \t\r\f\v]+|[ \t\r\f\v]+$/, "", key)
++			if (key in m) next
++			val = substr($0, i + 1)
++			sub(/^[ \t\r\f\v]+/, "", val)
++			sub(/[ \t\r\f\v]+$/, "", val)
++			gsub(/["\r]/, "", val)
++			m[key] = val
++		}
++		END {
++			n = split(keys, want, " ")
++			for (k = 1; k <= n; k++) {
++				if (want[k] ~ /^upper:/) print toupper(m[substr(want[k], 7)])
++				else print m[want[k]]
++			}
++		}'
+ }
+ 
+ agent_print_stream_runtime() {
+ 	stream_id=$1
+ 	enabled=$(agent_stream_enabled "$stream_id")
+-	rtsp_listener_up=$(agent_rtsp_listening)
+-	healthy=$(agent_stream_healthy "$stream_id")
++	_rs_fields=$(agent_stream_dump_values "$stream_id" \
++		width height fps bitrate upper:codec upper:rc_mode)
++	{
++		read -r _rs_w
++		read -r _rs_h
++		read -r _rs_fps
++		read -r _rs_bitrate
++		read -r _rs_codec
++		read -r _rs_mode
++	} <<-EOF
++	$_rs_fields
++	EOF
++	# A key the dump does not carry: a direct get, as agent_stream_field does.
++	[ -n "$_rs_w" ] || _rs_w=$(agent_config_get "stream$stream_id" width)
++	[ -n "$_rs_h" ] || _rs_h=$(agent_config_get "stream$stream_id" height)
++	[ -n "$_rs_fps" ] || _rs_fps=$(agent_config_get "stream$stream_id" fps)
++	[ -n "$_rs_bitrate" ] || _rs_bitrate=$(agent_config_get "stream$stream_id" bitrate)
++	[ -n "$_rs_codec" ] || _rs_codec=$(agent_config_get "stream$stream_id" codec | tr 'a-z' 'A-Z')
++	[ -n "$_rs_mode" ] || _rs_mode=$(agent_config_get "stream$stream_id" rc_mode | tr 'a-z' 'A-Z')
++	[ "$_rs_mode" = CAPPED ] && _rs_mode=CAPPED_VBR
++	endpoint=$(agent_rtsp_endpoint "$stream_id")
++	rtsp_url=
++	[ -n "$_rt_ip" ] && [ -n "$endpoint" ] &&
++		rtsp_url="$_rt_scheme://$_rt_ip:$_rt_port/$endpoint"
++	recording=false
++	[ "$_rt_recording" = true ] && [ "$_rt_record_channel" = "$stream_id" ] && recording=true
++	healthy=false
++	[ "$_rt_running" = true ] && [ "$enabled" = true ] && healthy=true
+ 	printf '{'
+ 	printf '"id":%s,' "$stream_id"
+ 	printf '"enabled":%s,' "$enabled"
+ 	printf '"video_enabled":%s,' "$enabled"
+-	printf '"audio_enabled":%s,' "$(agent_stream_audio_enabled)"
+-	printf '"width":%s,' "$(agent_json_value_or "$(agent_stream_field "$stream_id" width)" null)"
+-	printf '"height":%s,' "$(agent_json_value_or "$(agent_stream_field "$stream_id" height)" null)"
+-	printf '"fps":%s,' "$(agent_json_value_or "$(agent_stream_field "$stream_id" fps)" null)"
+-	printf '"bitrate":%s,' "$(agent_json_value_or "$(agent_stream_field "$stream_id" bitrate)" null)"
+-	printf '"format":%s,' "$(agent_json_string_or_null "$(agent_stream_format "$stream_id")")"
+-	printf '"mode":%s,' "$(agent_json_string_or_null "$(agent_stream_mode "$stream_id")")"
+-	printf '"rtsp_endpoint":%s,' "$(agent_json_string_or_null "$(agent_rtsp_endpoint "$stream_id")")"
+-	printf '"rtsp_name":%s,' "$(agent_json_string_or_null "$(agent_rtsp_endpoint "$stream_id")")"
+-	printf '"rtsp_url":%s,' "$(agent_json_string_or_null "$(agent_stream_rtsp_url "$stream_id")")"
+-	printf '"rtsp_listener_up":%s,' "$(agent_json_bool "$rtsp_listener_up")"
+-	printf '"recording_active":%s,' "$(agent_json_bool "$(agent_stream_recording_active "$stream_id")")"
+-	printf '"healthy":%s' "$(agent_json_bool "$healthy")"
++	printf '"audio_enabled":%s,' "$_rt_audio"
++	printf '"width":%s,' "${_rs_w:-null}"
++	printf '"height":%s,' "${_rs_h:-null}"
++	printf '"fps":%s,' "${_rs_fps:-null}"
++	printf '"bitrate":%s,' "${_rs_bitrate:-null}"
++	printf '"format":%s,' "$(agent_json_string_or_null "$_rs_codec")"
++	printf '"mode":%s,' "$(agent_json_string_or_null "$_rs_mode")"
++	printf '"rtsp_endpoint":%s,' "$(agent_json_string_or_null "$endpoint")"
++	printf '"rtsp_name":%s,' "$(agent_json_string_or_null "$endpoint")"
++	printf '"rtsp_url":%s,' "$(agent_json_string_or_null "$rtsp_url")"
++	printf '"rtsp_listener_up":%s,' "$(agent_json_bool "$_rt_listening")"
++	printf '"recording_active":%s,' "$recording"
++	printf '"healthy":%s' "$healthy"
+ 	printf '}'
+ }
+ 
+@@ -2052,7 +2540,11 @@ agent_get_events() {
+ # Infinity6C) has no on-camera motion at all.
+ agent_print_motion_capabilities() {
+ 	if agent_isp_has ivs; then _m=true; else _m=false; fi
+-	printf '{"enabled":%s,"sensitivity":%s,"cooldown_time":%s}' "$_m" "$_m" "$_m"
++	printf '{"enabled":%s,"sensitivity":%s,"cooldown_time":%s' "$_m" "$_m" "$_m"
++	if [ "$_m" = true ]; then
++		printf ',"algorithms":%s,"models":%s' "$(agent_motion_algorithms)" "$(agent_motion_models)"
++	fi
++	printf '}'
+ }
+ 
+ agent_get_capabilities() {
+@@ -2161,6 +2653,7 @@ agent_get_runtime() {
+ 			printf '"recording":%s,' "$(agent_print_runtime_recording)"
+ 			printf '"firmware":%s,' "$(agent_print_runtime_firmware)"
+ 			printf '"services":{"streaming":%s},' "$(agent_print_runtime_streaming_service)"
++			agent_stream_runtime_shared_load
+ 			printf '"streams":['
+ 			agent_print_stream_runtime 0
+ 			printf ','
+@@ -2179,6 +2672,10 @@ agent_get_runtime() {
+ 		motion)
+ 			printf '{"enabled":%s,"active":%s}\n' "$(agent_motion_enabled)" "$(agent_motion_active)"
+ 			;;
++		detections)
++			agent_print_runtime_detections
++			printf '\n'
++			;;
+ 		daynight)
+ 			printf '{"enabled":%s,"target_mode":%s,"running_mode":%s}\n' \
+ 				"$(agent_daynight_enabled)" \
+@@ -2208,11 +2705,32 @@ agent_get_runtime() {
+ 			agent_print_runtime_exposure
+ 			printf '\n'
+ 			;;
++		endpoints)
++			# Only the streams' RTSP URLs, for the preview's link list:
++			# runtime all builds eight more blocks around them.
++			_ep_ip=$(agent_network_ip)
++			_ep_scheme=$(agent_rtsp_scheme)
++			_ep_port=$(agent_rtsp_port)
++			printf '{"streams":['
++			for _ep_id in 0 1; do
++				_ep_name=$(agent_rtsp_endpoint "$_ep_id")
++				_ep_url=
++				[ -n "$_ep_ip" ] && [ -n "$_ep_name" ] &&
++					_ep_url="$_ep_scheme://$_ep_ip:$_ep_port/$_ep_name"
++				[ "$_ep_id" = 0 ] || printf ','
++				printf '{"id":%s,"rtsp_endpoint":%s,"rtsp_url":%s}' "$_ep_id" \
++					"$(agent_json_string_or_null "$_ep_name")" \
++					"$(agent_json_string_or_null "$_ep_url")"
++			done
++			printf ']}\n'
++			;;
+ 		streams/0)
++			agent_stream_runtime_shared_load
+ 			agent_print_stream_runtime 0
+ 			printf '\n'
+ 			;;
+ 		streams/1)
++			agent_stream_runtime_shared_load
+ 			agent_print_stream_runtime 1
+ 			printf '\n'
+ 			;;
+@@ -2279,24 +2797,33 @@ agent_get_runtime() {
+ agent_get_config() {
+ 	command -v raptorctl >/dev/null 2>&1 &&
+ 		agent_config_preload sensor motion ircut recording audio rtsp \
+-			stream0 stream1 osd osd.logo osd.timestamp osd.uptime osd.camera
++			stream0 stream1 osd osd.logo osd.timestamp osd.uptime osd.camera image jpeg
+ 	agent_print_config
+ }
+ 
+ agent_print_config() {
+-	printf '{'
+-	printf '"image":{'
+-	printf '"brightness":%s,' "$(agent_json_value_or "$(agent_image_raw brightness)" null)"
+-	printf '"contrast":%s,' "$(agent_json_value_or "$(agent_image_raw contrast)" null)"
+-	printf '"saturation":%s,' "$(agent_json_value_or "$(agent_image_raw saturation)" null)"
+-	printf '"sharpness":%s,' "$(agent_image_knob sharpness sharpness)"
+-	printf '"noise_reduction":%s,' "$(agent_image_knob sinter sinter)"
+-	printf '"temporal_noise_reduction":%s,' "$(agent_image_knob temper temper)"
+-	printf '"drc_strength":%s,' "$(agent_image_knob drc drc_strength)"
+-	printf '"defog_strength":%s,' "$(agent_image_knob defog defog_strength)"
+-	printf '"anti_flicker":%s,' "$(agent_json_value_or "$(agent_config_get sensor antiflicker)" null)"
+-	printf '"ae_compensation":%s,' "$(agent_image_knob ae_comp ae_comp)"
+-	if agent_isp_has wb; then
++	printf '{"image":{'
++	agent_image_val brightness
++	printf '"brightness":%s,' "${_cv:-null}"
++	agent_image_val contrast
++	printf '"contrast":%s,' "${_cv:-null}"
++	agent_image_val saturation
++	printf '"saturation":%s,' "${_cv:-null}"
++	agent_knob_val sharpness sharpness
++	printf '"sharpness":%s,' "$_cv"
++	agent_knob_val sinter sinter
++	printf '"noise_reduction":%s,' "$_cv"
++	agent_knob_val temper temper
++	printf '"temporal_noise_reduction":%s,' "$_cv"
++	agent_knob_val drc drc_strength
++	printf '"drc_strength":%s,' "$_cv"
++	agent_knob_val defog defog_strength
++	printf '"defog_strength":%s,' "$_cv"
++	agent_cfg sensor antiflicker
++	printf '"anti_flicker":%s,' "${_cv:-null}"
++	agent_knob_val ae_comp ae_comp
++	printf '"ae_compensation":%s,' "$_cv"
++	if agent_isp_has_once wb; then
+ 		printf '"core_wb_mode":%s,' "$(agent_json_value_or "$(agent_wb_mode_to_int "$(agent_wb_mode_raw)")" null)"
+ 		printf '"wb_rgain":%s,' "$(agent_json_value_or "$(agent_wb_gain_raw r)" null)"
+ 		printf '"wb_bgain":%s,' "$(agent_json_value_or "$(agent_wb_gain_raw b)" null)"
+@@ -2305,32 +2832,60 @@ agent_print_config() {
+ 	fi
+ 	# hflip/vflip are the sensor's state; *_saved is raptor.conf's, which a
+ 	# camera that flips only at pipeline build applies at the next restart.
+-	printf '"hflip":%s,' "$(agent_image_bool hflip)"
+-	printf '"vflip":%s,' "$(agent_image_bool vflip)"
+-	printf '"hflip_saved":%s,' "$(agent_bool01_to_json "$(agent_config_get image hflip)" false)"
+-	printf '"vflip_saved":%s' "$(agent_bool01_to_json "$(agent_config_get image vflip)" false)"
++	agent_image_val hflip
++	agent_bool_val "$_cv" false
++	printf '"hflip":%s,' "$_cv"
++	agent_image_val vflip
++	agent_bool_val "$_cv" false
++	printf '"vflip":%s,' "$_cv"
++	agent_cfg_bool image hflip false
++	printf '"hflip_saved":%s,' "$_cv"
++	agent_cfg_bool image vflip false
++	printf '"vflip_saved":%s},' "$_cv"
++	printf '"motion":{'
++	agent_print_motion_fields
+ 	printf '},'
+-	printf '"motion":{"enabled":%s},' "$(agent_motion_enabled)"
+-	printf '"daynight":{"enabled":%s,"force_mode":%s},' \
+-		"$(agent_daynight_enabled)" "$(agent_daynight_force_mode)"
++	if agent_has_daynightd; then
++		printf '"daynight":{"enabled":%s,"force_mode":%s},' \
++			"$(agent_daynight_enabled)" "$(agent_daynight_force_mode)"
++	else
++		# agent_daynight_enabled and agent_daynight_force_mode, from one read.
++		agent_cfg ircut mode
++		case "$_cv" in
++			'' | [Aa][Uu][Tt][Oo]) printf '"daynight":{"enabled":true,"force_mode":null},' ;;
++			[Dd][Aa][Yy]) printf '"daynight":{"enabled":false,"force_mode":"day"},' ;;
++			[Nn][Ii][Gg][Hh][Tt]) printf '"daynight":{"enabled":false,"force_mode":"night"},' ;;
++			*) printf '"daynight":{"enabled":false,"force_mode":null},' ;;
++		esac
++	fi
+ 	printf '"privacy":{"enabled":%s,"channel":"all"},' "$(agent_privacy_enabled)"
+-	printf '"storage":{'
+-	printf '"autostart":%s,' "$(agent_config_bool recording enabled false)"
+-	printf '"channel":%s,' "$(agent_json_value_or "$(agent_config_get recording stream)" null)"
+-	printf '"device_path":%s,' "$(agent_json_string_or_null "$(agent_storage_path)")"
+-	printf '"duration":%s,' "$(agent_json_value_or "$(agent_config_get recording clip_length_sec)" null)"
+-	printf '"filename":null,'
+-	printf '"mount":%s' "$(agent_json_string_or_null "$(agent_storage_mount)")"
+-	printf '},'
++	agent_cfg_bool recording enabled false
++	printf '"storage":{"autostart":%s,' "$_cv"
++	agent_cfg recording stream
++	printf '"channel":%s,' "${_cv:-null}"
++	agent_cfg recording storage_path
++	_pc_path=${_cv:-/mnt/mmcblk0p1/raptor}
++	agent_jstr "$_pc_path"
++	printf '"device_path":%s,' "$_js"
++	agent_cfg recording clip_length_sec
++	printf '"duration":%s,"filename":null,' "${_cv:-null}"
++	# The mount point, as agent_storage_mount: /mnt/<first component>.
++	case "$_pc_path" in
++		/mnt/*)
++			_pc_mount=${_pc_path#/mnt/}
++			_pc_mount="/mnt/${_pc_mount%%/*}"
++			;;
++		*) _pc_mount=$_pc_path ;;
++	esac
++	agent_jstr "$_pc_mount"
++	printf '"mount":%s},' "$_js"
+ 	printf '"streams":['
+ 	agent_print_stream_config 0
+ 	printf ','
+ 	agent_print_stream_config 1
+ 	printf '],'
+-	printf '"backend":{"name":"raptor","raw":{'
+-	printf '"config_path":%s' "$(agent_json_string "$AGENT_CONFIG")"
+-	printf '}}'
+-	printf '}\n'
++	agent_jstr "$AGENT_CONFIG"
++	printf '"backend":{"name":"raptor","raw":{"config_path":%s}}}\n' "$_js"
+ }
+ 
+ agent_setting_value() {
+@@ -2638,6 +3193,7 @@ agent_osd_ensure_section() {
+ 	case "$section" in
+ 		osd.timestamp | osd.uptime | osd.camera | osd.privacy) required='type template position' ;;
+ 		osd.logo) required='type path width height position' ;;
++		osd.detect) required='type position sub_only' ;;
+ 		*) return 0 ;;
+ 	esac
+ 	section_dump=$(raptorctl config get "$section" 2>/dev/null || true)
+@@ -2662,6 +3218,10 @@ agent_osd_ensure_section() {
+ 		osd.logo)
+ 			set -- type image visible false path /usr/share/images/thingino_100x30.bgra width 100 height 30 position bottom_right
+ 			;;
++		osd.detect)
++			# What rod adds by itself: an overlay over the whole sub stream.
++			set -- type overlay visible true position 0,0 sub_only true
++			;;
+ 	esac
+ 	osd_section=$section
+ 	while [ $# -ge 2 ]; do
+@@ -3009,6 +3569,9 @@ agent_get_setting() {
+ 		audio/spk-gain)
+ 			agent_print_setting_leaf spk_gain "$(agent_audio_int ao_gain null)"
+ 			;;
++		motion)
++			agent_print_motion_settings
++			;;
+ 		motion/enabled)
+ 			agent_print_setting_leaf enabled "$(agent_motion_enabled)"
+ 			;;
+@@ -3018,6 +3581,29 @@ agent_get_setting() {
+ 		motion/cooldown-time)
+ 			agent_print_setting_leaf cooldown_time "$(agent_json_value_or "$(agent_config_get motion cooldown_sec)" null)"
+ 			;;
++		motion/algorithm)
++			value=$(agent_config_get motion algorithm)
++			agent_print_setting_leaf algorithm "$(agent_json_string "${value:-move}")"
++			;;
++		motion/model)
++			value=$(agent_config_get motion model)
++			agent_print_setting_leaf model "$(agent_json_string "${value:-/usr/share/models/magik_model_yolov5.bin}")"
++			;;
++		motion/num-classes)
++			agent_print_setting_leaf num_classes "$(agent_json_value_or "$(agent_config_get motion num_classes)" 4)"
++			;;
++		motion/conf-threshold)
++			agent_print_setting_leaf conf_threshold "$(agent_json_value_or "$(agent_config_get motion conf_threshold)" 40)"
++			;;
++		motion/nms-threshold)
++			agent_print_setting_leaf nms_threshold "$(agent_json_value_or "$(agent_config_get motion nms_threshold)" 50)"
++			;;
++		motion/draw-boxes)
++			agent_print_setting_leaf draw_boxes "$(agent_motion_draw_boxes)"
++			;;
++		motion/labels)
++			agent_print_setting_leaf labels "$(agent_motion_labels)"
++			;;
+ 		motion/outputs/send2/*)
+ 			service=${path#motion/outputs/send2/}
+ 			agent_send2_service_supported "$service" || return 1
+@@ -3440,7 +4026,72 @@ agent_set_setting() {
+ 			agent_validate_int "$value" || return 1
+ 			agent_config_set motion cooldown_sec "$value" || return 1
+ 			agent_config_save
+-			agent_print_setting_update "$path" cooldown_time "$value"
++			# File only: rmd has no live cooldown command.
++			agent_print_setting_restart "$path" cooldown_time "$value"
++			;;
++		motion/algorithm)
++			value=$(agent_setting_value "$body_file" algorithm) || return 1
++			value=$(agent_unquote_string "$value")
++			case "$value" in
++				'' | *[!a-z_]*)
++					echo "unknown algorithm" >&2
++					return 1
++					;;
++			esac
++			case "$(agent_motion_algorithms)" in
++				*"\"$value\""*) ;;
++				*)
++					echo "algorithm '$value' is not installed on this camera" >&2
++					return 1
++					;;
++			esac
++			agent_config_set motion algorithm "$value" || return 1
++			agent_config_save
++			# rvd picks its detection backend when it starts.
++			agent_print_setting_restart "$path" algorithm "$(agent_json_string "$value")"
++			;;
++		motion/model)
++			value=$(agent_setting_value "$body_file" model) || return 1
++			value=$(agent_unquote_string "$value")
++			case "$value" in
++				/*) ;;
++				*)
++					echo "model must be an absolute path" >&2
++					return 1
++					;;
++			esac
++			case "$value" in
++				*[!A-Za-z0-9_./-]*)
++					echo "model path has characters that are not allowed" >&2
++					return 1
++					;;
++			esac
++			[ -f "$value" ] || {
++				echo "no such model file" >&2
++				return 1
++			}
++			agent_config_set motion model "$value" || return 1
++			agent_config_save
++			agent_print_setting_restart "$path" model "$(agent_json_string "$value")"
++			;;
++		motion/num-classes)
++			agent_set_motion_int "$path" "$body_file" num_classes num_classes 1 80
++			;;
++		motion/conf-threshold)
++			agent_set_motion_int "$path" "$body_file" conf_threshold conf_threshold 1 99
++			;;
++		motion/nms-threshold)
++			agent_set_motion_int "$path" "$body_file" nms_threshold nms_threshold 1 99
++			;;
++		motion/draw-boxes)
++			value=$(agent_setting_value "$body_file" draw_boxes) || return 1
++			agent_validate_bool "$value" || return 1
++			if ! agent_isp_has ivs; then
++				echo "detection is not supported on this camera" >&2
++				return 1
++			fi
++			agent_motion_set_draw_boxes "$value" || return 1
++			agent_print_setting_update "$path" draw_boxes "$value"
+ 			;;
+ 		motion/outputs/send2/*)
+ 			service=${path#motion/outputs/send2/}
+@@ -3563,7 +4214,8 @@ agent_set_setting() {
+ 			agent_validate_bool "$value" || return 1
+ 			agent_config_set audio enabled "$value" || return 1
+ 			agent_config_save
+-			agent_print_setting_update "$path" audio_enabled "$value"
++			# File only: [audio] enabled decides whether S31raptor starts rad.
++			agent_print_setting_restart "$path" audio_enabled "$value"
+ 			;;
+ 		streams/[01]/width | streams/[01]/height | streams/[01]/fps | streams/[01]/bitrate | streams/[01]/gop)
+ 			# One field at a time still goes through the whole-stream apply: the
+@@ -3584,7 +4236,7 @@ agent_set_setting() {
+ 			# Raptor maps buffers onto encoder VBS count; takes effect after streamer restart.
+ 			agent_config_set "$(agent_stream_section "$stream_id")" nr_vbs "$value" || return 1
+ 			agent_config_save
+-			agent_print_setting_update "$path" buffers "$value"
++			agent_print_setting_restart "$path" buffers "$value"
+ 			;;
+ 		streams/[01]/profile)
+ 			stream_id=${path#streams/}
+@@ -3615,7 +4267,8 @@ agent_set_setting() {
+ 			esac
+ 			agent_config_set rtsp "$key" "$value" || return 1
+ 			agent_config_save
+-			agent_print_setting_update "$path" rtsp_endpoint "$(agent_json_string "$value")"
++			# File only: rsd reads its endpoints at start.
++			agent_print_setting_restart "$path" rtsp_endpoint "$(agent_json_string "$value")"
+ 			;;
+ 		streams/[01]/format)
+ 			stream_id=${path#streams/}
+-- 
+2.43.0
+

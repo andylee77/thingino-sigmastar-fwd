@@ -1,0 +1,1150 @@
+From b1f6df00720a0e166e5191ca7c850efbebf7a7db Mon Sep 17 00:00:00 2001
+From: Andy <andylee77@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 20:05:17 -0500
+Subject: [PATCH 2/2] raptor: a detection settings page and a labelled preview
+ overlay
+
+raptor's IVS detection could be set in raptor.conf alone, and what it found
+showed only as rod's unlabelled boxes in the sub stream.
+
+- config-detect.html (Settings > Detection), installed with the IVS build
+  option: on and off, the method (the ones whose libraries the image has),
+  sensitivity and cooldown, and for a model its file, class count, confidence
+  and overlap. A save writes only what changed; when the camera stages a
+  setting for a restart, the page offers it. With no model on the camera the
+  page says so.
+- The preview gets a Detections button: boxes with the class name and score
+  over the picture, for the viewer alone, fed by json-detect.cgi as one
+  server-sent event stream while it is on; no boxes are drawn over a player
+  without a picture.
+- detect-overlay.js draws for both detectors: thingino-ipud's overlay was the
+  same code, so preview-ipud.js now only feeds it from its own event stream.
+  Same button, same remembered choice.
+
+The overlay and its feed have run on an Ingenic T31 camera with detection
+on, the boxes following at a median of 360 ms; the page scripts pass a host
+test of 46 checks. The two raptor patches that let rod's boxes reach the sub
+stream at all are 0112 and 0113 of the Thingino series.
+---
+ package/thingino-ipud/files/ipud.webui.json   |   3 +-
+ .../thingino-ipud/files/www/a/preview-ipud.js | 181 ++----------
+ .../files/raptor-detect.webui.json            |  28 ++
+ .../files/www/a/config-detect.js              | 272 ++++++++++++++++++
+ .../files/www/a/detect-overlay.js             | 211 ++++++++++++++
+ .../files/www/a/preview-detect.js             |  97 +++++++
+ .../files/www/config-detect.html              | 146 ++++++++++
+ .../files/www/x/json-detect.cgi               |  40 +++
+ package/thingino-raptor/thingino-raptor.mk    |  18 ++
+ 9 files changed, 844 insertions(+), 152 deletions(-)
+ create mode 100644 package/thingino-raptor/files/raptor-detect.webui.json
+ create mode 100644 package/thingino-raptor/files/www/a/config-detect.js
+ create mode 100644 package/thingino-raptor/files/www/a/detect-overlay.js
+ create mode 100644 package/thingino-raptor/files/www/a/preview-detect.js
+ create mode 100644 package/thingino-raptor/files/www/config-detect.html
+ create mode 100755 package/thingino-raptor/files/www/x/json-detect.cgi
+
+diff --git a/package/thingino-ipud/files/ipud.webui.json b/package/thingino-ipud/files/ipud.webui.json
+index 7e09f5401..fbd2abd61 100644
+--- a/package/thingino-ipud/files/ipud.webui.json
++++ b/package/thingino-ipud/files/ipud.webui.json
+@@ -5,7 +5,7 @@
+   "nav": [
+     {
+       "section": "ddSettings",
+-      "position": "append",
++      "position": "after:Admin profile",
+       "items": [
+         {
+           "label": "Object detection",
+@@ -18,6 +18,7 @@
+   "styles": [],
+   "preview": {
+     "scripts": [
++      "/a/detect-overlay.js",
+       "/a/preview-ipud.js"
+     ],
+     "html": "<canvas id=\"ipud-overlay\" class=\"position-absolute\" style=\"display:none;pointer-events:none\"></canvas>"
+diff --git a/package/thingino-ipud/files/www/a/preview-ipud.js b/package/thingino-ipud/files/www/a/preview-ipud.js
+index 200d4ba30..9b5cb0fe7 100644
+--- a/package/thingino-ipud/files/www/a/preview-ipud.js
++++ b/package/thingino-ipud/files/www/a/preview-ipud.js
+@@ -3,19 +3,14 @@
+  * the live preview while ipud runs.
+  *
+  * ipud's boxes are normalised to the full frame (its SCL port scales the whole
+- * sensor image), which is what the preview shows, so a box maps onto the
+- * picture by the picture's displayed rectangle alone. The picture is the media
+- * element that shares the canvas's wrapper: raptor's WebRTC <video> on the
+- * raptor preview, the snapshot <img id="preview"> on the plain one. A video is
+- * letterboxed inside its box (object-fit: contain), so the canvas covers the
+- * content rectangle, not the element.
++ * sensor image), which is what the preview shows, and its objects already have
++ * the shape /a/detect-overlay.js draws ({ label, score, box }); that file also
++ * owns the Detections button and the canvas.
+  *
+- * Off until the viewer turns it on with the Detections button (remembered per
+- * browser). While on, ipud pushes its detections: one server-sent event per
++ * While the button is on, ipud pushes its detections: one server-sent event per
+  * inference from /x/json-ipud.cgi?a=stream, which relays ipud's socket, so the
+- * camera runs no request per update. The stream closes while the tab is hidden
+- * and on the router's page-leave, which also removes every listener this script
+- * added, so the page can be swapped in and out.
++ * camera runs no request per update. The overlay closes the stream while the
++ * tab is hidden and on the router's page-leave.
+  *
+  * Plugin-owned file: registered via ipud.webui.json `preview.scripts`,
+  * injected into the preview page at build time.
+@@ -24,104 +19,24 @@
+   "use strict";
+ 
+   const ENDPOINT = "/x/json-ipud.cgi?a=stream";
+-  const POLL_MS = 500;
+-  const COLORS = {
+-    person: "#ff4d4d", bicycle: "#ffd24d", car: "#4da6ff",
+-    motorcycle: "#ff9f40", bus: "#4dffb8", truck: "#b84dff"
+-  };
+-
+-  const canvas = document.getElementById("ipud-overlay");
+-  if (!canvas) return;
+-
+-  let timer = null;
+-
+-  function media() {
+-    const wrap = canvas.parentElement;
+-    return (wrap && wrap.querySelector("video, img#preview")) ||
+-      document.getElementById("raptor-webrtc-video") || document.getElementById("preview");
+-  }
+-
+-  // The displayed picture inside el, in el's offset coordinates.
+-  function contentRect(el) {
+-    const w = el.clientWidth;
+-    const h = el.clientHeight;
+-    const nw = el.videoWidth || el.naturalWidth || w;
+-    const nh = el.videoHeight || el.naturalHeight || h;
+-    if (!w || !h || !nw || !nh) return null;
+-    const s = Math.min(w / nw, h / nh);
+-    const dw = nw * s;
+-    const dh = nh * s;
+-    return { x: el.offsetLeft + (w - dw) / 2, y: el.offsetTop + (h - dh) / 2, w: dw, h: dh };
+-  }
+-
+-  function place() {
+-    const el = media();
+-    const r = el && contentRect(el);
+-    if (!r) return false;
+-    canvas.style.left = r.x + "px";
+-    canvas.style.top = r.y + "px";
+-    canvas.style.width = r.w + "px";
+-    canvas.style.height = r.h + "px";
+-    const cw = Math.round(r.w);
+-    const ch = Math.round(r.h);
+-    if (canvas.width !== cw) canvas.width = cw;
+-    if (canvas.height !== ch) canvas.height = ch;
+-    return true;
+-  }
+-
+-  function draw(status) {
+-    if (!status || !status.running || !place()) {
+-      canvas.style.display = "none";
+-      return;
+-    }
+-    canvas.style.display = "";
+-    const ctx = canvas.getContext("2d");
+-    const w = canvas.width;
+-    const h = canvas.height;
+-    ctx.clearRect(0, 0, w, h);
+-    ctx.lineWidth = 2;
+-    ctx.font = "12px sans-serif";
+-    (status.objects || []).forEach((o) => {
+-      const [x0, y0, x1, y1] = o.box;
+-      const color = COLORS[o.label] || "#ffd24d";
+-      ctx.strokeStyle = color;
+-      ctx.strokeRect(x0 * w, y0 * h, (x1 - x0) * w, (y1 - y0) * h);
+-      const text = `${o.label} ${Math.round(o.score * 100)}%`;
+-      const tw = ctx.measureText(text).width + 6;
+-      ctx.fillStyle = color;
+-      ctx.fillRect(x0 * w, Math.max(0, y0 * h - 16), tw, 16);
+-      ctx.fillStyle = "#000";
+-      ctx.fillText(text, x0 * w + 3, Math.max(12, y0 * h - 4));
+-    });
+-  }
+-
+   // While ipud does not run the stream answers {"running":false} and ends;
+   // ask again after this long rather than at EventSource's own retry.
+-  const DOWN_RETRY_MS = 30 * POLL_MS;
+-  const STORE_KEY = "thingino.ipudOverlay";
+-  let source = null;
++  const DOWN_RETRY_MS = 15000;
+ 
+-  function enabled() {
+-    try {
+-      return localStorage.getItem(STORE_KEY) === "1";
+-    } catch (e) {
+-      return false;
+-    }
+-  }
++  if (!window.thinginoDetectOverlay) return;
++
++  let source = null;
++  let timer = null;
+ 
+-  function setEnabled(on) {
+-    try {
+-      if (on) localStorage.setItem(STORE_KEY, "1");
+-      else localStorage.removeItem(STORE_KEY);
+-    } catch (e) {
+-      /* no storage: the button still works for this page */
+-    }
++  function shut() {
++    if (source) source.close();
++    source = null;
+   }
+ 
+   function open() {
+     clearTimeout(timer);
+     timer = null;
+-    if (source || !enabled() || document.hidden) return;
++    if (source) return;
+     source = new EventSource(ENDPOINT);
+     source.onmessage = (ev) => {
+       let status = null;
+@@ -131,62 +46,26 @@
+         return;
+       }
+       if (status.running === false) {
+-        close();
++        shut();
++        overlay.draw(null);
+         timer = setTimeout(open, DOWN_RETRY_MS);
+         return;
+       }
+-      status.running = true;
+-      draw(status);
++      overlay.draw(status.objects || []);
+     };
+-    source.onerror = () => draw(null);
+-  }
+-
+-  function close() {
+-    if (source) source.close();
+-    source = null;
+-    draw(null);
+-  }
+-
+-  const button = document.createElement("button");
+-  button.type = "button";
+-  button.id = "ipud-overlay-toggle";
+-  button.className = "btn btn-outline-secondary";
+-  button.title = "Show the IPU's detections over the picture";
+-  button.innerHTML = '<i class="bi bi-bounding-box"></i> Detections';
+-
+-  function render() {
+-    const on = enabled();
+-    button.classList.toggle("active", on);
+-    button.setAttribute("aria-pressed", String(on));
++    source.onerror = () => overlay.draw(null);
+   }
+ 
+-  button.addEventListener("click", () => {
+-    setEnabled(!enabled());
+-    render();
+-    if (enabled()) open();
+-    else close();
++  const overlay = window.thinginoDetectOverlay.create({
++    canvasId: "ipud-overlay",
++    buttonId: "ipud-overlay-toggle",
++    storeKey: "thingino.ipudOverlay",
++    title: "Show the IPU's detections over the picture",
++    start: open,
++    stop() {
++      clearTimeout(timer);
++      timer = null;
++      shut();
++    },
+   });
+-
+-  const bar = document.querySelector(".preview-header-actions");
+-  if (bar) bar.appendChild(button);
+-  else if (canvas.parentElement) canvas.parentElement.insertAdjacentElement("beforebegin", button);
+-
+-  function onVisibility() {
+-    if (document.hidden) close();
+-    else open();
+-  }
+-
+-  function leave() {
+-    clearTimeout(timer);
+-    timer = null;
+-    close();
+-    document.removeEventListener("visibilitychange", onVisibility);
+-    window.removeEventListener("resize", place);
+-  }
+-
+-  document.addEventListener("visibilitychange", onVisibility);
+-  document.addEventListener("thingino:page-leave", leave, { once: true });
+-  window.addEventListener("resize", place);
+-  render();
+-  open();
+ })();
+diff --git a/package/thingino-raptor/files/raptor-detect.webui.json b/package/thingino-raptor/files/raptor-detect.webui.json
+new file mode 100644
+index 000000000..004cf1be4
+--- /dev/null
++++ b/package/thingino-raptor/files/raptor-detect.webui.json
+@@ -0,0 +1,28 @@
++{
++  "name": "raptor-detect",
++  "label": "Raptor IVS detection",
++  "apiVersion": 1,
++  "nav": [
++    {
++      "section": "ddSettings",
++      "position": "after:Privacy",
++      "items": [
++        {
++          "label": "Detection",
++          "href": "/config-detect.html"
++        }
++      ]
++    }
++  ],
++  "scripts": [],
++  "styles": [],
++  "preview": {
++    "scripts": ["/a/detect-overlay.js", "/a/preview-detect.js"],
++    "html": "<canvas id=\"detect-overlay\" class=\"position-absolute\" style=\"display:none;pointer-events:none\"></canvas>"
++  },
++  "featureFlags": {
++    "detect": true
++  },
++  "pages": ["/config-detect.html"],
++  "cgi": ["/x/json-detect.cgi"]
++}
+diff --git a/package/thingino-raptor/files/www/a/config-detect.js b/package/thingino-raptor/files/www/a/config-detect.js
+new file mode 100644
+index 000000000..1e6931c93
+--- /dev/null
++++ b/package/thingino-raptor/files/www/a/config-detect.js
+@@ -0,0 +1,272 @@
++/**
++ * Settings and status page for raptor's detection (rvd's IVS: the SDK's
++ * motion grid, the vendor's person detector, a JZDL model).
++ *
++ * One read of the agent's settings/motion gives everything the page shows:
++ * whether this camera can detect at all, the methods whose libraries are
++ * installed, the model files on the camera, the saved values and the class
++ * names. A save writes only what changed, one setting at a time; the camera
++ * says for each whether it applied at once or waits for a restart of the
++ * video, and the page offers that restart.
++ *
++ * The status line follows /x/json-detect.cgi, the same pushed feed the preview
++ * overlay draws from, while the tab is visible.
++ */
++(function () {
++  "use strict";
++
++  const SETTING = "/api/v1/settings/motion";
++  const FEED = "/x/json-detect.cgi";
++  const DOWN_RETRY_MS = 10000;
++
++  // field -> [agent leaf, kind]; saved in this order, so detection is turned
++  // on only after what it runs with is written.
++  const FIELDS = {
++    algorithm: ["algorithm", "text"],
++    model: ["model", "text"],
++    num_classes: ["num-classes", "int"],
++    conf_threshold: ["conf-threshold", "int"],
++    nms_threshold: ["nms-threshold", "int"],
++    sensitivity: ["sensitivity", "int"],
++    cooldown_time: ["cooldown-time", "int"],
++    draw_boxes: ["draw-boxes", "bool"],
++    enabled: ["enabled", "bool"],
++  };
++  const MODEL_FIELDS = [
++    "model",
++    "num_classes",
++    "conf_threshold",
++    "nms_threshold",
++  ];
++  const METHODS = {
++    move: ["Motion", "Any movement, on a grid over the picture."],
++    base_move: ["Motion (basic)", "The SDK's simpler movement check."],
++    persondet: ["People", "The vendor's person detector."],
++    yolo: [
++      "Objects (model)",
++      "The classes of a model. Without a neural accelerator in the SoC this takes most of the CPU.",
++    ],
++  };
++
++  const $id = (id) => document.getElementById(id);
++  const el = (k) => $id("detect_" + k);
++  const saveBtn = $id("detect-save");
++  const restartBtn = $id("detect-restart");
++  const loaded = {};
++  let models = [];
++  let labels = [];
++  let source = null;
++  let timer = null;
++  let gone = false;
++
++  function notify(type, message) {
++    if (window.showAlert) window.showAlert(type, message, 6000);
++    else alert(message);
++  }
++
++  function fieldValue(k) {
++    const n = el(k);
++    const kind = FIELDS[k][1];
++    if (kind === "bool") return n.checked;
++    if (kind === "int") {
++      const v = n.value.trim();
++      return /^\d+$/.test(v) ? Number(v) : null;
++    }
++    return n.value || null;
++  }
++
++  function show(k, v) {
++    const n = el(k);
++    if (FIELDS[k][1] === "bool") n.checked = v === true;
++    else n.value = v === null || v === undefined ? "" : v;
++  }
++
++  function fillSelect(n, values, text) {
++    n.textContent = "";
++    values.forEach((v) => {
++      const o = document.createElement("option");
++      o.value = v;
++      o.textContent = text(v);
++      n.appendChild(o);
++    });
++  }
++
++  // The model settings matter to the model method only; without a model file
++  // on the camera that method cannot run, and the page says so.
++  function refreshMethod() {
++    const a = el("algorithm").value;
++    $id("detect-algorithm-hint").textContent = (METHODS[a] || ["", ""])[1];
++    $id("detect-model-card").classList.toggle("d-none", a !== "yolo");
++    $id("detect-no-model").classList.toggle(
++      "d-none",
++      a !== "yolo" || models.length > 0,
++    );
++  }
++
++  function lock(message) {
++    $id("detect-form").classList.add("d-none");
++    const box = $id("detect-unsupported");
++    if (message) box.textContent = message;
++    box.classList.remove("d-none");
++  }
++
++  function shut() {
++    if (source) source.close();
++    source = null;
++  }
++
++  // The status line, from the pushed feed.
++  function follow() {
++    clearTimeout(timer);
++    timer = null;
++    if (source || gone || document.hidden || typeof EventSource !== "function")
++      return;
++    source = new EventSource(FEED);
++    source.onmessage = (msg) => {
++      let ev = null;
++      try {
++        ev = JSON.parse(msg.data);
++      } catch (e) {
++        return;
++      }
++      if (ev.running === false) {
++        shut();
++        $id("detect-state").textContent = "off";
++        $id("detect-objects").textContent = "-";
++        if (!gone) timer = setTimeout(follow, DOWN_RETRY_MS);
++        return;
++      }
++      $id("detect-state").textContent = "on";
++      const seen = (ev.detections || []).map(
++        (o) =>
++          (labels[o.class] || "class " + o.class) +
++          " " +
++          Math.round(o.confidence * 100) +
++          "%",
++      );
++      $id("detect-objects").textContent = seen.length
++        ? seen.join(", ")
++        : "nothing";
++    };
++    source.onerror = () => {
++      $id("detect-state").textContent = "no answer from the camera";
++    };
++  }
++
++  async function load() {
++    let s = null;
++    try {
++      s = await agentJsonRequest(SETTING, { cache: "no-store" });
++    } catch (err) {
++      console.warn("Failed to load the detection settings", err);
++    }
++    if (!s || s.supported !== true) {
++      lock(s ? "" : "The camera did not answer. Reload the page.");
++      return;
++    }
++    models = s.models || [];
++    labels = s.labels || [];
++    fillSelect(el("algorithm"), s.algorithms || ["move"], (a) =>
++      METHODS[a] ? METHODS[a][0] : a,
++    );
++    fillSelect(el("model"), models, (m) => m.replace(/^.*\//, ""));
++    for (const k of Object.keys(FIELDS)) {
++      const v = s[k];
++      // A saved model that is no longer on the camera stays visible.
++      if (k === "model" && v && models.length && !models.includes(v)) {
++        const o = document.createElement("option");
++        o.value = v;
++        o.textContent = v.replace(/^.*\//, "") + " (missing)";
++        el(k).appendChild(o);
++      }
++      show(k, v);
++      loaded[k] = fieldValue(k);
++    }
++    refreshMethod();
++    follow();
++  }
++
++  async function save() {
++    const method = el("algorithm").value;
++    if (method === "yolo" && !models.length) {
++      notify("danger", "There is no model file on the camera for this method.");
++      return;
++    }
++    saveBtn.disabled = true;
++    let staged = false;
++    try {
++      for (const [k, [leaf]] of Object.entries(FIELDS)) {
++        const now = fieldValue(k);
++        if (now === null || now === loaded[k]) continue;
++        // The model's own settings are written only when a model is used.
++        if (MODEL_FIELDS.includes(k) && method !== "yolo") continue;
++        const res = await agentJsonRequest(SETTING + "/" + leaf, {
++          method: "PATCH",
++          body: { [k]: now },
++          cache: "no-store",
++        });
++        if (!res || res.status !== "accepted") {
++          throw new Error(k.replace(/_/g, " ") + " was rejected by the camera");
++        }
++        if ((res.restart_required || []).length) staged = true;
++        loaded[k] = now;
++      }
++      if (staged) {
++        restartBtn.classList.remove("d-none");
++        notify(
++          "warning",
++          "Saved. Restart the video to apply the new method or model.",
++        );
++      } else {
++        notify("success", "Detection settings saved.");
++      }
++    } catch (err) {
++      console.error("Failed to save the detection settings", err);
++      notify("danger", "Failed to save the detection settings: " + err.message);
++    } finally {
++      saveBtn.disabled = false;
++    }
++  }
++
++  async function restart() {
++    restartBtn.disabled = true;
++    shut();
++    try {
++      const res = await fetch("/x/restart-streamer.cgi", { cache: "no-store" });
++      const body = await res.json();
++      if (!res.ok || body.error) throw new Error("the camera refused");
++      restartBtn.classList.add("d-none");
++      notify("success", "The video restarted.");
++    } catch (err) {
++      notify("danger", "Failed to restart the video: " + err.message);
++    } finally {
++      restartBtn.disabled = false;
++      follow();
++    }
++  }
++
++  function onVisibility() {
++    if (document.hidden) {
++      clearTimeout(timer);
++      timer = null;
++      shut();
++    } else if (loaded.enabled !== undefined) {
++      follow();
++    }
++  }
++
++  function leave() {
++    gone = true;
++    clearTimeout(timer);
++    timer = null;
++    shut();
++    document.removeEventListener("visibilitychange", onVisibility);
++  }
++
++  el("algorithm").addEventListener("change", refreshMethod);
++  saveBtn.addEventListener("click", save);
++  restartBtn.addEventListener("click", restart);
++  document.addEventListener("visibilitychange", onVisibility);
++  document.addEventListener("thingino:page-leave", leave, { once: true });
++  load();
++})();
+diff --git a/package/thingino-raptor/files/www/a/detect-overlay.js b/package/thingino-raptor/files/www/a/detect-overlay.js
+new file mode 100644
+index 000000000..036cbc944
+--- /dev/null
++++ b/package/thingino-raptor/files/www/a/detect-overlay.js
+@@ -0,0 +1,211 @@
++/**
++ * The detection overlay of the preview page: a box, a label and a score for
++ * each object, drawn on a canvas over the live picture. A detector's own
++ * script feeds it; this file only draws and keeps the Detections button.
++ *
++ *   const overlay = window.thinginoDetectOverlay.create({
++ *     canvasId, buttonId, storeKey, title,
++ *     start() { ... },   // begin feeding: call overlay.draw(objects)
++ *     stop() { ... },    // stop feeding
++ *   });
++ *
++ * draw() takes a list of { label, score, box: [x0, y0, x1, y1] } with the box
++ * normalised to the frame (0..1), or null to hide the overlay. The picture is
++ * the media element that shares the canvas's wrapper: the WebRTC <video> on
++ * raptor's preview, the snapshot <img id="preview"> on the plain one. A video
++ * is letterboxed inside its box (object-fit: contain), so the canvas covers
++ * the content rectangle, not the element.
++ *
++ * Off until the viewer turns it on with the button (remembered per browser).
++ * start() runs while it is on, the tab is visible and the player has a
++ * picture; stop() when it is turned off, the tab is hidden, the player loses
++ * its picture (a disconnected stream) or the page is left (the router's
++ * thingino:page-leave), which also removes every listener added here.
++ */
++(function () {
++  "use strict";
++
++  const COLORS = {
++    person: "#ff4d4d",
++    bicycle: "#ffd24d",
++    car: "#4da6ff",
++    motorcycle: "#ff9f40",
++    bus: "#4dffb8",
++    truck: "#b84dff",
++  };
++  const OTHER = "#ffd24d";
++
++  function create(opts) {
++    const canvas = document.getElementById(opts.canvasId);
++    if (!canvas) return null;
++    let feeding = false;
++
++    function media() {
++      const wrap = canvas.parentElement;
++      return (
++        (wrap && wrap.querySelector("video, img#preview")) ||
++        document.getElementById("raptor-webrtc-video") ||
++        document.getElementById("preview")
++      );
++    }
++
++    // Whether el shows a picture now. A <video> does once it has a frame; a
++    // disconnected one (its stream taken away) has none, and boxes over an
++    // empty player would be boxes over nothing.
++    function hasPicture(el) {
++      if (!el) return false;
++      if (el.tagName === "VIDEO")
++        return el.videoWidth > 0 && el.readyState >= 2;
++      return true;
++    }
++
++    // The displayed picture inside el, in el's offset coordinates.
++    function contentRect(el) {
++      if (!hasPicture(el)) return null;
++      const w = el.clientWidth;
++      const h = el.clientHeight;
++      const nw = el.videoWidth || el.naturalWidth || w;
++      const nh = el.videoHeight || el.naturalHeight || h;
++      if (!w || !h || !nw || !nh) return null;
++      const s = Math.min(w / nw, h / nh);
++      const dw = nw * s;
++      const dh = nh * s;
++      return {
++        x: el.offsetLeft + (w - dw) / 2,
++        y: el.offsetTop + (h - dh) / 2,
++        w: dw,
++        h: dh,
++      };
++    }
++
++    function place() {
++      const el = media();
++      const r = el && contentRect(el);
++      if (!r) return false;
++      canvas.style.left = r.x + "px";
++      canvas.style.top = r.y + "px";
++      canvas.style.width = r.w + "px";
++      canvas.style.height = r.h + "px";
++      const cw = Math.round(r.w);
++      const ch = Math.round(r.h);
++      if (canvas.width !== cw) canvas.width = cw;
++      if (canvas.height !== ch) canvas.height = ch;
++      return true;
++    }
++
++    function draw(objects) {
++      if (!objects || !place()) {
++        canvas.style.display = "none";
++        return;
++      }
++      canvas.style.display = "";
++      const ctx = canvas.getContext("2d");
++      const w = canvas.width;
++      const h = canvas.height;
++      ctx.clearRect(0, 0, w, h);
++      ctx.lineWidth = 2;
++      ctx.font = "12px sans-serif";
++      objects.forEach((o) => {
++        const [x0, y0, x1, y1] = o.box;
++        const color = COLORS[o.label] || OTHER;
++        ctx.strokeStyle = color;
++        ctx.strokeRect(x0 * w, y0 * h, (x1 - x0) * w, (y1 - y0) * h);
++        const text = `${o.label} ${Math.round(o.score * 100)}%`;
++        const tw = ctx.measureText(text).width + 6;
++        ctx.fillStyle = color;
++        ctx.fillRect(x0 * w, Math.max(0, y0 * h - 16), tw, 16);
++        ctx.fillStyle = "#000";
++        ctx.fillText(text, x0 * w + 3, Math.max(12, y0 * h - 4));
++      });
++    }
++
++    function enabled() {
++      try {
++        return localStorage.getItem(opts.storeKey) === "1";
++      } catch (e) {
++        return false;
++      }
++    }
++
++    function setEnabled(on) {
++      try {
++        if (on) localStorage.setItem(opts.storeKey, "1");
++        else localStorage.removeItem(opts.storeKey);
++      } catch (e) {
++        /* no storage: the button still works for this page */
++      }
++    }
++
++    function open() {
++      if (feeding || !enabled() || document.hidden || !hasPicture(media()))
++        return;
++      feeding = true;
++      opts.start();
++    }
++
++    function close() {
++      if (feeding) opts.stop();
++      feeding = false;
++      draw(null);
++    }
++
++    const button = document.createElement("button");
++    button.type = "button";
++    button.id = opts.buttonId;
++    button.className = "btn btn-outline-secondary";
++    button.title = opts.title;
++    button.innerHTML = '<i class="bi bi-bounding-box"></i> Detections';
++
++    function render() {
++      const on = enabled();
++      button.classList.toggle("active", on);
++      button.setAttribute("aria-pressed", String(on));
++    }
++
++    button.addEventListener("click", () => {
++      setEnabled(!enabled());
++      render();
++      if (enabled()) open();
++      else close();
++    });
++
++    const bar = document.querySelector(".preview-header-actions");
++    if (bar) bar.appendChild(button);
++    else if (canvas.parentElement)
++      canvas.parentElement.insertAdjacentElement("beforebegin", button);
++
++    function onVisibility() {
++      if (document.hidden) close();
++      else open();
++    }
++
++    // The player gains or loses its picture: connect, disconnect, a stream
++    // switch. Feed only while there is one.
++    const player = media();
++    const PICTURE_EVENTS = ["loadeddata", "playing"];
++
++    function leave() {
++      close();
++      document.removeEventListener("visibilitychange", onVisibility);
++      window.removeEventListener("resize", place);
++      if (player && player.removeEventListener) {
++        PICTURE_EVENTS.forEach((t) => player.removeEventListener(t, open));
++        player.removeEventListener("emptied", close);
++      }
++    }
++
++    document.addEventListener("visibilitychange", onVisibility);
++    document.addEventListener("thingino:page-leave", leave, { once: true });
++    window.addEventListener("resize", place);
++    if (player && player.addEventListener) {
++      PICTURE_EVENTS.forEach((t) => player.addEventListener(t, open));
++      player.addEventListener("emptied", close);
++    }
++    render();
++    open();
++
++    return { draw, enabled };
++  }
++
++  window.thinginoDetectOverlay = { create };
++})();
+diff --git a/package/thingino-raptor/files/www/a/preview-detect.js b/package/thingino-raptor/files/www/a/preview-detect.js
+new file mode 100644
+index 000000000..3c0a23b4e
+--- /dev/null
++++ b/package/thingino-raptor/files/www/a/preview-detect.js
+@@ -0,0 +1,97 @@
++/**
++ * Preview-page overlay for raptor's IVS detection: draws what rvd detects
++ * (the vendor's person detector or a JZDL model) over the live preview.
++ *
++ * rvd reports its boxes in sub-stream pixels and its classes as numbers. The
++ * feed carries the sub stream's size with them, so a box is normalised here;
++ * the sub stream is the whole frame scaled down, so the same box fits the main
++ * stream's picture. A class number becomes a name from the agent's
++ * settings/motion/labels: the model's own names file when it has one, else
++ * the names the public models were trained on.
++ *
++ * While the viewer has the Detections button on, /x/json-detect.cgi pushes the
++ * detections as server-sent events: one when they change, so the camera runs
++ * no request per update. While rvd does not detect, the feed answers
++ * {"running":false} and ends, and this asks again after a while.
++ * /a/detect-overlay.js draws, owns the button, and closes the feed while the
++ * tab is hidden and when the page is left.
++ *
++ * Plugin-owned file: registered via raptor-detect.webui.json
++ * `preview.scripts`, injected into the preview page at build time.
++ */
++(function () {
++  "use strict";
++
++  const FEED = "/x/json-detect.cgi";
++  const LABELS = "/api/v1/settings/motion/labels";
++  const DOWN_RETRY_MS = 15000;
++
++  if (!window.thinginoDetectOverlay || typeof EventSource !== "function")
++    return;
++
++  let source = null;
++  let timer = null;
++  let labels = [];
++
++  // The feed's event -> the overlay's objects.
++  function objects(ev) {
++    const w = ev.width;
++    const h = ev.height;
++    if (!w || !h) return [];
++    return (ev.detections || []).map((d) => ({
++      label: labels[d.class] || "class " + d.class,
++      score: d.confidence,
++      box: [d.x0 / w, d.y0 / h, d.x1 / w, d.y1 / h],
++    }));
++  }
++
++  function shut() {
++    if (source) source.close();
++    source = null;
++  }
++
++  function open() {
++    clearTimeout(timer);
++    timer = null;
++    if (source) return;
++    source = new EventSource(FEED);
++    source.onmessage = (msg) => {
++      let ev = null;
++      try {
++        ev = JSON.parse(msg.data);
++      } catch (e) {
++        return;
++      }
++      if (ev.running === false) {
++        shut();
++        overlay.draw(null);
++        timer = setTimeout(open, DOWN_RETRY_MS);
++        return;
++      }
++      overlay.draw(objects(ev));
++    };
++    source.onerror = () => overlay.draw(null);
++  }
++
++  const overlay = window.thinginoDetectOverlay.create({
++    canvasId: "detect-overlay",
++    buttonId: "detect-overlay-toggle",
++    storeKey: "thingino.detectOverlay",
++    title: "Show the camera's detections over the picture",
++    start() {
++      open();
++      // The names, once per start: they change with the model.
++      if (typeof agentJsonRequest === "function")
++        agentJsonRequest(LABELS, { cache: "no-store" })
++          .then((l) => {
++            labels = (l && l.labels) || [];
++          })
++          .catch(() => {});
++    },
++    stop() {
++      clearTimeout(timer);
++      timer = null;
++      shut();
++    },
++  });
++})();
+diff --git a/package/thingino-raptor/files/www/config-detect.html b/package/thingino-raptor/files/www/config-detect.html
+new file mode 100644
+index 000000000..bfb16c5e7
+--- /dev/null
++++ b/package/thingino-raptor/files/www/config-detect.html
+@@ -0,0 +1,146 @@
++<!DOCTYPE html>
++<html lang="en" data-bs-theme="dark">
++<head>
++  <meta charset="utf-8">
++  <meta name="viewport" content="width=device-width,initial-scale=1">
++  <title>thingino · Detection</title>
++  <script src="/a/theme-init.js"></script>
++  <link rel="icon" type="image/svg+xml" href="/a/favicon.svg">
++  <link rel="preconnect" href="https://fonts.googleapis.com">
++  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
++  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap">
++  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css"
++    integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
++  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.13.1/font/bootstrap-icons.min.css">
++  <link rel="stylesheet" href="/a/main.css">
++</head>
++
++<body id="page-config-detect">
++<nav data-app-nav></nav>
++
++<main class="pb-4">
++  <div class="container">
++    <div data-app-controls></div>
++
++    <section>
++      <h3 class="mb-3">Detection</h3>
++      <p class="text-secondary small mb-3">
++        The streamer can watch the sub stream for motion, for people, or for
++        the objects a model was trained on, and act on what it finds: the
++        motion actions, a recording, the boxes on the stream.
++      </p>
++
++      <div class="alert alert-warning d-none" id="detect-unsupported" role="alert">
++        This camera's video backend has no detection.
++      </div>
++
++      <div class="col-lg-8" id="detect-form">
++        <div class="card bg-dark-subtle mb-3 p-3">
++          <h6 class="mb-2">Now</h6>
++          <dl class="row small mb-0">
++            <dt class="col-sm-3">State</dt>
++            <dd class="col-sm-9" id="detect-state">-</dd>
++            <dt class="col-sm-3">Sees</dt>
++            <dd class="col-sm-9 mb-0" id="detect-objects">-</dd>
++          </dl>
++        </div>
++
++        <div class="card bg-dark-subtle mb-3 p-3">
++          <h6 class="mb-2">Detection</h6>
++          <p class="form-switch">
++            <input type="checkbox" id="detect_enabled" role="switch" class="form-check-input">
++            <label for="detect_enabled" class="form-check-label small">Enable detection</label>
++          </p>
++          <div class="row g-2">
++            <div class="col-sm-6">
++              <label class="form-label small mb-0" for="detect_algorithm">Method</label>
++              <select id="detect_algorithm" class="form-select form-select-sm"></select>
++              <small class="text-secondary" id="detect-algorithm-hint"></small>
++            </div>
++            <div class="col-sm-3">
++              <label class="form-label small mb-0" for="detect_sensitivity">Sensitivity</label>
++              <input type="number" id="detect_sensitivity" class="form-control form-control-sm" min="0" max="5" step="1">
++            </div>
++            <div class="col-sm-3">
++              <label class="form-label small mb-0" for="detect_cooldown_time">Cooldown (s)</label>
++              <input type="number" id="detect_cooldown_time" class="form-control form-control-sm" min="0" max="3600" step="1">
++            </div>
++          </div>
++        </div>
++
++        <div class="card bg-dark-subtle mb-3 p-3" id="detect-model-card">
++          <h6 class="mb-2">Model</h6>
++          <div class="row g-2">
++            <div class="col-sm-6">
++              <label class="form-label small mb-0" for="detect_model">Model file</label>
++              <select id="detect_model" class="form-select form-select-sm"></select>
++              <small class="text-secondary">
++                The files in /usr/share/models. A file of the same name ending
++                in .txt, one class name a line, names its classes.
++              </small>
++              <small class="text-danger d-none" id="detect-no-model">
++                There is no model file on this camera, so this method cannot run.
++              </small>
++            </div>
++            <div class="col-sm-2">
++              <label class="form-label small mb-0" for="detect_num_classes">Classes</label>
++              <input type="number" id="detect_num_classes" class="form-control form-control-sm" min="1" max="80" step="1">
++            </div>
++            <div class="col-sm-2">
++              <label class="form-label small mb-0" for="detect_conf_threshold">Confidence (%)</label>
++              <input type="number" id="detect_conf_threshold" class="form-control form-control-sm" min="1" max="99" step="1">
++            </div>
++            <div class="col-sm-2">
++              <label class="form-label small mb-0" for="detect_nms_threshold">Overlap (%)</label>
++              <input type="number" id="detect_nms_threshold" class="form-control form-control-sm" min="1" max="99" step="1">
++            </div>
++          </div>
++          <small class="text-secondary d-block mt-2">
++            The class count must be the model's. A lower confidence finds
++            more, with more false alarms; overlap is how much two boxes may
++            share before one is dropped.
++          </small>
++        </div>
++
++        <div class="card bg-dark-subtle mb-3 p-3">
++          <h6 class="mb-2">Boxes</h6>
++          <p class="form-switch mb-1">
++            <input type="checkbox" id="detect_draw_boxes" role="switch" class="form-check-input">
++            <label for="detect_draw_boxes" class="form-check-label small">Draw the boxes into the sub stream</label>
++          </p>
++          <small class="text-secondary">
++            These boxes are part of the video: every viewer and every
++            recording of the sub stream has them. The Detections button on
++            the preview page shows boxes with their names to you alone, on
++            either stream.
++          </small>
++        </div>
++
++        <p class="text-secondary small">
++          Turning detection on or off, the sensitivity and the boxes apply at
++          once. The method, the model and its numbers are saved to
++          /etc/raptor.conf and apply when the video restarts.
++        </p>
++        <button type="button" id="detect-save" class="btn btn-primary">
++          <i class="bi bi-floppy me-1"></i> Save configuration
++        </button>
++        <button type="button" id="detect-restart" class="btn btn-warning d-none">
++          <i class="bi bi-arrow-repeat me-1"></i> Restart the video to apply
++        </button>
++      </div>
++    </section>
++  </div>
++</main>
++
++<footer data-app-footer></footer>
++
++<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js"
++  integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous"></script>
++<script src="/a/main.js"></script>
++<script src="/a/runtime-config.js"></script>
++<script src="/a/control-bar.js"></script>
++<script src="/a/navigation.js"></script>
++<script src="/a/footer.js"></script>
++<script src="/a/config-detect.js"></script>
++</body>
++</html>
+diff --git a/package/thingino-raptor/files/www/x/json-detect.cgi b/package/thingino-raptor/files/www/x/json-detect.cgi
+new file mode 100755
+index 000000000..ce2fb9132
+--- /dev/null
++++ b/package/thingino-raptor/files/www/x/json-detect.cgi
+@@ -0,0 +1,40 @@
++#!/bin/sh
++# The feed of rvd's detections for the preview overlay and the Detection page:
++# server-sent events, one when the detections change and one every few seconds
++# otherwise, so a viewer that has gone is noticed. Each is
++#   {"running":true,"width":W,"height":H,"detections":[{x0,y0,x1,y1,confidence,class}...]}
++# with the boxes in the sub stream's pixels, W x H. One raptorctl call a tick is
++# all it costs: no agent run per update. When rvd does not detect (the option is
++# off, the stack is down) it sends {"running":false} and ends; the page asks
++# again later.
++
++# shellcheck disable=SC1091  # auth.sh is installed on the camera, not in the build tree
++. /var/www/x/auth.sh
++require_auth
++
++printf 'Status: 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n\r\nretry: 15000\n\n'
++
++# The sub stream's size as rvd runs it.
++status=$(raptorctl rvd status 2>/dev/null)
++w=$(printf '%s' "$status" | sed -n 's/.*"chn": *1, *"w": *\([0-9]*\), *"h": *\([0-9]*\).*/\1/p')
++h=$(printf '%s' "$status" | sed -n 's/.*"chn": *1, *"w": *\([0-9]*\), *"h": *\([0-9]*\).*/\2/p')
++
++last=
++n=0
++while :; do
++	d=$(raptorctl rvd ivs-detections 2>/dev/null) || break
++	case "$d" in
++		*'"detections":['*) ;;
++		*) break ;;
++	esac
++	d=${d#*\"detections\":}
++	d=${d%\}*}
++	if [ "$d" != "$last" ] || [ $((n % 10)) = 0 ]; then
++		printf 'data: {"running":true,"width":%s,"height":%s,"detections":%s}\n\n' "${w:-0}" "${h:-0}" "$d" || exit 0
++		last=$d
++	fi
++	n=$((n + 1))
++	usleep 300000 2>/dev/null || sleep 1
++done
++printf 'data: {"running":false}\n\n'
++exit 0
+diff --git a/package/thingino-raptor/thingino-raptor.mk b/package/thingino-raptor/thingino-raptor.mk
+index 2efc46b14..c882300ae 100644
+--- a/package/thingino-raptor/thingino-raptor.mk
++++ b/package/thingino-raptor/thingino-raptor.mk
+@@ -241,6 +241,24 @@ define THINGINO_RAPTOR_INSTALL_TARGET_CMDS
+ 		$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/raptor-sigmastar.webui.json \
+ 			$(TARGET_DIR)/var/www/a/plugins/raptor-sigmastar.webui.json; \
+ 	fi
++	# Detection: its settings page and its preview overlay come with rvd's
++	# IVS. The overlay's drawer also serves thingino-ipud's detections.
++	if [ "$(BR2_PACKAGE_THINGINO_RAPTOR_IVS_DETECT)" = "y" ]; then \
++		$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/raptor-detect.webui.json \
++			$(TARGET_DIR)/var/www/a/plugins/raptor-detect.webui.json; \
++		$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/www/config-detect.html \
++			$(TARGET_DIR)/var/www/config-detect.html; \
++		$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/www/a/config-detect.js \
++			$(TARGET_DIR)/var/www/a/config-detect.js; \
++		$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/www/a/preview-detect.js \
++			$(TARGET_DIR)/var/www/a/preview-detect.js; \
++		$(INSTALL) -D -m 0755 $(THINGINO_RAPTOR_PKGDIR)/files/www/x/json-detect.cgi \
++			$(TARGET_DIR)/var/www/x/json-detect.cgi; \
++	fi
++	if [ -n "$(BR2_PACKAGE_THINGINO_RAPTOR_IVS_DETECT)$(BR2_PACKAGE_THINGINO_IPUD)" ]; then \
++		$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/www/a/detect-overlay.js \
++			$(TARGET_DIR)/var/www/a/detect-overlay.js; \
++	fi
+ 	$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/www/config-audio.html \
+ 		$(TARGET_DIR)/var/www/config-audio.html
+ 	$(INSTALL) -D -m 0644 $(THINGINO_RAPTOR_PKGDIR)/files/www/config-privacy.html \
+-- 
+2.43.0
+
