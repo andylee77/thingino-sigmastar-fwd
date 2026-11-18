@@ -1,6 +1,6 @@
-From a74e5a910fb7424bd4a650ed1a3e1b74804b4b68 Mon Sep 17 00:00:00 2001
+From 1e09a5f3dc0e07110314fe353b3513ea5aa84059 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Tue, 17 Nov 2026 17:54:40 -0500
+Date: Tue, 17 Nov 2026 19:06:17 -0500
 Subject: [PATCH 05/22] sigmastar: platform utilities, the PWM light tool,
  SigmaStar's lib-serial-mac
 

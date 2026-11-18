@@ -1,6 +1,6 @@
-From 41354a385a8fb0b6abd8b8f0bba9c2aa0c9f9db6 Mon Sep 17 00:00:00 2001
+From 59baf931b300bb69835fbfc3d5df995a78799ad2 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Tue, 17 Nov 2026 17:54:40 -0500
+Date: Tue, 17 Nov 2026 19:06:17 -0500
 Subject: [PATCH 22/22] thingino-ipud: on-camera object detection on the
  Infinity6C IPU
 

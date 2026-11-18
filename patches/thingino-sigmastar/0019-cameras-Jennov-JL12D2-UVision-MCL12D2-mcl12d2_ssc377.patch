@@ -1,6 +1,6 @@
-From 0a8536cc5fabb57c542808bbee911f9ab4bc657c Mon Sep 17 00:00:00 2001
+From c3ca381f0fbc5a6323b29c0f424f1ae5105fbf83 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Tue, 17 Nov 2026 17:54:40 -0500
+Date: Tue, 17 Nov 2026 19:06:17 -0500
 Subject: [PATCH 19/22] cameras: Jennov JL12D2 / UVision MCL12D2
  (mcl12d2_ssc377d_imx335, PTZ)
 
@@ -15,10 +15,10 @@ raptor.config; the tuning is the SDK's IMX335 one.
 ---
  ...dts-infinity6c-add-the-JL12D2-module.patch | 162 +++++++++++++
  .../mcl12d2_ssc377d_imx335.kernel.config      |  42 ++++
- .../mcl12d2_ssc377d_imx335_defconfig          | 216 ++++++++++++++++++
+ .../mcl12d2_ssc377d_imx335_defconfig          | 215 ++++++++++++++++++
  .../overlay/etc/modules.d/sdcard              |   5 +
  .../mcl12d2_ssc377d_imx335/raptor.config      |  36 +++
- 5 files changed, 461 insertions(+)
+ 5 files changed, 460 insertions(+)
  create mode 100644 board/sigmastar/infinity6c/patches/linux/0002-ARM-dts-infinity6c-add-the-JL12D2-module.patch
  create mode 100644 configs/cameras/mcl12d2_ssc377d_imx335/mcl12d2_ssc377d_imx335.kernel.config
  create mode 100644 configs/cameras/mcl12d2_ssc377d_imx335/mcl12d2_ssc377d_imx335_defconfig
@@ -243,10 +243,10 @@ index 000000000..12ddee535
 +CONFIG_EXFAT_FS=m
 diff --git a/configs/cameras/mcl12d2_ssc377d_imx335/mcl12d2_ssc377d_imx335_defconfig b/configs/cameras/mcl12d2_ssc377d_imx335/mcl12d2_ssc377d_imx335_defconfig
 new file mode 100644
-index 000000000..51ae58a93
+index 000000000..da2ee9d2a
 --- /dev/null
 +++ b/configs/cameras/mcl12d2_ssc377d_imx335/mcl12d2_ssc377d_imx335_defconfig
-@@ -0,0 +1,216 @@
+@@ -0,0 +1,215 @@
 +# NAME: Anjvision MCL12D2 / Jennov JL12D2 (UVision L12D2) — SSC377D, Infinity6C, IMX335
 +#
 +# Streams on the bench unit (2026-10-25): H.264 2592x1944 + 1280x960 @ 25 fps
@@ -288,12 +288,11 @@ index 000000000..51ae58a93
 +# the sensor path was brought up over SSH. The D7 5-pin connector is the PTZ
 +# lens/motor board (FUART, ttyS2), not a console; the console UART is on pads
 +# next to the SoC. Shares its SoC enablement with the SSC377QE target.
-+# FRAG: soc-sigmastar core-sigmastar
++# FRAG: soc-infinity6c core-sigmastar
 +
 +# board.mk includes this file as a makefile before thingino.mk runs, so the
-+# vendor/model are readable there and drive SOC_VENDOR / SOC_MODEL / SOC_FAMILY
-+# / SOC_ARCH / SOC_CPU / KERNEL_VERSION.
-+BR2_SOC_VENDOR_SIGMASTAR=y
++# model is readable there and gives SOC_VENDOR / SOC_MODEL / SOC_FAMILY /
++# SOC_ARCH / KERNEL_VERSION.
 +BR2_SIGMASTAR_SOC_MODEL="ssc377d"
 +
 +# Driver is prebuilt in the 1230 drop; no imx335.bin ships (see header). The

@@ -1,6 +1,6 @@
-From e40ac3413b725bf3f6c1f679e5827d447ddf24e6 Mon Sep 17 00:00:00 2001
+From 2331d1b66d939263d261ec0910189a431d49d127 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Tue, 17 Nov 2026 17:54:40 -0500
+Date: Tue, 17 Nov 2026 19:06:17 -0500
 Subject: [PATCH 01/22] sigmastar: vendor packages (sdk, lib, u-boot, sensor
  headers)
 

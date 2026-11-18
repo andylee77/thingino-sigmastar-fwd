@@ -1,6 +1,6 @@
-From d0ae411208ce789e8ffde6d2765db78dd2c94f24 Mon Sep 17 00:00:00 2001
+From cfac29bcad49028094dd3d459d56ebaba785e5cc Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Tue, 17 Nov 2026 17:54:40 -0500
+Date: Tue, 17 Nov 2026 19:06:17 -0500
 Subject: [PATCH 07/22] thingino-uhttpd: honor If-None-Match over
  If-Modified-Since; cache policy
 

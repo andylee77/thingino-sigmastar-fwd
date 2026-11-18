@@ -1,6 +1,6 @@
-From 43da1579be3f0f21bd09991ff4dfa82d1fc89cbc Mon Sep 17 00:00:00 2001
+From 761adf7efb88368165ec29578c3824946c82f500 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Tue, 17 Nov 2026 17:54:40 -0500
+Date: Tue, 17 Nov 2026 19:06:17 -0500
 Subject: [PATCH 11/22] thingino-raptor: RTSP/ONVIF delivery and Ch1 preview
  fallback (rsd, onvif)
 

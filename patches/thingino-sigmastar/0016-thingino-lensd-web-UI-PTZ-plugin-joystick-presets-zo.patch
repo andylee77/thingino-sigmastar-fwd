@@ -1,6 +1,6 @@
-From ead33bb5227e01435b55222bc012071e5ed13e6f Mon Sep 17 00:00:00 2001
+From 91e5f599e20dca7cf153f58dd0aa02fb629f84f9 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Tue, 17 Nov 2026 17:54:40 -0500
+Date: Tue, 17 Nov 2026 19:06:17 -0500
 Subject: [PATCH 16/22] thingino-lensd: web UI PTZ plugin (joystick, presets,
  zoom/focus)
 

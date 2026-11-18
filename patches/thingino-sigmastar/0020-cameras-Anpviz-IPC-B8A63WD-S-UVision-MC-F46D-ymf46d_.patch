@@ -1,6 +1,6 @@
-From 653cf4b14834ffb802ec20e0e83240f3f375683c Mon Sep 17 00:00:00 2001
+From b75195dbe6c5d671aed6d6c627a6b3e7f1020924 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Tue, 17 Nov 2026 17:54:40 -0500
+Date: Tue, 17 Nov 2026 19:06:17 -0500
 Subject: [PATCH 20/22] cameras: Anpviz IPC-B8A63WD-S / UVision MC-F46D
  (ymf46d_ssc377d_gc4653)
 
@@ -17,8 +17,8 @@ included.
  .../overlay/etc/modules.d/sdcard              |   5 +
  .../ymf46d_ssc377d_gc4653/raptor.config       |  38 ++++
  .../ymf46d_ssc377d_gc4653.kernel.config       |  36 ++++
- .../ymf46d_ssc377d_gc4653_defconfig           | 196 ++++++++++++++++++
- 6 files changed, 340 insertions(+)
+ .../ymf46d_ssc377d_gc4653_defconfig           | 195 ++++++++++++++++++
+ 6 files changed, 339 insertions(+)
  create mode 100644 board/sigmastar/infinity6c/patches/linux/0004-ARM-dts-infinity6c-add-the-YMF46D-module.patch
  create mode 100644 configs/cameras/ymf46d_ssc377d_gc4653/.gitignore
  create mode 100644 configs/cameras/ymf46d_ssc377d_gc4653/overlay/etc/modules.d/sdcard
@@ -202,10 +202,10 @@ index 000000000..3a7fc8e1d
 +CONFIG_EXFAT_FS=m
 diff --git a/configs/cameras/ymf46d_ssc377d_gc4653/ymf46d_ssc377d_gc4653_defconfig b/configs/cameras/ymf46d_ssc377d_gc4653/ymf46d_ssc377d_gc4653_defconfig
 new file mode 100644
-index 000000000..152c5694d
+index 000000000..c1eb0df4f
 --- /dev/null
 +++ b/configs/cameras/ymf46d_ssc377d_gc4653/ymf46d_ssc377d_gc4653_defconfig
-@@ -0,0 +1,196 @@
+@@ -0,0 +1,195 @@
 +# NAME: Anjvision YMF46D / Anpviz IPC-B8A63WD-S (UVision MC-F46D) — SSC377D, Infinity6C, GC4653
 +#
 +# Anpviz U-Series metal bullet, dual light. OEM firmware
@@ -227,9 +227,8 @@ index 000000000..152c5694d
 +# Flash:  16 MB SPI NOR (GigaDevice c8 40 18), OEM layout identical to the
 +#         JL12D2 and MC-A85: BOOT 0x30000 | kernel 0x200000 | rootfs 0xCD0000 |
 +#         DATA 0x100000.
-+# FRAG: soc-sigmastar core-sigmastar
++# FRAG: soc-infinity6c core-sigmastar
 +
-+BR2_SOC_VENDOR_SIGMASTAR=y
 +BR2_SIGMASTAR_SOC_MODEL="ssc377d"
 +
 +# ---- SENSOR ----

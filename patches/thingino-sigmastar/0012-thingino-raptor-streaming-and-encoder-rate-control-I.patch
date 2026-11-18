@@ -1,6 +1,6 @@
-From 33024797a0dd509b8e9821e1a44598f3731796b0 Mon Sep 17 00:00:00 2001
+From ff2b7e0f6080f674f6d4f37f5d0f832f0fe26869 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Tue, 17 Nov 2026 17:54:40 -0500
+Date: Tue, 17 Nov 2026 19:06:17 -0500
 Subject: [PATCH 12/22] thingino-raptor: streaming and encoder rate-control,
  Image Quality, motion gating
 
@@ -26,15 +26,15 @@ frame is placed at the frame's corner in place of 10 pixels in.
  ...region-that-fills-the-frame-inside-i.patch |  69 ++
  ...-pool-for-the-detection-overlay-ROD-.patch |  39 +
  .../thingino-raptor/files/S32raptor-motion    |   4 +-
- package/thingino-raptor/files/agent-adapter   | 818 +++++++++++++++---
+ package/thingino-raptor/files/agent-adapter   | 834 +++++++++++++++---
  .../thingino-raptor/files/raptor-motion-watch |  22 +
  .../files/raptor-sigmastar.webui.json         |   9 +
- .../files/www/a/streamer-image.js             | 387 +++++++--
- .../files/www/a/streamer-stream.js            | 488 +++++++++++
+ .../files/www/a/streamer-image.js             | 389 ++++++--
+ .../files/www/a/streamer-stream.js            | 488 ++++++++++
  .../files/www/streamer-image.html             | 236 +++--
  .../files/www/streamer-main.html              | 165 ++--
  .../files/www/streamer-substream.html         | 165 ++--
- 14 files changed, 2130 insertions(+), 438 deletions(-)
+ 14 files changed, 2132 insertions(+), 454 deletions(-)
  create mode 100755 package/thingino-raptor/0109-rvd-size-JPEG-rings-for-the-largest-JPEG-not-the-ave.patch
  create mode 100755 package/thingino-raptor/0110-S31raptor-export-etc-default-raptor-to-the-daemons.patch
  create mode 100644 package/thingino-raptor/0111-rvd-get-isp-caps-reports-which-ISP-controls-the-HAL-.patch
@@ -363,7 +363,7 @@ index 60075b5d7..0830304fb 100644
  	else
  		killall raptor-motion-watch 2>/dev/null || true
 diff --git a/package/thingino-raptor/files/agent-adapter b/package/thingino-raptor/files/agent-adapter
-index 475f6bb76..b1f02833e 100644
+index 8442ce4ec..352b00d08 100644
 --- a/package/thingino-raptor/files/agent-adapter
 +++ b/package/thingino-raptor/files/agent-adapter
 @@ -4,6 +4,12 @@
@@ -379,11 +379,19 @@ index 475f6bb76..b1f02833e 100644
  
  # The adapter owns the EXIT trap of the agentctl shell that sources it.
  trap 'rm -f /tmp/agent-raptor-isp.$$ /tmp/agent-raptor-wb.$$ /tmp/agent-raptor-rvdconfig.$$' EXIT
-@@ -143,7 +149,19 @@ agent_ctl() {
+@@ -143,16 +149,19 @@ agent_ctl() {
  		echo "raptorctl is not available" >&2
  		return 1
  	}
--	raptorctl "$@"
+-	# raptorctl exits 0 whenever the daemon replies, so an error reply has
+-	# to be caught here.
+-	_ctl_reply=$(raptorctl "$@") || return 1
+-	printf '%s\n' "$_ctl_reply"
+-	case "$_ctl_reply" in
+-		*'"status":"error"'*)
+-			echo "raptorctl $1 $2: $_ctl_reply" >&2
+-			return 1
+-			;;
 +	# raptorctl exits 0 whenever the daemon answers, even when the answer is
 +	# {"status":"error","reason":...} (not supported on this SoC, a bad value),
 +	# so read the reply: the callers' "|| return 1" must see the failure, and
@@ -395,12 +403,28 @@ index 475f6bb76..b1f02833e 100644
 +		echo "$1 $2: ${_ctl_reason:-error}" >&2
 +		return 1
 +		;;
-+	esac
+ 	esac
 +	[ -z "$_ctl_out" ] || printf '%s\n' "$_ctl_out"
  }
  
- agent_daemon_status() {
-@@ -420,6 +438,57 @@ agent_image_bool() {
+ # Sinter/temper strength exist only on T20-T31; the HAL reports them as not
+@@ -167,7 +176,14 @@ agent_has_nr() {
+ 
+ # rvd applies 128 when raptor.conf leaves sinter/temper unset.
+ agent_image_nr() {
+-	agent_has_nr || return 0
++	# Where rvd reports the HAL's ISP controls (get-isp-caps), that decides for
++	# each knob: the Infinity6C HAL has temper and no sinter. Without it,
++	# upstream's list of families.
++	case "$(agent_isp_caps_json)" in
++		*"\"$1\":true"*) ;;
++		*"\"$1\":false"*) return 0 ;;
++		*) agent_has_nr || return 0 ;;
++	esac
+ 	_nr=$(agent_config_get image "$1")
+ 	printf '%s' "${_nr:-128}"
+ }
+@@ -446,6 +462,57 @@ agent_image_bool() {
  	agent_bool01_to_json "$(agent_image_raw "$1")" false
  }
  
@@ -458,7 +482,7 @@ index 475f6bb76..b1f02833e 100644
  # Map UI / prudynt-style WB mode integers onto raptor set-wb names (and back).
  agent_wb_mode_to_int() {
  	mode=$(printf '%s' "$1" | tr 'A-Z' 'a-z' | tr '-' '_')
-@@ -911,6 +980,521 @@ agent_stream_mode() {
+@@ -937,6 +1004,521 @@ agent_stream_mode() {
  	esac
  }
  
@@ -980,7 +1004,7 @@ index 475f6bb76..b1f02833e 100644
  agent_rtsp_port() {
  	port=$(agent_config_get rtsp port)
  	if [ -n "$port" ]; then
-@@ -1440,14 +2024,21 @@ agent_get_events() {
+@@ -1466,14 +2048,21 @@ agent_get_events() {
  	done
  }
  
@@ -1004,7 +1028,7 @@ index 475f6bb76..b1f02833e 100644
  			printf '"daynight":{"enabled":%s,"force_mode":%s,"modes":["auto","day","night"]},' \
  				"$(agent_json_bool "$(agent_has_daynight)")" \
  				"$(agent_json_bool "$(agent_has_daynight)")"
-@@ -1465,10 +2056,12 @@ agent_get_capabilities() {
+@@ -1491,10 +2080,12 @@ agent_get_capabilities() {
  			printf '}\n'
  			;;
  		image)
@@ -1019,7 +1043,7 @@ index 475f6bb76..b1f02833e 100644
  			;;
  		daynight)
  			printf '{"enabled":%s,"force_mode":%s,"modes":["auto","day","night"]}\n' \
-@@ -1509,6 +2102,23 @@ agent_get_capabilities() {
+@@ -1535,6 +2126,23 @@ agent_get_capabilities() {
  	esac
  }
  
@@ -1043,7 +1067,7 @@ index 475f6bb76..b1f02833e 100644
  agent_get_runtime() {
  	resource=${1:-all}
  	case "$resource" in
-@@ -1570,6 +2180,10 @@ agent_get_runtime() {
+@@ -1596,6 +2204,10 @@ agent_get_runtime() {
  			agent_print_runtime_streaming_service
  			printf '\n'
  			;;
@@ -1054,13 +1078,13 @@ index 475f6bb76..b1f02833e 100644
  		streams/0)
  			agent_print_stream_runtime 0
  			printf '\n'
-@@ -1651,16 +2265,26 @@ agent_print_config() {
+@@ -1677,16 +2289,26 @@ agent_print_config() {
  	printf '"brightness":%s,' "$(agent_json_value_or "$(agent_image_raw brightness)" null)"
  	printf '"contrast":%s,' "$(agent_json_value_or "$(agent_image_raw contrast)" null)"
  	printf '"saturation":%s,' "$(agent_json_value_or "$(agent_image_raw saturation)" null)"
 -	printf '"sharpness":%s,' "$(agent_json_value_or "$(agent_image_raw sharpness)" null)"
--	printf '"noise_reduction":%s,' "$(agent_json_value_or "$(agent_config_get image sinter)" null)"
--	printf '"temporal_noise_reduction":%s,' "$(agent_json_value_or "$(agent_config_get image temper)" null)"
+-	printf '"noise_reduction":%s,' "$(agent_json_value_or "$(agent_image_nr sinter)" null)"
+-	printf '"temporal_noise_reduction":%s,' "$(agent_json_value_or "$(agent_image_nr temper)" null)"
 +	printf '"sharpness":%s,' "$(agent_image_knob sharpness sharpness)"
 +	printf '"noise_reduction":%s,' "$(agent_image_knob sinter sinter)"
 +	printf '"temporal_noise_reduction":%s,' "$(agent_image_knob temper temper)"
@@ -1089,7 +1113,7 @@ index 475f6bb76..b1f02833e 100644
  	printf '},'
  	printf '"motion":{"enabled":%s},' "$(agent_motion_enabled)"
  	printf '"daynight":{"enabled":%s,"force_mode":%s},' \
-@@ -2290,7 +2914,13 @@ agent_get_setting() {
+@@ -2316,7 +2938,13 @@ agent_get_setting() {
  			agent_print_setting_leaf saturation "$(agent_json_value_or "$(agent_image_raw saturation)" null)"
  			;;
  		image/sharpness)
@@ -1103,8 +1127,8 @@ index 475f6bb76..b1f02833e 100644
 +			agent_print_setting_leaf defog_strength "$(agent_image_knob defog defog_strength)"
  			;;
  		image/noise-reduction)
- 			agent_print_setting_leaf noise_reduction "$(agent_json_value_or "$(agent_config_get image sinter)" null)"
-@@ -2393,6 +3023,13 @@ agent_get_setting() {
+ 			agent_print_setting_leaf noise_reduction "$(agent_json_value_or "$(agent_image_nr sinter)" null)"
+@@ -2419,6 +3047,13 @@ agent_get_setting() {
  		storage/*)
  			agent_print_storage_setting "$path"
  			;;
@@ -1118,7 +1142,7 @@ index 475f6bb76..b1f02833e 100644
  		streams/[01]/enabled)
  			stream_id=${path#streams/}
  			stream_id=${stream_id%/enabled}
-@@ -2486,6 +3123,25 @@ agent_get_setting() {
+@@ -2512,6 +3147,25 @@ agent_get_setting() {
  	esac
  }
  
@@ -1144,7 +1168,7 @@ index 475f6bb76..b1f02833e 100644
  agent_set_setting() {
  	path=$1
  	body_file=$2
-@@ -2538,6 +3194,12 @@ agent_set_setting() {
+@@ -2564,6 +3218,12 @@ agent_set_setting() {
  			agent_config_save
  			agent_print_setting_update "$path" sharpness "$value"
  			;;
@@ -1157,7 +1181,7 @@ index 475f6bb76..b1f02833e 100644
  		image/anti-flicker)
  			value=$(agent_setting_value "$body_file" anti_flicker) || return 1
  			agent_validate_int "$value" || return 1
-@@ -2546,23 +3208,27 @@ agent_set_setting() {
+@@ -2572,23 +3232,27 @@ agent_set_setting() {
  			agent_config_save
  			agent_print_setting_update "$path" anti_flicker "$value"
  			;;
@@ -1199,7 +1223,7 @@ index 475f6bb76..b1f02833e 100644
  			;;
  		image/ae-compensation)
  			value=$(agent_setting_value "$body_file" ae_compensation) || return 1
-@@ -2729,6 +3395,10 @@ agent_set_setting() {
+@@ -2755,6 +3419,10 @@ agent_set_setting() {
  			;;
  		motion/enabled)
  			value=$(agent_setting_value "$body_file" enabled) || return 1
@@ -1210,7 +1234,7 @@ index 475f6bb76..b1f02833e 100644
  			agent_validate_bool "$value" || return 1
  			agent_motion_set_enabled "$value" || return 1
  			agent_print_setting_update "$path" enabled "$value"
-@@ -2843,6 +3513,11 @@ agent_set_setting() {
+@@ -2869,6 +3537,11 @@ agent_set_setting() {
  		storage/*)
  			agent_set_storage_setting "$path" "$body_file"
  			;;
@@ -1222,7 +1246,7 @@ index 475f6bb76..b1f02833e 100644
  		streams/[01]/enabled)
  			stream_id=${path#streams/}
  			stream_id=${stream_id%/enabled}
-@@ -2855,13 +3530,7 @@ agent_set_setting() {
+@@ -2881,13 +3554,7 @@ agent_set_setting() {
  					agent_ctl rvd stream-stop 0 >/dev/null 2>&1 || true
  				fi
  			else
@@ -1237,7 +1261,7 @@ index 475f6bb76..b1f02833e 100644
  			fi
  			agent_print_setting_update "$path" enabled "$value"
  			;;
-@@ -2872,59 +3541,16 @@ agent_set_setting() {
+@@ -2898,59 +3565,16 @@ agent_set_setting() {
  			agent_config_save
  			agent_print_setting_update "$path" audio_enabled "$value"
  			;;
@@ -1305,7 +1329,7 @@ index 475f6bb76..b1f02833e 100644
  			;;
  		streams/[01]/buffers)
  			stream_id=${path#streams/}
-@@ -2942,9 +3568,7 @@ agent_set_setting() {
+@@ -2968,9 +3592,7 @@ agent_set_setting() {
  			value=$(agent_setting_value "$body_file" profile) || return 1
  			profile_int=$(agent_profile_to_int "$value") || return 1
  			profile_name=$(agent_profile_to_name "$profile_int")
@@ -1316,7 +1340,7 @@ index 475f6bb76..b1f02833e 100644
  			agent_print_setting_update "$path" profile "$(agent_json_string "$profile_name")"
  			;;
  		streams/[01]/rtsp-endpoint)
-@@ -2974,10 +3598,7 @@ agent_set_setting() {
+@@ -3000,10 +3622,7 @@ agent_set_setting() {
  			stream_id=${stream_id%/format}
  			value=$(agent_setting_value "$body_file" format) || return 1
  			value=$(agent_validate_stream_format "$value") || return 1
@@ -1328,7 +1352,7 @@ index 475f6bb76..b1f02833e 100644
  			agent_print_setting_update "$path" format "$(agent_json_string "$value")"
  			;;
  		streams/[01]/mode)
-@@ -2985,12 +3606,7 @@ agent_set_setting() {
+@@ -3011,12 +3630,7 @@ agent_set_setting() {
  			stream_id=${stream_id%/mode}
  			value=$(agent_setting_value "$body_file" mode) || return 1
  			value=$(agent_validate_stream_mode "$value") || return 1
@@ -1342,7 +1366,7 @@ index 475f6bb76..b1f02833e 100644
  			agent_print_setting_update "$path" mode "$(agent_json_string "$value")"
  			;;
  		streams/[01]/osd/*)
-@@ -3097,6 +3713,10 @@ agent_apply_config() {
+@@ -3123,6 +3737,10 @@ agent_apply_config() {
  
  agent_snapshot() {
  	channel=${1:-0}
@@ -1402,27 +1426,27 @@ index 000000000..91cbd756f
 +  }
 +}
 diff --git a/package/thingino-raptor/files/www/a/streamer-image.js b/package/thingino-raptor/files/www/a/streamer-image.js
-index 58c818012..4d470d2ef 100644
+index 85393d9c7..4d470d2ef 100644
 --- a/package/thingino-raptor/files/www/a/streamer-image.js
 +++ b/package/thingino-raptor/files/www/a/streamer-image.js
-@@ -1,121 +1,336 @@
+@@ -1,133 +1,336 @@
  /**
   * Raptor Image Quality page.
   *
-- * The generic /a/preview.js wires the WB/AE/flip controls through the agent
-- * (saveImageValue -> sendToEndpoint -> thinginoStreamer.applyPayload), but it
-- * disables them on load expecting the prudynt json-imaging.cgi bridge to
-- * re-enable them later. Raptor has no such CGI, so this module loads the live
-- * image settings from the agent and re-enables/populates those fields.
+- * The raptor /a/preview.js wires brightness/contrast/sharpness/saturation
+- * and the WB/AE/flip saves through the agent, but disables the WB/AE/flip
+- * fields on load expecting the prudynt json-imaging.cgi bridge to re-enable
+- * them later. Raptor has no such CGI, so this module loads the live image
+- * settings from the agent and re-enables/populates those fields.
 + * This module owns the whole page, the preview included. The generic
 + * /a/preview.js is not loaded here: it serves the prudynt pages, races its own
 + * image fields, and spends two config reads before it starts the preview.
   *
-- * brightness/contrast/sharpness/saturation are already handled end-to-end by
-- * preview.js; this module owns only the fields preview.js leaves disabled.
-- * Noise-reduction fields additionally get their own save path via the agent
-- * settings endpoints (image/noise-reduction, image/temporal-nr), which map to
-- * the sinter/temper tuning controls (SetModule_Ratio on Gen3 SoCs).
+- * The two noise-reduction fields belong to this module alone: it shows them,
+- * fills them and saves them through the agent settings endpoints
+- * (image/noise-reduction, image/temporal-nr), which map to the sinter/temper
+- * tuning controls. Those controls exist only on T20-T31; elsewhere the agent
+- * reports null and the fields stay hidden.
 + * The agent decides what is shown: /capabilities/image says which controls
 + * the HAL applies (rvd get-isp-caps), and /config returns null for the rest,
 + * so a knob the camera ignores is hidden instead of offered. Each change is
@@ -1440,21 +1464,12 @@ index 58c818012..4d470d2ef 100644
 -    image_ae_compensation: "ae_compensation",
 -    image_hflip: "hflip",
 -    image_vflip: "vflip",
--    noise_reduction: "noise_reduction",
--    temporal_noise_reduction: "temporal_noise_reduction",
 -  };
 -
--  // field id -> agent settings endpoint (own save path; preview.js does not
--  // wire these two fields)
--  var ENDPOINT_MAP = {
--    noise_reduction: "image/noise-reduction",
--    temporal_noise_reduction: "image/temporal-nr",
--  };
--
--  // field id -> JSON payload member name the agent expects
--  var PAYLOAD_MAP = {
--    noise_reduction: "noise_reduction",
--    temporal_noise_reduction: "temporal_noise_reduction",
+-  // noise-reduction field id -> [agent config key, settings endpoint]
+-  var NR_FIELDS = {
+-    noise_reduction: ["noise_reduction", "image/noise-reduction"],
+-    temporal_noise_reduction: ["temporal_noise_reduction", "image/temporal-nr"],
 -  };
 +  // key = the /config image field and the PATCH body field; cap = capability.
 +  var CONTROLS = [
@@ -1489,58 +1504,79 @@ index 58c818012..4d470d2ef 100644
      return document.getElementById(id);
    }
  
+-  function wrapperOf(node) {
+-    return node.closest("p, .select, .boolean, .mb-3") || node.parentElement;
++  function input(c) {
++    return el("iq_" + c.id);
+   }
+ 
 -  function enable(id) {
 -    var node = el(id);
 -    if (!node) return;
 -    node.disabled = false;
--    // Walk every ancestor the preview.js disable paths may have tagged, up
--    // to the column; the nearest wrapper alone is not enough because
--    // preview.js and the hideUnsupportedControls path pick different ones.
--    var wrap = node.closest("p, .select, .boolean, .mb-3, .col");
--    while (wrap) {
--      wrap.classList.remove("disabled");
--      wrap.classList.remove("d-none");
--      wrap = wrap.parentElement
--        ? wrap.parentElement.closest("p, .mb-3, .col")
--        : null;
-+  function input(c) {
-+    return el("iq_" + c.id);
-+  }
-+
+-    var wrap = wrapperOf(node);
+-    if (wrap) wrap.classList.remove("disabled", "d-none");
 +  function slider(c) {
 +    return el("iq_" + c.id + "-slider");
-+  }
-+
+   }
+ 
+-  function hide(id) {
+-    var node = el(id);
+-    if (!node) return;
+-    node.disabled = true;
+-    var wrap = wrapperOf(node);
+-    if (wrap) wrap.classList.add("d-none");
 +  function wrap(c) {
 +    var node = input(c);
 +    return node ? node.closest(".iq-knob") : null;
-+  }
-+
+   }
+ 
+-  function populate(id, value) {
+-    var node = el(id);
+-    if (!node) return;
+-    if (value === null || value === undefined || value === "") return;
+-    node.value = value;
 +  function notify(type, message, timeout) {
 +    if (typeof window.showAlert === "function") {
 +      window.showAlert(type, message, timeout);
 +    } else {
 +      console.warn(message);
-     }
++    }
    }
  
--  function populate(id, value) {
--    var node = el(id);
+-  function saveNr(id) {
 +  function api(path, options) {
-+    var helper = window.thinginoStreamer;
+     var helper = window.thinginoStreamer;
+-    var node = el(id);
+-    if (!helper || !node) return;
+-    var body = {};
+-    body[NR_FIELDS[id][0]] = Number(node.value);
+-    helper
+-      .agentRequest("/api/v1/settings/" + NR_FIELDS[id][1], {
+-        method: "PATCH",
+-        body: body,
+-      })
+-      .catch(function (err) {
+-        console.warn("Failed to save " + id, err);
+-      });
 +    if (!helper || typeof helper.agentRequest !== "function") {
 +      return Promise.reject(new Error("agent unavailable"));
 +    }
 +    var opts = options || {};
 +    opts.cache = "no-store";
 +    return helper.agentRequest(path, opts);
-+  }
-+
+   }
+ 
+-  function resetNr(id) {
+-    var node = el(id);
+-    if (!node || node.disabled) return;
+-    var min = Number(node.dataset.min || 0);
+-    var max = Number(node.dataset.max || 255);
+-    node.value = Math.round((min + max) / 2);
+-    saveNr(id);
 +  function show(c, value) {
 +    var node = input(c);
-     if (!node) return;
--    if (value === null || value === undefined || value === "") return;
--    node.value = value;
++    if (!node) return;
 +    last[c.id] = value;
 +    if (c.type === "switch") {
 +      node.checked = value === true || value === 1 || value === "1";
@@ -1551,11 +1587,22 @@ index 58c818012..4d470d2ef 100644
 +    if (range && value !== null && value !== undefined) range.value = value;
    }
  
--  function saveField(id) {
+-  async function load() {
 -    var helper = window.thinginoStreamer;
--    var endpoint = ENDPOINT_MAP[id];
--    var node = el(id);
--    if (!helper || !endpoint || !node) return;
+-    if (!helper || typeof helper.agentRequest !== "function") return;
+-    var config = await helper.agentRequest("/api/v1/config");
+-    var image = (config && config.image) || {};
+-    Object.keys(FIELD_MAP).forEach(function (id) {
+-      populate(id, image[FIELD_MAP[id]]);
+-    });
+-    Object.keys(NR_FIELDS).forEach(function (id) {
+-      var value = image[NR_FIELDS[id][0]];
+-      if (value === null || value === undefined) {
+-        hide(id);
+-        return;
+-      }
+-      populate(id, value);
+-      enable(id);
 +  function setBusy(c, busy) {
 +    var node = input(c);
 +    var range = slider(c);
@@ -1575,28 +1622,25 @@ index 58c818012..4d470d2ef 100644
 +    document.querySelectorAll(".iq-group[id^='iq_group_']").forEach(function (group) {
 +      var visible = group.querySelector(".iq-knob:not(.d-none)");
 +      group.classList.toggle("d-none", !visible);
-+    });
-+  }
-+
+     });
+   }
+ 
+-  function init() {
+-    // Re-enable immediately; values arrive when the config fetch resolves.
+-    Object.keys(FIELD_MAP).forEach(enable);
+-    // The noise-reduction fields stay disabled until the agent reports a
+-    // value for them.
+-    Object.keys(NR_FIELDS).forEach(function (id) {
+-      var node = el(id);
+-      if (!node) return;
+-      node.disabled = true;
 +  function setFlipPending(pending) {
 +    var note = el("iq_flip_pending");
 +    if (note) note.classList.toggle("d-none", !pending);
 +  }
 +
 +  async function apply(c, value) {
-     var body = {};
--    body[PAYLOAD_MAP[id]] = node.value;
--    helper
--      .agentRequest("/api/v1/settings/" + endpoint, {
--        method: "PATCH",
--        headers: { "Content-Type": "application/json" },
--        body: JSON.stringify(body),
--      })
--      .then(function () {
--        enable(id);
--      })
--      .catch(function (err) {
--        console.warn("Failed to save " + id, err);
++    var body = {};
 +    body[c.key] = value;
 +    setBusy(c, true);
 +    var res = null;
@@ -1634,15 +1678,18 @@ index 58c818012..4d470d2ef 100644
 +    var node = input(c);
 +    if (!node) return;
 +    if (c.type === "switch") {
-+      node.addEventListener("change", function () {
+       node.addEventListener("change", function () {
+-        saveNr(id);
 +        apply(c, node.checked);
        });
+-      node.addEventListener("dblclick", function () {
+-        resetNr(id);
 +      return;
 +    }
 +    if (c.type === "select") {
 +      node.addEventListener("change", function () {
 +        apply(c, parseInt(node.value, 10));
-+      });
+       });
 +      return;
 +    }
 +    node.addEventListener("change", function () {
@@ -1664,14 +1711,9 @@ index 58c818012..4d470d2ef 100644
 +    range.addEventListener("dblclick", function () {
 +      apply(c, KNOB_DEFAULT);
 +    });
-   }
- 
-   async function load() {
--    var helper = window.thinginoStreamer;
--    if (!helper || typeof helper.agentRequest !== "function") return;
--    var config = await helper.agentRequest("/api/v1/config");
--    Object.keys(FIELD_MAP).forEach(function (id) {
--      populate(id, config.image[FIELD_MAP[id]]);
++  }
++
++  async function load() {
 +    var got = await Promise.all([
 +      api("/api/v1/capabilities/image").catch(function (err) {
 +        console.warn("image capabilities", err);
@@ -1698,7 +1740,7 @@ index 58c818012..4d470d2ef 100644
 +      var shown = caps[c.cap] !== false && value !== null && value !== undefined;
 +      setShown(c, shown);
 +      if (shown) show(c, value);
-     });
++    });
 +    setFlipPending(
 +      (image.hflip_saved !== undefined && image.hflip_saved !== image.hflip) ||
 +        (image.vflip_saved !== undefined && image.vflip_saved !== image.vflip),
@@ -1707,19 +1749,8 @@ index 58c818012..4d470d2ef 100644
 +    var controls = el("iq_controls");
 +    if (controls) controls.classList.remove("opacity-50", "pe-none");
 +    document.body.dataset.iqLoadedMs = String(Math.round(performance.now()));
-   }
- 
--  function init() {
--    // Re-enable immediately; values arrive when the config fetch resolves.
--    Object.keys(FIELD_MAP).forEach(enable);
--    // Noise-reduction fields save through the agent directly (preview.js
--    // does not wire them).
--    Object.keys(ENDPOINT_MAP).forEach(function (id) {
--      var node = el(id);
--      if (!node) return;
--      node.addEventListener("change", function () {
--        saveField(id);
--      });
++  }
++
 +  // The sub stream's MJPEG while the page is visible, as preview.js does it.
 +  function initPreview() {
 +    var img = el("preview");
@@ -1739,11 +1770,11 @@ index 58c818012..4d470d2ef 100644
 +      lastFrame = Date.now();
 +      backoff = PREVIEW_STALL_MS;
 +      nextRestart = 0;
-+    });
+     });
 +    document.addEventListener("visibilitychange", function () {
 +      if (document.hidden) stop();
 +      else start();
-     });
++    });
 +    window.addEventListener("pagehide", stop);
 +    setInterval(function () {
 +      var now = Date.now();

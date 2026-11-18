@@ -1,6 +1,6 @@
-From 681070a8da4084eb5f87af27e9a0c0c2aea7863e Mon Sep 17 00:00:00 2001
+From 3474287c931904029fe5f612ab872690c11cfdc7 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Tue, 17 Nov 2026 17:54:40 -0500
+Date: Tue, 17 Nov 2026 19:06:17 -0500
 Subject: [PATCH 13/22] thingino-raptor: raptor-watchdog fault reports and
  recovery
 

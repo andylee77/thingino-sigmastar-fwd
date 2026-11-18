@@ -1,6 +1,6 @@
-From 41e6b542e4d2e852bfaf74e9baabf0fddb8edd37 Mon Sep 17 00:00:00 2001
+From 18feb0fb147734514aefc036725ff5c562e0190e Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Tue, 17 Nov 2026 17:54:40 -0500
+Date: Tue, 17 Nov 2026 19:06:17 -0500
 Subject: [PATCH 21/22] cameras: N803 PTZ (n803_ssc378qe_imx415, Pelco-D head)
 
 SSC378QE + IMX415, 3840x2160 + 1280x720, 5x zoom: its own board DTS, the
@@ -12,11 +12,11 @@ tuning is a vendor file and is not included.
  ...M-dts-infinity6c-add-the-N803-module.patch | 115 ++++++++
  .../cameras/n803_ssc378qe_imx415/.gitignore   |   2 +
  .../n803_ssc378qe_imx415.kernel.config        |  41 +++
- .../n803_ssc378qe_imx415_defconfig            | 254 ++++++++++++++++++
+ .../n803_ssc378qe_imx415_defconfig            | 253 ++++++++++++++++++
  .../overlay/etc/init.d/S04oemmac              |  23 ++
  .../overlay/etc/modules.d/sdcard              |   5 +
  .../n803_ssc378qe_imx415/raptor.config        |  39 +++
- 7 files changed, 479 insertions(+)
+ 7 files changed, 478 insertions(+)
  create mode 100755 board/sigmastar/infinity6c/patches/linux/0003-ARM-dts-infinity6c-add-the-N803-module.patch
  create mode 100644 configs/cameras/n803_ssc378qe_imx415/.gitignore
  create mode 100755 configs/cameras/n803_ssc378qe_imx415/n803_ssc378qe_imx415.kernel.config
@@ -203,10 +203,10 @@ index 000000000..483fad694
 +CONFIG_EXFAT_FS=m
 diff --git a/configs/cameras/n803_ssc378qe_imx415/n803_ssc378qe_imx415_defconfig b/configs/cameras/n803_ssc378qe_imx415/n803_ssc378qe_imx415_defconfig
 new file mode 100644
-index 000000000..a43405713
+index 000000000..8ed6a0f6d
 --- /dev/null
 +++ b/configs/cameras/n803_ssc378qe_imx415/n803_ssc378qe_imx415_defconfig
-@@ -0,0 +1,254 @@
+@@ -0,0 +1,253 @@
 +# NAME: Anpviz/UVision N803-HS5X — SSC378QE, Infinity6C, Sony IMX415 (8MP) PTZ
 +#
 +# STATUS (2026-10-29): FIRST DRAFT, not yet booted on hardware. Cloned from the
@@ -253,12 +253,11 @@ index 000000000..a43405713
 +# lane_num=4 if a live i2cdetect/dmesg shows it bringing up only 2). We build it
 +# from source via BR2_SIGMASTAR_SENSOR_SOURCE (same path the GC8613 uses, against
 +# the sensor headers from sigmastar-sensor-headers that match 1230's mi.ko).
-+# FRAG: soc-sigmastar core-sigmastar
++# FRAG: soc-infinity6c core-sigmastar
 +
 +# board.mk includes this file as a makefile before thingino.mk runs, so the
-+# vendor/model are readable there and drive SOC_VENDOR / SOC_MODEL / SOC_FAMILY
-+# / SOC_ARCH / SOC_CPU / KERNEL_VERSION.
-+BR2_SOC_VENDOR_SIGMASTAR=y
++# model is readable there and gives SOC_VENDOR / SOC_MODEL / SOC_FAMILY /
++# SOC_ARCH / KERNEL_VERSION.
 +BR2_SIGMASTAR_SOC_MODEL="ssc378qe"
 +
 +# Sony IMX415 (8MP), built from the SDK sensor-src (see SENSOR above; every

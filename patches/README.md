@@ -15,7 +15,7 @@ paths below are the development repo's, which is not published.
 
 | Directory | Patches | Applies onto | Made from |
 |---|---|---|---|
-| [`thingino-sigmastar/`](thingino-sigmastar/) | 22 | `themactep/thingino-firmware` at `0f9de1434` | branch `sigmastar-clean2`: the tree of the publish branch `sigmastar-publish`, cut by path into one commit per group |
+| [`thingino-sigmastar/`](thingino-sigmastar/) | 22 | `themactep/thingino-firmware` at `b8bcd6740` | branch `sigmastar-clean2`: the tree of the publish branch `sigmastar-publish`, cut by path into one commit per group |
 | [`raptor-hal/`](raptor-hal/) | 13 | bare `gtxaspec/raptor-hal` at `9f09664` | the fork's branch `sigmastar-publish`: the tree of its `sigmastar` tip, with the commits that touch only `FORK.md` folded into one |
 
 - `sigmastar-publish` is its own merge of the upstream base plus the SigmaStar
@@ -36,13 +36,17 @@ rewrites this section by hand (the bases and the dated drift note) before the
 series is published, in the refresh step of "Regenerate the export" in the
 development repo's publishing guide.
 
-- **Bases of this export** (cut 2026-11-17): `thingino-sigmastar/` on upstream
-  master `0f9de1434` (2026-11-17; `sigmastar-clean2~22`), `raptor-hal/` on
-  gtxaspec `main` `9f09664` (2026-10-31), unchanged. Both series keep their
-  counts, 22 and 13. The export before it was cut on 2026-11-11, on
-  `b9b040f33`. Since then upstream merged three of the series' vendor guards
-  (the ISP choice, the JZ MAC select, the Ingenic `lib-serial-mac`), so they
-  left patches 0005 and 0009; patch 0007 gained the page stamp, 0012 two
+- **Bases of this export** (cut 2026-11-17, the day's second): `thingino-sigmastar/`
+  on upstream master `b8bcd6740` (2026-11-17; `sigmastar-clean2~22`),
+  `raptor-hal/` on gtxaspec `main` `9f09664` (2026-10-31), unchanged. Both
+  series keep their counts, 22 and 13. The export before it was cut the same
+  day on `0f9de1434`, and the one before that on 2026-11-11, on `b9b040f33`.
+  Since 2026-11-11 upstream merged three of the series' vendor guards (the
+  ISP choice, the JZ MAC select, the Ingenic `lib-serial-mac`), so they left
+  patches 0005 and 0009, and then the Infinity6C family file with its SoC
+  fragment: the profiles name upstream's `soc-infinity6c` now, the series'
+  own SoC fragment is gone, and patch 0002 adds to upstream's family file
+  only what it does not hold yet. Patch 0007 gained the page stamp, 0012 two
   raptor patches (0112, 0113), and 0013 the watchdog's and the agent's part
   of running on a 64 MB board.
 - **Drift.** The development branch keeps moving; the export moves only when
@@ -60,7 +64,7 @@ development repo's publishing guide.
   `FORK.md`. It commits, moves and pushes nothing.
 - **On 2026-11-17** the drift check passes every test: both series apply
   cleanly to their bases and give the trees named above, and every
-  development commit is classified (68 in the bundle, one more re-cut there,
+  development commit is classified (68 in the bundle, two more re-cut there,
   72 left out). Left out as generic work for upstream pull requests of their
   own: the web UI and agent speed-ups, the state daemon `thingino-camd`, the
   detection settings page, and `2b353000b`, four schema-order fixes to

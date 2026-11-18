@@ -1,12 +1,12 @@
-From b7ace8fb83c25e33c9fe9a32d21990d79eae1c47 Mon Sep 17 00:00:00 2001
+From d6bb4da4caca446cd621044357f19bfb568b4457 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Tue, 17 Nov 2026 17:54:40 -0500
+Date: Tue, 17 Nov 2026 19:06:17 -0500
 Subject: [PATCH 03/22] sigmastar: config fragments and Config/Makefile wiring
 
-The soc- and core-sigmastar fragments (re-synced with core.fragment); the
-Config.in wiring, with BR2_TARGET_UBOOT kept Ingenic-only; Config.soc.in
-mapping the six Maruko parts to BR2_SOC_FAMILY; image assembly in the split
-Makefiles. Config.in also sources the SigmaStar packages, thingino-lensd,
+The core-sigmastar fragment (re-synced with core.fragment); the profiles take
+their SoC fragment, soc-infinity6c, from upstream. The Config.in wiring, with
+BR2_TARGET_UBOOT kept Ingenic-only; the sensor-source option in
+Config.soc.in; image assembly in the split Makefiles. Config.in also sources the SigmaStar packages, thingino-lensd,
 thingino-nettest and thingino-ipud.
 
 core-sigmastar selects one package set for every SigmaStar board: the PWM
@@ -15,16 +15,13 @@ enabled. What a board's hardware has is config in its defconfig: the light
 channels, the lensd mode, the microSD modules.
 ---
  Config.in                                 |  14 +-
- Config.soc.in                             |  14 +-
- Makefile                                  |   2 +
+ Config.soc.in                             |  10 ++
  Makefile.ota                              |   7 +
  Makefile.utils                            |  34 ++++-
  configs/fragments/core-sigmastar.fragment | 157 ++++++++++++++++++++++
- configs/fragments/soc-sigmastar.fragment  |  15 +++
  configs/fragments/uclibc/gnu-hash.config  |   1 +
- 8 files changed, 240 insertions(+), 4 deletions(-)
+ 6 files changed, 220 insertions(+), 3 deletions(-)
  create mode 100644 configs/fragments/core-sigmastar.fragment
- create mode 100644 configs/fragments/soc-sigmastar.fragment
  create mode 100644 configs/fragments/uclibc/gnu-hash.config
 
 diff --git a/Config.in b/Config.in
@@ -90,16 +87,10 @@ index 49105ddfc..b4e9b45a7 100644
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-uboot/Config.in"
  source "$BR2_EXTERNAL_THINGINO_PATH/package/thingino-ubus/Config.in"
 diff --git a/Config.soc.in b/Config.soc.in
-index ef768feab..fd03f537d 100644
+index b2897a20c..fd03f537d 100644
 --- a/Config.soc.in
 +++ b/Config.soc.in
-@@ -38,10 +38,21 @@ config BR2_SIGMASTAR_SOC_MODEL
- 	  Enter the SigmaStar SoC model name for your device (e.g., ssc30kq).
- 	  This value is used to automatically derive the SoC family.
- 
--	  Supported models: ssc30kq
-+	  Supported models: ssc30kq, ssc377, ssc377d, ssc377de, ssc377qe,
-+	  ssc378de, ssc378qe
+@@ -43,6 +43,16 @@ config BR2_SIGMASTAR_SOC_MODEL
  
  	  Note: Model name is case-insensitive.
  
@@ -116,27 +107,6 @@ index ef768feab..fd03f537d 100644
  config BR2_SOC_FAMILY
  	string
  	default "t10" if BR2_INGENIC_SOC_MODEL = "t10l" || BR2_INGENIC_SOC_MODEL = "t10n" || BR2_INGENIC_SOC_MODEL = "t10a"
-@@ -59,6 +70,7 @@ config BR2_SOC_FAMILY
- 	# so the two halves of this chain cannot both match and their order does
- 	# not matter.
- 	default "infinity6e" if BR2_SIGMASTAR_SOC_MODEL = "ssc30kq"
-+	default "infinity6c" if BR2_SIGMASTAR_SOC_MODEL = "ssc377" || BR2_SIGMASTAR_SOC_MODEL = "ssc377d" || BR2_SIGMASTAR_SOC_MODEL = "ssc377de" || BR2_SIGMASTAR_SOC_MODEL = "ssc377qe" || BR2_SIGMASTAR_SOC_MODEL = "ssc378de" || BR2_SIGMASTAR_SOC_MODEL = "ssc378qe"
- 
- config BR2_SOC_RAM_MB
- 	int "RAM size in MB"
-diff --git a/Makefile b/Makefile
-index 98a5e3208..061ebbbdc 100644
---- a/Makefile
-+++ b/Makefile
-@@ -300,6 +300,8 @@ NPROC := $(shell nproc)
- SED_CONFIG_VARS = sed \
- 	's/\$$[(]BR2_HOSTARCH[)]/$(BR2_HOSTARCH)/g; \
- 	 s/\$$[(]SOC_ARCH[)]/$(SOC_ARCH)/g; \
-+	 s/\$$[(]SOC_CPU[)]/$(SOC_CPU)/g; \
-+	 s/\$$[(]SOC_FPU[)]/$(SOC_FPU)/g; \
- 	 s/\$$[(]SOC_TARGET_ARCH[)]/$(SOC_TARGET_ARCH)/g; \
- 	 s/\$$[(]TOOLCHAIN_SOC_TAG[)]/$(TOOLCHAIN_SOC_TAG)/g; \
- 	 s/\$$[(]SOC_MODEL[)]/$(SOC_MODEL)/g; \
 diff --git a/Makefile.ota b/Makefile.ota
 index afcb1e06a..3f1fab2a1 100644
 --- a/Makefile.ota
@@ -212,7 +182,7 @@ index 798225ced..b99fb214b 100644
  	@$(TEAL) "$@"
 diff --git a/configs/fragments/core-sigmastar.fragment b/configs/fragments/core-sigmastar.fragment
 new file mode 100644
-index 000000000..d35614d98
+index 000000000..f4d85ee4e
 --- /dev/null
 +++ b/configs/fragments/core-sigmastar.fragment
 @@ -0,0 +1,157 @@
@@ -344,8 +314,8 @@ index 000000000..d35614d98
 +#     MMC options plus overlay/etc/modules.d/sdcard.
 +# The sensor-driver build belongs to the same set but cannot live here:
 +# BR2_SIGMASTAR_SENSOR_SOURCE is read by soc/sigmastar/infinity6c.mk from the
-+# camera defconfig included as a makefile, which never sees this fragment (the
-+# trap soc-sigmastar.fragment describes for BR2_SOC_VENDOR_SIGMASTAR). Every
++# camera defconfig included as a makefile, which never sees this fragment:
++# fragments are appended to .config and never included as makefiles. Every
 +# camera defconfig sets it, and the package-set check compares them.
 +BR2_PACKAGE_SIGMASTAR_LIGHT=y
 +BR2_PACKAGE_THINGINO_LENSD=y
@@ -373,27 +343,6 @@ index 000000000..d35614d98
 +BR2_TARGET_ROOTFS_SQUASHFS4_XZ=y
 +BR2_TARGET_ROOTFS_SQUASHFS_EXTREME_COMP=y
 +# BR2_TARGET_ROOTFS_TAR is not set
-diff --git a/configs/fragments/soc-sigmastar.fragment b/configs/fragments/soc-sigmastar.fragment
-new file mode 100644
-index 000000000..427018d76
---- /dev/null
-+++ b/configs/fragments/soc-sigmastar.fragment
-@@ -0,0 +1,15 @@
-+BR2_arm=y
-+# Not every SigmaStar family is the same core: Infinity6E and Infinity6B0 are
-+# Cortex-A7, Infinity6C is Cortex-A35. soc/sigmastar/<family>.mk names it.
-+BR2_$(SOC_CPU)=y
-+# Has to track the CPU. neon-vfpv4 is an ARMv7 FPU; pairing it with an ARMv8-A
-+# core leaves GCC reporting __ARM_ARCH 8 while refusing the instructions that
-+# implies, which surfaces far away -- mbedTLS enables its ARMv8 AES path and
-+# then fails to inline vaesdq_u8 with "target specific option mismatch".
-+BR2_ARM_FPU_$(SOC_FPU)=y
-+BR2_ARM_INSTRUCTIONS_THUMB2=y
-+
-+# BR2_SOC_VENDOR_SIGMASTAR is declared in the camera defconfig, not here.
-+# Fragments are appended to .config but never included as makefiles, so a vendor
-+# set only in a fragment reaches Kconfig while thingino.mk still reads it as
-+# empty and dispatches to Ingenic.
 diff --git a/configs/fragments/uclibc/gnu-hash.config b/configs/fragments/uclibc/gnu-hash.config
 new file mode 100644
 index 000000000..b8fbe37ac

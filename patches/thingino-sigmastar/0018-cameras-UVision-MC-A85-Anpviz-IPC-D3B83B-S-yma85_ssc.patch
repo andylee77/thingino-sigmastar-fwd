@@ -1,6 +1,6 @@
-From 13f67ab29f80be96a809b55c48233ca3d606de70 Mon Sep 17 00:00:00 2001
+From c964021eaf94468ce419a0c90dbc4836ddb54528 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Tue, 17 Nov 2026 17:54:40 -0500
+Date: Tue, 17 Nov 2026 19:06:17 -0500
 Subject: [PATCH 18/22] cameras: UVision MC-A85 / Anpviz IPC-D3B83B-S
  (yma85_ssc378_gc8613, 4K)
 
@@ -16,8 +16,8 @@ tuning (gc8613.bin) is a vendor file and is not included.
  .../cameras/yma85_ssc378_gc8613/.gitignore    |   3 +
  .../cameras/yma85_ssc378_gc8613/raptor.config |  39 +++
  .../yma85_ssc378_gc8613.kernel.config         |  35 +++
- .../yma85_ssc378_gc8613_defconfig             | 247 ++++++++++++++++++
- 5 files changed, 417 insertions(+)
+ .../yma85_ssc378_gc8613_defconfig             | 246 ++++++++++++++++++
+ 5 files changed, 416 insertions(+)
  create mode 100644 board/sigmastar/infinity6c/patches/linux/0001-ARM-dts-infinity6c-add-the-UVision-MC-A85-module.patch
  create mode 100644 configs/cameras/yma85_ssc378_gc8613/.gitignore
  create mode 100644 configs/cameras/yma85_ssc378_gc8613/raptor.config
@@ -220,10 +220,10 @@ index 000000000..b8e86c8d2
 +# CONFIG_CMDLINE_EXTEND is not set
 diff --git a/configs/cameras/yma85_ssc378_gc8613/yma85_ssc378_gc8613_defconfig b/configs/cameras/yma85_ssc378_gc8613/yma85_ssc378_gc8613_defconfig
 new file mode 100644
-index 000000000..8b4f9ebc4
+index 000000000..3a3d49beb
 --- /dev/null
 +++ b/configs/cameras/yma85_ssc378_gc8613/yma85_ssc378_gc8613_defconfig
-@@ -0,0 +1,247 @@
+@@ -0,0 +1,246 @@
 +# NAME: Anpviz IPC-D3B83B-S (YMA85_IRCN) — SSC378DE, Infinity6C, GC8613 (8MP)
 +#
 +# STATUS (2026-10-18): self-contained. The image carries the GC8613 driver, the
@@ -275,12 +275,11 @@ index 000000000..8b4f9ebc4
 +# sensor-src drivers against them (every board sets it, so every image carries
 +# the same driver set; the drop's prebuilt imx335/imx307 stay as they are);
 +# load_sigmastar loads gc8613 with chmap=1 lane_num=4 (4-lane MIPI).
-+# FRAG: soc-sigmastar core-sigmastar
++# FRAG: soc-infinity6c core-sigmastar
 +
 +# board.mk includes this file as a makefile before thingino.mk runs, so the
-+# vendor/model are readable there and drive SOC_VENDOR / SOC_MODEL / SOC_FAMILY
-+# / SOC_ARCH / SOC_CPU / KERNEL_VERSION.
-+BR2_SOC_VENDOR_SIGMASTAR=y
++# model is readable there and gives SOC_VENDOR / SOC_MODEL / SOC_FAMILY /
++# SOC_ARCH / KERNEL_VERSION.
 +BR2_SIGMASTAR_SOC_MODEL="ssc378de"
 +
 +# GalaxyCore GC8613 (8MP), built from source (see SENSOR above).
