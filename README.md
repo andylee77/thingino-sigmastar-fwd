@@ -75,6 +75,7 @@ LICENSE, NOTICE.md, LICENSES/  which license covers which part, and the credits
 docs/
   WHAT-THIS-PORT-ADDS.md       exhaustive, per-patch breakdown (PR-split detail)
   UPSTREAM-PLAN.md             the plan for landing the port upstream, PR by PR, and its state
+  DETECTION-GUIDE.md           on-camera detection: what an image needs, models, how to run it
   raptor-hal-FORK.md           the one fork: what is John Chia's, what is new here
   oem-reference/               reverse-engineered OEM lens/PTZ and IR-cut protocols
 patches/
@@ -219,7 +220,10 @@ they are opened. It applies on top of the Thingino series. Two patches today:
   `thingino-ipud`'s overlay uses the same drawing code.
 
 The overlay and its feed have run on an Ingenic T31 camera; the rest is covered
-by host tests. Detail in
+by host tests. [docs/DETECTION-GUIDE.md](docs/DETECTION-GUIDE.md) says what an
+image needs (the build options, the libraries, the models), how to apply the
+patches to upstream for an Ingenic camera such as the Wyze Cam v4, and what was
+tested; the patch detail is in
 [docs/WHAT-THIS-PORT-ADDS.md](docs/WHAT-THIS-PORT-ADDS.md#4-the-generic-series).
 
 ## Protocol references

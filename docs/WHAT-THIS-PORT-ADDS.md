@@ -784,7 +784,9 @@ The SoC, sensor and default streams of each are in the README's
 not depend on the SigmaStar platform and is meant for upstream pull requests of
 its own. It is published here so that it can be read before those are opened.
 Its two patches apply on top of the 22 of the Thingino series, and every file
-they change is Thingino's own (MIT).
+they change is Thingino's own (MIT). What an image needs to run them, how to
+apply them to upstream for an Ingenic camera and what was tested are in
+[DETECTION-GUIDE.md](DETECTION-GUIDE.md).
 
 | # | Patch | Mainly for | Scope |
 |---|---|---|---|
