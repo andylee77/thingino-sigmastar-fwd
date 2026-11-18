@@ -79,6 +79,7 @@ docs/
   oem-reference/               reverse-engineered OEM lens/PTZ and IR-cut protocols
 patches/
   thingino-sigmastar/          22 patches onto themactep/thingino-firmware master
+  thingino-generic/            2 patches on top of those: generic work not upstream yet
   raptor-hal/                  13 patches onto gtxaspec/raptor-hal
 tools/
   onvifcheck/                  an ONVIF conformance and client-compatibility checker
@@ -201,6 +202,26 @@ already have, for a build or the SD card. No IPU firmware is needed.
 **Upstreaming:** it uses the MI IPU and SCL APIs, so it belongs with the
 SigmaStar platform.
 
+## Generic work not upstream yet: detection settings `[THIS PORT]`
+
+`patches/thingino-generic/` holds work that does not depend on SigmaStar and
+is meant for upstream pull requests of its own, so that it can be read before
+they are opened. It applies on top of the Thingino series. Two patches today:
+
+- **The raptor agent adapter** as the port's development tree runs it: a
+  config read no longer starts a process per field, and the agent gains the
+  settings and reads for raptor's own detection (rvd's IVS): the method, the
+  model and its thresholds, a switch for the boxes drawn into the sub stream,
+  class names, and the current detections.
+- **A detection settings page and a labelled preview overlay**: Settings >
+  Detection, and a Detections button on the preview that draws boxes with the
+  class name and score for the viewer, fed by one server-sent event stream.
+  `thingino-ipud`'s overlay uses the same drawing code.
+
+The overlay and its feed have run on an Ingenic T31 camera; the rest is covered
+by host tests. Detail in
+[docs/WHAT-THIS-PORT-ADDS.md](docs/WHAT-THIS-PORT-ADDS.md#4-the-generic-series).
+
 ## Protocol references
 
 The serial lens/PTZ and day/night behaviour was reverse-engineered from the OEM
@@ -227,6 +248,9 @@ checkouts of the two upstream trees at the commits the series were cut on:
 cd thingino-firmware
 git checkout b8bcd6740
 git am /path/to/patches/thingino-sigmastar/*.patch
+
+# optional: the generic series, on top of the result
+git am /path/to/patches/thingino-generic/*.patch
 
 # the HAL fork, onto gtxaspec/raptor-hal
 cd raptor-hal

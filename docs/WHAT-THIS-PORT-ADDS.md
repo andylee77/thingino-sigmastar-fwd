@@ -1,9 +1,10 @@
 # What this forward-port adds to Thingino
 
 This firmware is upstream Thingino plus a SigmaStar Infinity6C layer. It ships
-as two patch series: 22 patches onto `themactep/thingino-firmware` master
+as three patch series: 22 patches onto `themactep/thingino-firmware` master
 (`b8bcd6740`, 2026-11-17) and 13 onto `gtxaspec/raptor-hal` main (`9f09664`,
-2026-10-31). Together they bring up four camera models and a board-less
+2026-10-31), and 2 generic patches on top of the first series (part 4).
+Together they bring up four camera models and a board-less
 reference target, add three feature packages (`thingino-lensd`,
 `thingino-nettest`, `thingino-ipud`), and carry a set of general fixes meant to
 go back upstream.
@@ -24,6 +25,8 @@ overview, the apply steps and the questions for the maintainers are in the
   by upstream project.
 - **Part 2:** what the build adds on top of Thingino for SigmaStar cameras.
 - **Part 3:** what is still open.
+- **Part 4:** the generic series: work that does not depend on SigmaStar and
+  is not upstream yet.
 
 The platform has started going upstream as small pull requests. Upstream merged
 three of this port's vendor guards
@@ -774,3 +777,74 @@ The SoC, sensor and default streams of each are in the README's
   repository is published to discuss: the plan is in
   [UPSTREAM-PLAN.md](UPSTREAM-PLAN.md) and the questions are in the
   [README](../README.md#open-questions-for-the-discussion).
+
+## 4. The generic series
+
+[`patches/thingino-generic/`](../patches/thingino-generic/) holds work that does
+not depend on the SigmaStar platform and is meant for upstream pull requests of
+its own. It is published here so that it can be read before those are opened.
+Its two patches apply on top of the 22 of the Thingino series, and every file
+they change is Thingino's own (MIT).
+
+| # | Patch | Mainly for | Scope |
+|---|---|---|---|
+| G0001 | raptor agent: config reads without a process per field; detection settings | Thingino (the raptor agent adapter, `agent-lib`) | generic |
+| G0002 | raptor: a detection settings page and a labelled preview overlay | Thingino (raptor's web UI) | generic; `thingino-ipud`'s overlay shares the drawing code |
+
+### 4.1 The agent adapter `[G0001]`
+
+The raptor agent adapter and `agent-lib` as the port's development tree runs
+them.
+
+- **Reads without a process per field.** `GET /config`, the stream blocks and
+  the image block are printed through helpers that hand their result back in
+  a variable, from sections read once and an ISP state parsed once. Printed
+  field by field through command substitutions, one config read started
+  about 390 processes; `agent-lib` also quotes a string that has nothing to
+  escape without `awk`.
+- **Detection settings**, for raptor's own detector (rvd's IVS):
+  `settings/motion/algorithm`, `model`, `num-classes`, `conf-threshold` and
+  `nms-threshold`, beside the sensitivity and cooldown settings the agent
+  already had. rvd reads them at its start, so each answers that a stream
+  restart applies it. `settings/motion/draw-boxes` switches the boxes rod
+  draws into the sub stream, at once; `settings/motion/labels` gives the class
+  names (a `<model>.txt` beside the model, else the public models' names).
+- **Capabilities and the current detections.** The capabilities list the
+  detection methods whose libraries the image has and the model files; the
+  runtime read `detections` gives rvd's current boxes with the sub stream's
+  size.
+
+On the host the adapter's answers match ones saved from two Infinity6C
+cameras, which have no IVS, and its detection answers pass a test against a
+stand-in `raptorctl`.
+
+### 4.2 The detection page and the preview overlay `[G0002]`
+
+raptor's detection could be set in `raptor.conf` alone, and what it found
+showed only as rod's unlabelled boxes in the sub stream.
+
+- **Settings > Detection** (`config-detect.html`), installed with raptor's IVS
+  build option: on and off, the method, sensitivity and cooldown, and for a
+  model its file, class count, confidence and overlap. A save writes only
+  what changed; when the camera stages a setting for a restart, the page
+  offers it; with no model on the camera it says so.
+- **A Detections button on the preview**: boxes with the class name and score
+  over the picture, for the viewer alone. `json-detect.cgi` feeds it as one
+  server-sent event stream, an event when the detections change and one every
+  few seconds otherwise, at one `raptorctl` call a tick; no boxes are drawn
+  over a player without a picture.
+- **One overlay for both detectors.** `detect-overlay.js` draws for raptor's
+  detector and for `thingino-ipud` (1.5.6), whose overlay was the same code:
+  `preview-ipud.js` now only feeds it from its own event stream. Same button,
+  same remembered choice.
+
+*The overlay and its feed have run on an Ingenic T31 camera with detection on,
+the boxes following at a median of 360 ms.* The page scripts pass a host test
+of 46 checks. The two raptor patches that let rod's boxes reach the sub stream
+at all are 0112 and 0113 `[0012]`.
+
+### 4.3 What the generic series does not hold
+
+Other generic work of this port is not in this repository: it goes upstream as
+pull requests of its own, some of them open or merged already (the
+[README](../README.md) lists them).
