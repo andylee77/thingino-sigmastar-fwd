@@ -29,7 +29,7 @@ two cores, gc4023 sensor, the accelerator).
 | The agent | the adapter answers through `agent.cgi` on the web UI's pages | adapter paths that read a vendor's hardware |
 | raptor | 1920x1080 and 640x360 H.264 at 30 fps with AAC audio over RTSP, the OSD drawn, JPEG snapshots | image quality, encoder limits, memory budgets, speed |
 | The T41 | a shell in 37 s on kernel 4.4.94 with both cores; the gc4023 at 2560x1440; RTSP main and sub, read at about 20 fps | as for the T31 |
-| The T41's accelerator | a YOLOv5s runs end to end and matches the vendor's PC result, with a fix to the emulator (see [below](#a-model-on-the-emulated-t41s-accelerator)) | whether a chip agrees in every value, and every speed number |
+| The T41's accelerator | a YOLOv5s runs end to end and matches the vendor's PC result, with a fix to the emulator that its release 0.7.26 carries (see [below](#a-model-on-the-emulated-t41s-accelerator)) | every speed number; the comparisons with a chip are other people's, not ours |
 
 ONVIF, Wi-Fi and the setup portal, audio, GPIO, PWM and ADC are supported by
 the harness and were not tried here.
@@ -91,9 +91,12 @@ same model. Getting there took four things.
    The fork's [issue 18](https://github.com/gtxaspec/qemu/issues/18) reports
    the same symptom beside a real T41NQ, which gets it right. The fix is a
    17-line change to `hw/misc/ingenic-nna.c` with a test case, offered to the
-   fork as [pull request 19](https://github.com/gtxaspec/qemu/pull/19); until
-   a release carries it, the runs below need a build of the fork with it,
-   named to the harness with `QEMU_BIN=<path to qemu-system-mipsel>`.
+   fork as [pull request 19](https://github.com/gtxaspec/qemu/pull/19). The
+   fork's author checked it on a T41NQ and released it in `ingenic-0.7.26`,
+   and the reporter of issue 18 then found their network byte-identical to
+   their chip on that release. So use release 0.7.26 or later. Where the
+   tree still pins an older one, name a newer build to the harness with
+   `QEMU_BIN=<path to qemu-system-mipsel>`.
 2. **Three boot settings**, written with `fw_setenv` on the emulated camera
    and followed by a reboot:
    - `mw 0xb2200060 0x02000400;` in front of `bootcmd`. It sets the L2
@@ -118,7 +121,7 @@ same model. Getting there took four things.
 What the comparison showed, for the converted YOLOv5s against the PC
 executor's per-layer dump of the same model and picture:
 
-| | Emulator as released | With the fix |
+| | Release 0.7.25 | With the fix |
 |---|---|---|
 | Convolutions before the first add | correlation 0.945, then 0.07 | byte for byte |
 | First residual add | wrong | 99.71 % equal, the rest one count off |
@@ -156,9 +159,12 @@ converter.
 
 ## What was not tested
 
-- **No chip was at hand for the accelerator.** The reference is Ingenic's PC
-  executor, which is the vendor's own model of the quantized network, not
-  silicon.
+- **No chip was at hand here for the accelerator.** Our reference is
+  Ingenic's PC executor, which is the vendor's own model of the quantized
+  network, not silicon. The comparisons with a T41NQ are the fork author's
+  (the fix's test case and a sweep of both weight modes, on pull request 19)
+  and the reporter's of issue 18 (a YOLOv5n, byte-identical on release
+  0.7.26).
 - **The emulated A1.** Its machine does not connect the accelerator to the
   CPUs, so the first accelerator instruction is an illegal instruction there.
 - **Detection on the CPU** (JZDL, what
