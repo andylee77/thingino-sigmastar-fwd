@@ -77,6 +77,7 @@ docs/
   UPSTREAM-PLAN.md             the plan for landing the port upstream, PR by PR, and its state
   DETECTION-GUIDE.md           on-camera detection: what an image needs, models, how to run it
   EMULATED-CAMERA.md           notes on an emulated Ingenic camera as a test unit, its accelerator included
+  FLEET-ACCESS.md              how the test and deployed cameras are reached, and the Git Bash/WSL set-up
   raptor-hal-FORK.md           the one fork: what is John Chia's, what is new here
   oem-reference/               reverse-engineered OEM lens/PTZ and IR-cut protocols
 patches/
@@ -230,6 +231,9 @@ tested; the patch detail is in
 Generic work can be tried without a camera: [docs/EMULATED-CAMERA.md](docs/EMULATED-CAMERA.md)
 has notes on an emulated Ingenic camera as a test unit, and on running a
 detection model through the emulated T41's accelerator.
+[docs/FLEET-ACCESS.md](docs/FLEET-ACCESS.md) says how the real ones are reached:
+one SSH tool that names and finds each camera by MAC, checksums every copy and
+reads every unit's build, and the wrappers and hooks around Git Bash and WSL.
 
 ## Protocol references
 
