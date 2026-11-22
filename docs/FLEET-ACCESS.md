@@ -75,9 +75,10 @@ Examples below use `MODEL-1A2B` and `<camera-ip>`.
 `cam MODEL-1A2B ...` (or just `cam 1a2b ...`, or the MAC) does this:
 
 1. Connect to the cached `last_ip` over SSH.
-2. Read the unit's MAC from `/sys/class/net/eth0/address` (or `wlan0`'s) and
-   compare it with the fleet file. A match means the right camera: run the
-   command.
+2. Read every interface's MAC from `/sys/class/net/*/address` and check that
+   the fleet file's MAC is among them. A match means the right camera: run
+   the command. (Reading only `eth0` failed on a Wi-Fi-only board whose
+   unused `eth0` carries a bootloader placeholder address.)
 3. On a mismatch or no answer, rediscover:
    - probe port 22 on every host of the listed subnets in parallel and keep
      the SSH banners;
@@ -87,7 +88,12 @@ Examples below use `MODEL-1A2B` and `<camera-ip>`.
      banner says `dropbear` (Thingino's SSH server) and read their MAC. Other
      SSH hosts are listed and never logged in to.
 4. Record the new IP and carry on. `cam find` runs the sweep for the whole
-   fleet and names any dropbear host that is not in the fleet file.
+   fleet and names any dropbear host that is not in the fleet file. Beside
+   the sweep it browses Thingino's mDNS service, `_thingino._tcp`, on the
+   subnets the workstation shares a link with, so an unknown Thingino
+   camera is listed with its product and build. mDNS does not cross a
+   router, and the sweep is about as fast, so it only labels; it finds
+   nothing the sweep would not.
 
 ## Commands
 
