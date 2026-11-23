@@ -1,6 +1,6 @@
-From 7ecbb096ae2b55edb567be40e25a9a2fe4a58d26 Mon Sep 17 00:00:00 2001
+From c1b398c391ea74b3b0984d58221d20900e9708a3 Mon Sep 17 00:00:00 2001
 From: Andy <andylee77@users.noreply.github.com>
-Date: Tue, 17 Nov 2026 20:05:17 -0500
+Date: Mon, 23 Nov 2026 02:44:16 -0500
 Subject: [PATCH 1/2] raptor agent: config reads without a process per field;
  detection settings
 
@@ -21,14 +21,26 @@ top of the adapter of the Thingino series:
   model, else the public models' names). The capabilities list the
   algorithms whose libraries the image has and the model files; the runtime
   read "detections" gives rvd's current boxes with the sub stream's size.
+- Turning detection on answers restart_required when rvd runs no IVS
+  channel (it builds one only at its start), so the page offers the video
+  restart instead of saying "saved" while nothing detects.
+- The model list also offers the models folder of an SD card
+  (/mnt/mmcblk*/models/), so a model can be tried without a new image, and
+  .mgk models beside .bin ones. The model method is offered when the image
+  has the JZDL engine or Ingenic's Uranus runtime for the T41's NNA
+  (liburanus_core.so); the .mgk models need the NNA backend proposed as
+  gtxaspec/raptor-hal#21.
+- settings/motion/detect-interval-ms sets [motion] detect_interval_ms, the
+  least time between two inferences and with it detection's CPU cost; rvd
+  reads it once gtxaspec/raptor#96 is in, and ignores it before.
 
 Generic: none of it depends on the SigmaStar platform. On the host the
 adapter's answers match ones saved from two Infinity6C cameras, which have
 no IVS, and its detection answers pass a test against a stand-in raptorctl.
 ---
- package/thingino-agent/files/agent-lib      |  12 +
- package/thingino-raptor/files/agent-adapter | 971 ++++++++++++++++----
- 2 files changed, 824 insertions(+), 159 deletions(-)
+ package/thingino-agent/files/agent-lib      |   12 +
+ package/thingino-raptor/files/agent-adapter | 1007 ++++++++++++++++---
+ 2 files changed, 859 insertions(+), 160 deletions(-)
 
 diff --git a/package/thingino-agent/files/agent-lib b/package/thingino-agent/files/agent-lib
 index 1608d45ae..4642e6f47 100644
@@ -54,7 +66,7 @@ index 1608d45ae..4642e6f47 100644
  		gsub(/\\/, "\\\\");
  		gsub(/"/, "\\\"");
 diff --git a/package/thingino-raptor/files/agent-adapter b/package/thingino-raptor/files/agent-adapter
-index 352b00d08..9ac7c0e5d 100644
+index 352b00d08..0db2f541a 100644
 --- a/package/thingino-raptor/files/agent-adapter
 +++ b/package/thingino-raptor/files/agent-adapter
 @@ -11,8 +11,12 @@ AGENT_STREAM_OPTIONS_LOCAL="${AGENT_STREAM_OPTIONS_LOCAL:-/etc/raptor-streams.co
@@ -163,24 +175,45 @@ index 352b00d08..9ac7c0e5d 100644
  	agent_config_get image "$key"
  }
  
-@@ -678,6 +716,172 @@ agent_motion_active() {
+@@ -658,6 +696,14 @@ agent_motion_set_enabled() {
+ 	return 0
+ }
+ 
++# Whether rvd runs an IVS channel now (it builds one only at its start).
++agent_ivs_running() {
++	case "$(raptorctl rvd ivs-status 2>/dev/null)" in
++		*'"active":true'* | *'"active": true'*) return 0 ;;
++	esac
++	return 1
++}
++
+ agent_motion_active() {
+ 	status=$(agent_daemon_status rmd)
+ 	state=$(agent_json_string_field state "$status")
+@@ -678,6 +724,181 @@ agent_motion_active() {
  	printf 'false'
  }
  
 +# The detection algorithms rvd can run on this image: the SDK's motion grid
-+# always, the vendor's person detector and a JZDL model when their libraries
-+# are installed.
++# always, the vendor's person detector when its library is installed, and a
++# model when an engine for it is: JZDL, or on a T41 the Uranus runtime of the
++# NNA backend (BR2_PACKAGE_THINGINO_RAPTOR_IVS_NNA).
 +agent_motion_algorithms() {
 +	_ma='"move","base_move"'
 +	[ -e /usr/lib/libpersonDet_inf.so ] && _ma="$_ma,\"persondet\""
-+	[ -e /usr/lib/libjzdl.m.so ] && _ma="$_ma,\"yolo\""
++	if [ -e /usr/lib/libjzdl.m.so ] || [ -e /usr/lib/liburanus_core.so ]; then
++		_ma="$_ma,\"yolo\""
++	fi
 +	printf '[%s]' "$_ma"
 +}
 +
-+# The model files a JZDL run can load.
++# The model files a model run can load: JZDL's .bin, the Uranus runtime's .mgk;
++# the image's, then a models folder at the top of an SD card (a model dropped
++# there can be picked without a new image; its <model>.txt class names beside it).
 +agent_motion_models() {
 +	_mm=
-+	for _mf in /usr/share/models/*.bin; do
++	for _mf in /usr/share/models/*.bin /usr/share/models/*.mgk \
++		/mnt/mmcblk*/models/*.bin /mnt/mmcblk*/models/*.mgk; do
 +		[ -f "$_mf" ] || continue
 +		_mm="$_mm${_mm:+,}\"$_mf\""
 +	done
@@ -235,7 +268,7 @@ index 352b00d08..9ac7c0e5d 100644
 +}
 +
 +# The class names of the model in use, in class order: one a line in a file
-+# beside it, <model>.txt for <model>.bin. A model without that file gets the
++# beside it, <model>.txt for <model>.bin or <model>.mgk. A model without that file gets the
 +# names the public Magik models were trained on (COCO's order: the four-class
 +# model has its first four, the person detector its first), as many as the
 +# model has classes.
@@ -244,7 +277,8 @@ index 352b00d08..9ac7c0e5d 100644
 +agent_motion_labels() {
 +	_ml=$(agent_config_get motion model)
 +	_ml=${_ml:-/usr/share/models/magik_model_yolov5.bin}
-+	_ml=${_ml%.bin}.txt
++	_ml=${_ml%.bin}
++	_ml=${_ml%.mgk}.txt
 +	_mo=
 +	_mn=0
 +	if [ -f "$_ml" ]; then
@@ -292,6 +326,8 @@ index 352b00d08..9ac7c0e5d 100644
 +		printf ',"conf_threshold":%s' "$_cv"
 +		agent_cfg_int motion nms_threshold 50
 +		printf ',"nms_threshold":%s' "$_cv"
++		agent_cfg_int motion detect_interval_ms 0
++		printf ',"detect_interval_ms":%s' "$_cv"
 +		printf ',"draw_boxes":%s' "$(agent_motion_draw_boxes)"
 +	fi
 +}
@@ -336,7 +372,7 @@ index 352b00d08..9ac7c0e5d 100644
  agent_daynight_mode_config() {
  	if agent_has_daynightd; then
  		agent_daynightd_target_mode
-@@ -962,6 +1166,23 @@ agent_stream_audio_enabled() {
+@@ -962,6 +1183,23 @@ agent_stream_audio_enabled() {
  	agent_config_bool audio enabled true
  }
  
@@ -360,7 +396,7 @@ index 352b00d08..9ac7c0e5d 100644
  agent_stream_field() {
  	stream_id=$1
  	field=$2
-@@ -1106,26 +1327,63 @@ agent_stream_mma_kib() {
+@@ -1106,26 +1344,63 @@ agent_stream_mma_kib() {
  
  agent_stream_state_load() {
  	# Effective settings of stream $1 (rvd's defaults merged) into _st_*.
@@ -438,7 +474,7 @@ index 352b00d08..9ac7c0e5d 100644
  }
  
  agent_print_stream_state() {
-@@ -1573,7 +1831,7 @@ agent_stream_rtsp_url() {
+@@ -1573,7 +1848,7 @@ agent_stream_rtsp_url() {
  }
  
  agent_rtsp_listening() {
@@ -447,7 +483,7 @@ index 352b00d08..9ac7c0e5d 100644
  	if command -v netstat >/dev/null 2>&1; then
  		netstat -lnt 2>/dev/null | grep -q ":${port} " && printf 'true' && return 0
  	fi
-@@ -1585,8 +1843,9 @@ agent_rtsp_listening() {
+@@ -1585,8 +1860,9 @@ agent_rtsp_listening() {
  
  agent_recording_active() {
  	status=$(agent_daemon_status rmr)
@@ -459,7 +495,7 @@ index 352b00d08..9ac7c0e5d 100644
  		return 0
  	fi
  	printf 'false'
-@@ -1716,49 +1975,192 @@ agent_print_runtime_recording() {
+@@ -1716,49 +1992,192 @@ agent_print_runtime_recording() {
  	printf '}'
  }
  
@@ -690,7 +726,7 @@ index 352b00d08..9ac7c0e5d 100644
  	printf '"osd":'
  	agent_print_stream_osd "$stream_id"
  	printf '}'
-@@ -1768,68 +2170,154 @@ agent_print_stream_osd() {
+@@ -1768,68 +2187,154 @@ agent_print_stream_osd() {
  	# Raptor ROD is mostly global; streamN only owns osd_enabled. Both streams
  	# still expose the same element tree so OSD pages can hydrate via GET /config.
  	stream_id=$1
@@ -898,7 +934,7 @@ index 352b00d08..9ac7c0e5d 100644
  	printf '}'
  }
  
-@@ -2052,7 +2540,11 @@ agent_get_events() {
+@@ -2052,7 +2557,11 @@ agent_get_events() {
  # Infinity6C) has no on-camera motion at all.
  agent_print_motion_capabilities() {
  	if agent_isp_has ivs; then _m=true; else _m=false; fi
@@ -911,7 +947,7 @@ index 352b00d08..9ac7c0e5d 100644
  }
  
  agent_get_capabilities() {
-@@ -2161,6 +2653,7 @@ agent_get_runtime() {
+@@ -2161,6 +2670,7 @@ agent_get_runtime() {
  			printf '"recording":%s,' "$(agent_print_runtime_recording)"
  			printf '"firmware":%s,' "$(agent_print_runtime_firmware)"
  			printf '"services":{"streaming":%s},' "$(agent_print_runtime_streaming_service)"
@@ -919,7 +955,7 @@ index 352b00d08..9ac7c0e5d 100644
  			printf '"streams":['
  			agent_print_stream_runtime 0
  			printf ','
-@@ -2179,6 +2672,10 @@ agent_get_runtime() {
+@@ -2179,6 +2689,10 @@ agent_get_runtime() {
  		motion)
  			printf '{"enabled":%s,"active":%s}\n' "$(agent_motion_enabled)" "$(agent_motion_active)"
  			;;
@@ -930,7 +966,7 @@ index 352b00d08..9ac7c0e5d 100644
  		daynight)
  			printf '{"enabled":%s,"target_mode":%s,"running_mode":%s}\n' \
  				"$(agent_daynight_enabled)" \
-@@ -2208,11 +2705,32 @@ agent_get_runtime() {
+@@ -2208,11 +2722,32 @@ agent_get_runtime() {
  			agent_print_runtime_exposure
  			printf '\n'
  			;;
@@ -963,7 +999,7 @@ index 352b00d08..9ac7c0e5d 100644
  			agent_print_stream_runtime 1
  			printf '\n'
  			;;
-@@ -2279,24 +2797,33 @@ agent_get_runtime() {
+@@ -2279,24 +2814,33 @@ agent_get_runtime() {
  agent_get_config() {
  	command -v raptorctl >/dev/null 2>&1 &&
  		agent_config_preload sensor motion ircut recording audio rtsp \
@@ -1011,7 +1047,7 @@ index 352b00d08..9ac7c0e5d 100644
  		printf '"core_wb_mode":%s,' "$(agent_json_value_or "$(agent_wb_mode_to_int "$(agent_wb_mode_raw)")" null)"
  		printf '"wb_rgain":%s,' "$(agent_json_value_or "$(agent_wb_gain_raw r)" null)"
  		printf '"wb_bgain":%s,' "$(agent_json_value_or "$(agent_wb_gain_raw b)" null)"
-@@ -2305,32 +2832,60 @@ agent_print_config() {
+@@ -2305,32 +2849,60 @@ agent_print_config() {
  	fi
  	# hflip/vflip are the sensor's state; *_saved is raptor.conf's, which a
  	# camera that flips only at pipeline build applies at the next restart.
@@ -1091,7 +1127,7 @@ index 352b00d08..9ac7c0e5d 100644
  }
  
  agent_setting_value() {
-@@ -2638,6 +3193,7 @@ agent_osd_ensure_section() {
+@@ -2638,6 +3210,7 @@ agent_osd_ensure_section() {
  	case "$section" in
  		osd.timestamp | osd.uptime | osd.camera | osd.privacy) required='type template position' ;;
  		osd.logo) required='type path width height position' ;;
@@ -1099,7 +1135,7 @@ index 352b00d08..9ac7c0e5d 100644
  		*) return 0 ;;
  	esac
  	section_dump=$(raptorctl config get "$section" 2>/dev/null || true)
-@@ -2662,6 +3218,10 @@ agent_osd_ensure_section() {
+@@ -2662,6 +3235,10 @@ agent_osd_ensure_section() {
  		osd.logo)
  			set -- type image visible false path /usr/share/images/thingino_100x30.bgra width 100 height 30 position bottom_right
  			;;
@@ -1110,7 +1146,7 @@ index 352b00d08..9ac7c0e5d 100644
  	esac
  	osd_section=$section
  	while [ $# -ge 2 ]; do
-@@ -3009,6 +3569,9 @@ agent_get_setting() {
+@@ -3009,6 +3586,9 @@ agent_get_setting() {
  		audio/spk-gain)
  			agent_print_setting_leaf spk_gain "$(agent_audio_int ao_gain null)"
  			;;
@@ -1120,7 +1156,7 @@ index 352b00d08..9ac7c0e5d 100644
  		motion/enabled)
  			agent_print_setting_leaf enabled "$(agent_motion_enabled)"
  			;;
-@@ -3018,6 +3581,29 @@ agent_get_setting() {
+@@ -3018,6 +3598,32 @@ agent_get_setting() {
  		motion/cooldown-time)
  			agent_print_setting_leaf cooldown_time "$(agent_json_value_or "$(agent_config_get motion cooldown_sec)" null)"
  			;;
@@ -1141,6 +1177,9 @@ index 352b00d08..9ac7c0e5d 100644
 +		motion/nms-threshold)
 +			agent_print_setting_leaf nms_threshold "$(agent_json_value_or "$(agent_config_get motion nms_threshold)" 50)"
 +			;;
++		motion/detect-interval-ms)
++			agent_print_setting_leaf detect_interval_ms "$(agent_json_value_or "$(agent_config_get motion detect_interval_ms)" 0)"
++			;;
 +		motion/draw-boxes)
 +			agent_print_setting_leaf draw_boxes "$(agent_motion_draw_boxes)"
 +			;;
@@ -1150,7 +1189,25 @@ index 352b00d08..9ac7c0e5d 100644
  		motion/outputs/send2/*)
  			service=${path#motion/outputs/send2/}
  			agent_send2_service_supported "$service" || return 1
-@@ -3440,7 +4026,72 @@ agent_set_setting() {
+@@ -3425,7 +4031,16 @@ agent_set_setting() {
+ 			fi
+ 			agent_validate_bool "$value" || return 1
+ 			agent_motion_set_enabled "$value" || return 1
+-			agent_print_setting_update "$path" enabled "$value"
++			# rvd builds its IVS channel only when it starts, and only if
++			# detection was on then: turned on later, rmd runs with nothing
++			# to watch until the video restarts, so say so and the page
++			# offers that restart.
++			if [ "$value" = true ] && ! agent_ivs_running; then
++				printf '{"status":"accepted","applied":["settings.%s"],"staged":[],"restart_required":["streaming"],"resource":{"enabled":true}}
++' 					"$(agent_setting_path_label "$path")"
++			else
++				agent_print_setting_update "$path" enabled "$value"
++			fi
+ 			;;
+ 		motion/sensitivity)
+ 			value=$(agent_setting_value "$body_file" sensitivity) || return 1
+@@ -3440,7 +4055,77 @@ agent_set_setting() {
  			agent_validate_int "$value" || return 1
  			agent_config_set motion cooldown_sec "$value" || return 1
  			agent_config_save
@@ -1212,6 +1269,11 @@ index 352b00d08..9ac7c0e5d 100644
 +		motion/nms-threshold)
 +			agent_set_motion_int "$path" "$body_file" nms_threshold nms_threshold 1 99
 +			;;
++		motion/detect-interval-ms)
++			# The least time between two inferences of the model method
++			# (raptor patch 0121); 0 runs on every frame. Up to ten minutes.
++			agent_set_motion_int "$path" "$body_file" detect_interval_ms detect_interval_ms 0 600000
++			;;
 +		motion/draw-boxes)
 +			value=$(agent_setting_value "$body_file" draw_boxes) || return 1
 +			agent_validate_bool "$value" || return 1
@@ -1224,7 +1286,7 @@ index 352b00d08..9ac7c0e5d 100644
  			;;
  		motion/outputs/send2/*)
  			service=${path#motion/outputs/send2/}
-@@ -3563,7 +4214,8 @@ agent_set_setting() {
+@@ -3563,7 +4248,8 @@ agent_set_setting() {
  			agent_validate_bool "$value" || return 1
  			agent_config_set audio enabled "$value" || return 1
  			agent_config_save
@@ -1234,7 +1296,7 @@ index 352b00d08..9ac7c0e5d 100644
  			;;
  		streams/[01]/width | streams/[01]/height | streams/[01]/fps | streams/[01]/bitrate | streams/[01]/gop)
  			# One field at a time still goes through the whole-stream apply: the
-@@ -3584,7 +4236,7 @@ agent_set_setting() {
+@@ -3584,7 +4270,7 @@ agent_set_setting() {
  			# Raptor maps buffers onto encoder VBS count; takes effect after streamer restart.
  			agent_config_set "$(agent_stream_section "$stream_id")" nr_vbs "$value" || return 1
  			agent_config_save
@@ -1243,7 +1305,7 @@ index 352b00d08..9ac7c0e5d 100644
  			;;
  		streams/[01]/profile)
  			stream_id=${path#streams/}
-@@ -3615,7 +4267,8 @@ agent_set_setting() {
+@@ -3615,7 +4301,8 @@ agent_set_setting() {
  			esac
  			agent_config_set rtsp "$key" "$value" || return 1
  			agent_config_save

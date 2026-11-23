@@ -26,8 +26,9 @@ only as unlabelled boxes that `rod` draws into the sub stream.
 |---|---|
 | Detection in `rvd` (YOLOv5 through JZDL, or the vendor's person detector) | upstream: `BR2_PACKAGE_THINGINO_RAPTOR_IVS_DETECT` |
 | Two `rvd` fixes without which no box reaches the sub stream (the OSD pool is sized for the overlay; a full-frame region is placed at the frame's corner) | raptor patches 0112 and 0113, in patch 0012 of [`patches/thingino-sigmastar/`](../patches/thingino-sigmastar/) |
-| The agent's detection settings, capabilities and the read of the current detections | patch 0001 of [`patches/thingino-generic/`](../patches/thingino-generic/README.md) |
-| Settings > Detection, the Detections button on the preview with labelled boxes, and its event feed | patch 0002 of `patches/thingino-generic/` |
+| The agent's detection settings, capabilities and the read of the current detections; models from an SD card's `models/` folder | patch 0001 of [`patches/thingino-generic/`](../patches/thingino-generic/README.md) |
+| Settings > Detection, the Detections button on the preview with labelled boxes, and its event feed | patch 0002 of `patches/thingino-generic/` (package `thingino-detect`) |
+| `detectd`: `rvd`'s detections published to MQTT, ONVIF events, Home Assistant and Frigate, set from the `detect` block of `/etc/thingino.json` | patch 0002 of `patches/thingino-generic/` (package `thingino-detect`) |
 
 ## What the image needs
 
@@ -134,10 +135,11 @@ Settings > Detection sets these, and so does the agent
 | `algorithm` | `move`, `base_move`, `persondet`, `yolo`; the page offers `persondet` and `yolo` only when their libraries are in the image | `move` | at the next stream restart |
 | `sensitivity` | 0 to 4 for the motion grid, 0 to 5 for the person detector | 3 | |
 | `cooldown_sec` | seconds | 10 | |
-| `model` | a `.bin` under `/usr/share/models/` | `/usr/share/models/magik_model_yolov5.bin` | at the next stream restart |
+| `model` | a `.bin` (JZDL) or `.mgk` (the T41's NNA) under `/usr/share/models/` or an SD card's `models/` | `/usr/share/models/magik_model_yolov5.bin` | at the next stream restart |
 | `num_classes` | 1 to 80 | 4 | at the next stream restart |
 | `conf_threshold` | 1 to 99 | 40 | at the next stream restart |
 | `nms_threshold` | 1 to 99 | 50 | at the next stream restart |
+| `detect_interval_ms` | 0 to 600000; the page shows it as inferences a second | 0, every frame | at the next stream restart; read by `rvd` only with [gtxaspec/raptor#96](https://github.com/gtxaspec/raptor/pull/96) |
 
 `rvd` reads the model keys when it starts, so the page offers a stream restart
 after a change to one of them.
@@ -157,8 +159,10 @@ Two switches are separate from the detector's own keys:
 - **The public model** (`magik_model_yolov5.bin`): a YOLOv5 for JZDL with four
   classes and a portrait input of 320x416, which `rvd` squeezes the frame
   into.
-- **Another model.** Put the `.bin` under `/usr/share/models/`, choose it on
-  the page (the agent lists every `.bin` there) and set the class count. The
+- **Another model.** Put the `.bin` under `/usr/share/models/`, or in a
+  `models/` folder at the top of the SD card, which needs no new image;
+  choose it on the page (the agent lists every `.bin` and `.mgk` in both
+  places) and set the class count. The
   class names come from a text file beside the model with the same name and
   `.txt` in place of `.bin`, one name a line; without that file the first
   `num_classes` names of the COCO list are used. The JZDL backend takes the
@@ -290,9 +294,16 @@ which is why `thingino-ipud` takes its model from the camera's own firmware.
   moved; it does not track.
 - **The preview overlay and its feed** ran on the same camera, the boxes
   following at a median of 360 ms.
+- **A model from the SD card** on the same camera: listed on the page,
+  saved, loaded by `rvd` and detecting.
+- **`detectd` on the emulated T41:** started by the page's save, its ONVIF
+  event added, restarted with raptor. Not run with real objects on a camera,
+  nor against a live Home Assistant or Frigate.
 - **On the host:** the agent's detection settings and reads pass a test
-  against a stand-in `raptorctl`, the adapter's other answers match ones
-  saved from two Infinity6C cameras, and the page scripts pass 46 checks.
+  against a stand-in `raptorctl` (74 checks), `detectd` passes one with
+  canned `rvd` replies (33), the adapter's other answers match ones saved
+  from two Infinity6C cameras, and the page passes 66 checks on both
+  detectors.
 - **Models of our own on the T31X**, trained and converted with
   `tools/magik-train-txx`: the converted models' output matched Ingenic's
   emulator byte for byte on the same frames, and a person was found in 57 of

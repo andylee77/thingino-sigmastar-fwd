@@ -115,8 +115,9 @@ runtime, which is not in this repository.
 
 ## Using one
 
-Copy the model and its `.txt` to `/usr/share/models/` on the camera, choose it
-on Settings > Detection (or set `model` in `[motion]` of `/etc/raptor.conf`),
+Copy the model and its `.txt` to a `models/` folder at the top of the
+camera's SD card (or into the image's `/usr/share/models/`), choose it on
+Settings > Detection (or set `model` in `[motion]` of `/etc/raptor.conf`),
 set `num_classes` (6 or 1), and restart the stream when the page offers it.
 raptor stretches the frame to the model's input, so a 448x256 or 384x224 model
 suits a 16:9 sensor.
