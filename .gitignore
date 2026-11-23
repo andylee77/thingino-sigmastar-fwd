@@ -6,3 +6,6 @@
 *.swp
 *~
 .DS_Store
+
+# Our trained detection models (models/README.md) are published
+!models/**/*.bin

@@ -1,0 +1,6 @@
+person
+dog
+deer
+raccoon
+opossum
+vehicle

@@ -165,6 +165,10 @@ Two switches are separate from the detector's own keys:
   input size from the model file and decodes a YOLOv5 head with the stock
   anchors, so a model with that head needs no code change.
 
+- **Ours.** [models/](../models/README.md) has the models we trained: seven
+  for the T31 (six classes or person only, 4 or 8 bits) and one for the T41's
+  NNA, each with its names file, scores and speed.
+
 ### Making a model
 
 Every model for these SoCs comes out of Ingenic's Magik toolkit, which
