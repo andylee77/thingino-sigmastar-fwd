@@ -8,7 +8,7 @@ behind one web UI overlay:
 | Detector | raptor's own: the IVS detection in `rvd`, upstream in Thingino | `thingino-ipud`, on the SoC's IPU |
 | Where it is | upstream's build option; this repository adds the settings page, the preview overlay and the agent's settings for it | patch 0022 of `patches/thingino-sigmastar/` |
 | Model | public models from the `magik-models` package | a file from the camera's own firmware, taken out with [tools/ipu-extract](../tools/ipu-extract/README.md) |
-| Runs on | the CPU, through Ingenic's JZDL engine, also on SoCs that have a neural accelerator (see [the Wyze Cam v4](#the-wyze-cam-v4-and-its-accelerator)) | the IPU, the SoC's neural-network unit |
+| Runs on | the CPU, through Ingenic's JZDL engine, on the SoCs without an accelerator (T20, T21, T23, T31); on the T41, the NNA, through Ingenic's Uranus runtime and a raptor-hal backend offered upstream, since JZDL does not run there (see [the Wyze Cam v4](#the-wyze-cam-v4-and-its-accelerator)) | the IPU, the SoC's neural-network unit |
 
 The rest of this page is about the first column: what an upstream Thingino
 build for an Ingenic camera needs to run the detection patches. The Wyze Cam v4
@@ -56,6 +56,10 @@ BR2_PACKAGE_THINGINO_RAPTOR_IVS_DETECT=y
 BR2_PACKAGE_THINGINO_RAPTOR_IVS_JZDL=y
 BR2_PACKAGE_THINGINO_RAPTOR_IVS_YOLOV5=y
 ```
+
+That is the JZDL path, which runs on a T31-class SoC. On a T41 it builds but
+does not run; [the Wyze Cam v4](#the-wyze-cam-v4-and-its-accelerator) says why
+and what runs there instead.
 
 ## Applying the patches to upstream, for an Ingenic camera
 
@@ -160,8 +164,60 @@ Two switches are separate from the detector's own keys:
   `num_classes` names of the COCO list are used. The JZDL backend takes the
   input size from the model file and decodes a YOLOv5 head with the stock
   anchors, so a model with that head needs no code change.
-- **Making one** is outside this repository. Ingenic's Magik toolkit is the
-  vendor's own converter and training plugin for these SoCs.
+
+### Making a model
+
+Every model for these SoCs comes out of Ingenic's Magik toolkit, which
+trains, quantizes and converts a network for one runtime. Which runtime
+depends on the SoC:
+
+| SoC | Runtime | Model file | Kit |
+|---|---|---|---|
+| T20, T21, T23, T31 (no accelerator) | JZDL, on the CPU | `.bin` | Magik 1.0, public (`themactep/magik-toolkit-ingenic`); the converter's target is `Txx` |
+| T41 (and T40, A1) | Uranus, on the NNA | `.mgk`, a compiled MIPS shared object | Magik 3.x (3.1.7 here), from Ingenic; not public |
+
+**For a T31-class camera**,
+[tools/magik-train-txx](../tools/magik-train-txx/README.md) trains a YOLOv5
+on your own classes and converts it for `Txx`: it fetches the public kit,
+fine-tunes the kit's Txx YOLOv5 sample (the network behind the public model),
+works around two converter faults that otherwise ruin a fine-tuned model, and
+writes the `.bin` and its names file. Its README has the steps, what the kit
+imposes (the kit's own plugin for training, channels in multiples of 16, an
+RTX 20 or 30 class GPU) and the scores. In short:
+
+- A float model cannot be converted for the T31: the converter quantizes only
+  a network built from the kit's plugin layers, so a model of your own is a
+  fine-tune of the kit's sample, not a conversion.
+- Six classes at 4 bits, 448x256, convert to within a point of the trained
+  model (person mAP50 0.882 on our held-out frames) and run in about 0.18 to
+  0.4 s a frame on a T31X; at 8 bits the conversion is exact (0.915) and about
+  four times slower.
+- Frames from your own cameras teach their scenes and lose the general view;
+  mixing in COCO pictures of the same classes (`coco_mix.py`) brings it back
+  at the cost of a few points on your own frames.
+- Check a converted model before trusting it: the engine takes the frame as
+  `pixel - 128` in int8, so a test program that passes raw pixels sees a model
+  that finds almost nothing.
+
+**For a T41**, the model is converted with the Magik 3.x kit for Uranus. The
+converter needs Ingenic's gcc 7.2 XBurst2 toolchains (published as
+`gtxaspec/ingenic-toolchain`) and runs on a Linux PC in under a minute. Two
+ways in:
+
+- **Quantization-aware training** with the kit's plugin: mark the input and
+  outputs, calibrate on 16 to 20 images, fine-tune, export ONNX, convert.
+- **Post-training quantization** of a float ONNX model with 10 to 200
+  calibration images, at most 8-bit weights.
+
+Check the result against the kit's PC executor before a camera; gtxaspec's
+QEMU fork runs the T41's NNA and gives the same outputs layer for layer. The
+activation matters on the NNA: a YOLOv5s with SiLU took 252 ms a network on a
+T41, the same network with LeakyReLU 69 ms, and a small ReLU6 network of six
+classes 42 ms (below). The backend decodes a YOLOv5 head with the stock
+anchors, as the JZDL one does.
+
+There is no script set for the T41 path in this repository: the kit is not
+public, and nothing of it can ship here.
 
 ### The Wyze Cam v4 and its accelerator
 
@@ -170,16 +226,50 @@ already there: Thingino builds the `soc-nna` driver for the T40, T41 and A1
 families (`BR2_INGENIC_SDK_SOC_NNA`, on by default for them) and loads it at
 boot on a T41.
 
-What is missing is everything above the driver. JZDL, the engine raptor's HAL
-links, runs on the CPU and does not use the NNA. The accelerator is reached
-through a different Ingenic runtime with its own model format, and raptor's HAL
-has no backend for it: its one detection backend is `src/hal_ivs_jzdl.cpp`. So
-on a Wyze Cam v4 these patches give CPU detection through JZDL, and detection
-on the NNA needs three things first: a backend in raptor-hal for that runtime,
-the runtime's library in the image, and a model in its format. The web UI and
-the agent of this series would not change: they read `rvd`'s detections,
-whichever backend produced them. All of this is read from the sources; neither
-path has been run on a T41 here.
+JZDL, the engine raptor's HAL links upstream, runs on the CPU and does not use
+the NNA, and on the T41 it does not run at all: Ingenic ships JZDL for the
+T31's MXU (the 5.4.0 build) and an X2000 build (7.2.0, the one T40, T41 and A1
+images install) compiled for MSA, the standard MIPS SIMD extension. The T41's
+XBurst2 cores have Ingenic's MXU v3 instead and no MSA, so `rvd` stops with an
+illegal instruction the moment the model method starts (tested on a Wyze Cam
+v4, 2026-11-20). Choosing the model method on a T41 with the JZDL backend
+therefore takes the video down until the method is changed back.
+
+Detection on a T41 runs on the NNA instead, through Ingenic's Uranus runtime.
+raptor's HAL upstream has no backend for it yet; one is offered as three pull
+requests, open as of 2026-11-23:
+
+| Pull request | What it adds |
+|---|---|
+| [gtxaspec/raptor-hal#21](https://github.com/gtxaspec/raptor-hal/pull/21) | `src/hal_ivs_uranus.cpp`: YOLOv5 on the NNA behind the JZDL backend's `hal_jzdl_*` API, so `rvd` is unchanged; every runtime call on core 0 (the NN instructions work only there); the YOLOv5 decode shared with JZDL in `src/hal_ivs_yolo.h`, with host tests |
+| [gtxaspec/raptor#97](https://github.com/gtxaspec/raptor/pull/97) | with `URANUS_LIB` naming the runtime's folder, an `IVS_DETECT` build links the Uranus libraries in place of `libjzdl.m.so` |
+| [gtxaspec/raptor#96](https://github.com/gtxaspec/raptor/pull/96) | `[motion] detect_interval_ms`: the inference rate, and with it the CPU spent |
+
+None of the three is in this repository's patch series: they wait on
+upstream, and the runtime they link is Ingenic's, which cannot be shipped,
+here or in an image. A builder takes it from the Magik 3.x kit (the uClibc
+build for a Thingino image). The web UI and the agent of this series work with
+it unchanged: they read `rvd`'s detections, whichever backend produced them;
+`algorithm = yolo` selects it as it does JZDL.
+
+Besides the backend and the runtime, a T41 image needs three things before the
+runtime starts:
+
+1. **The L2 share at 128 KiB.** The T41's on-chip SRAM is split between the L2
+   cache and the NNA's ORAM by the CCU register MSCR (0x12200060). Ingenic's
+   own SPL sets a 128 KiB share; a Thingino T41 boots with the boot ROM's
+   256 KiB. The runtime reads the ORAM's start from MSCR, and on 256 KiB asks
+   for an address the `soc-nna` driver's T41 branch does not know: the first
+   mapping hangs the camera
+   ([themactep/thingino-firmware#2093](https://github.com/themactep/thingino-firmware/issues/2093)).
+   Switching the share to 128 KiB after boot with a small kernel module,
+   #2093's method, works; writing it from U-Boot left the camera off the
+   network.
+2. **An `nmem=` reservation** on the kernel command line, which Thingino's
+   `bootcmd` does not set; `rmem=44M nmem=20M` worked.
+3. **The runtime's libraries with `libstdc++` and `libgcc_s`**, which a
+   Thingino image lacks by default, and the name `librt.so.0` for the uClibc
+   build to load on uClibc-ng.
 
 There is also no model to reuse from the camera itself. The stock image of the
 Wyze Cam v4 unit examined for this port (a factory build dated 2024-04-29)
@@ -199,11 +289,37 @@ which is why `thingino-ipud` takes its model from the camera's own firmware.
 - **On the host:** the agent's detection settings and reads pass a test
   against a stand-in `raptorctl`, the adapter's other answers match ones
   saved from two Infinity6C cameras, and the page scripts pass 46 checks.
-- **Not run on a T41**, and not on a Wyze Cam v4.
+- **Models of our own on the T31X**, trained and converted with
+  `tools/magik-train-txx`: the converted models' output matched Ingenic's
+  emulator byte for byte on the same frames, and a person was found in 57 of
+  60 polls (4 bits) and 20 of 20 (8 bits). The scores are in
+  [its README](../tools/magik-train-txx/README.md#what-was-tested-and-what-was-not).
+- **The NNA backend on two Wyze Cam v4 (T41NQ)**, with the three pull
+  requests above, the Uranus runtime of Magik kit 3.1.7 and the three image
+  changes, in an image of the port's development tree:
+
+  | Network, 640x384 | One network | In `rvd` | CPU idle (88 % without) |
+  |---|---|---|---|
+  | six classes, ReLU6, 0.55 M weights | 42 ms | about 12.5 results a second | 48 % |
+  | YOLOv5s with SiLU | 252 ms | a result every 0.29 s | 38 % |
+  | the kit's YOLOv5s with LeakyReLU | 69 ms | | |
+
+  The cost is the CPU's: core 0 issues the NN instructions and waits on the
+  unit, about 39 of each 54 ms. Streaming slows the network too (memory
+  traffic): 25 ms with raptor stopped against 41 ms streaming at 25 fps. The
+  six-class model found every labelled object of four held-out frames within
+  about 3 px of the float model.
+- **On the emulated T41** (gtxaspec's QEMU fork): the backend's outputs equal
+  the kit's PC executor, and the camera's boxes equal the emulator's to the
+  last digit.
+- **JZDL on a T41**: stops with an illegal instruction (above).
 - **Not built from these two series alone for an Ingenic profile.** The
   port's own Ingenic test images come from its development tree, which
-  carries more generic work than this repository. The configurations above
-  were generated, not built.
+  carries more generic work than this repository, and the T41 images also the
+  NNA pull requests. The configurations above were generated, not built.
+- **Not tried:** the T40 and A1 (the A1's NNA does not run under the
+  emulator), and the T20, T21 and T23.
 - **Detection and the camera's other load.** On the T31 the detector took
-  nearly all the CPU that was idle. What it leaves for recording, WebRTC or
-  anything else on the camera was not measured.
+  nearly all the CPU that was idle; on the T41 the six-class model leaves
+  about half. What either leaves for recording, WebRTC or anything else on
+  the camera was not measured.
