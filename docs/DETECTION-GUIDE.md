@@ -183,6 +183,7 @@ depends on the SoC:
 |---|---|---|---|
 | T20, T21, T23, T31 (no accelerator) | JZDL, on the CPU | `.bin` | Magik 1.0, public (`themactep/magik-toolkit-ingenic`); the converter's target is `Txx` |
 | T41 (and T40, A1) | Uranus, on the NNA | `.mgk`, a compiled MIPS shared object | Magik 3.x (3.1.7 here), from Ingenic; not public |
+| T41 (and T40, A1) | Venus, on the NNA, the older runtime | `.bin` | Magik 1.0 and 2.0, from Ingenic; each has T41 builds of its own (2.0 by release, 0.1.5.5 to 0.2.2.0). raptor-hal has no Venus backend |
 
 **For a T31-class camera**,
 [tools/magik-train-txx](../tools/magik-train-txx/README.md) trains a YOLOv5
@@ -225,7 +226,9 @@ classes 42 ms (below). The backend decodes a YOLOv5 head with the stock
 anchors, as the JZDL one does.
 
 There is no script set for the T41 path in this repository: the kit is not
-public, and nothing of it can ship here.
+public, and nothing of it can ship here. The Venus line converts too (the
+2.x converter); its runtime would need a backend of its own behind the same
+`hal_jzdl_*` API.
 
 ### The Wyze Cam v4 and its accelerator
 
@@ -241,7 +244,12 @@ images install) compiled for MSA, the standard MIPS SIMD extension. The T41's
 XBurst2 cores have Ingenic's MXU v3 instead and no MSA, so `rvd` stops with an
 illegal instruction the moment the model method starts (tested on a Wyze Cam
 v4, 2026-11-20). Choosing the model method on a T41 with the JZDL backend
-therefore takes the video down until the method is changed back.
+therefore takes the video down until the method is changed back. No Magik kit
+(1.0 to 3.2.9) ships a CPU runtime for the T41. The CPU can still run a network
+through MXU v3 with a runtime written for it:
+[opensensor/thingino-accel](https://github.com/opensensor/thingino-accel)
+runs its own model that way, at about 1.75 s an inference by its README. The
+NNA runs a network of our size in about 42 ms.
 
 Detection on a T41 runs on the NNA instead, through Ingenic's Uranus runtime.
 raptor's HAL upstream has no backend for it yet; one is offered as three pull
@@ -270,9 +278,12 @@ runtime starts:
    for an address the `soc-nna` driver's T41 branch does not know: the first
    mapping hangs the camera
    ([themactep/thingino-firmware#2093](https://github.com/themactep/thingino-firmware/issues/2093)).
-   Switching the share to 128 KiB after boot with a small kernel module,
-   #2093's method, works; writing it from U-Boot left the camera off the
-   network.
+   The switch must come after every L1 and L2 line is written back, either
+   at run time (#2093's kernel module, which is what we run, loaded by hand
+   for each test and gone at a reboot) or at U-Boot's last step before Linux
+   (#2093's author reports that a U-Boot build option doing so works on a Cam
+   v4). A plain register write in `bootcmd`, without the write-back, stops
+   U-Boot: that is the one way we saw fail.
 2. **An `nmem=` reservation** on the kernel command line, which Thingino's
    `bootcmd` does not set; `rmem=44M nmem=20M` worked.
 3. **The runtime's libraries with `libstdc++` and `libgcc_s`**, which a
