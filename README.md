@@ -87,6 +87,7 @@ patches/
 tools/
   onvifcheck/                  an ONVIF conformance and client-compatibility checker
   ipu-extract/                 takes ipud's model out of your own firmware
+  magik-train-txx/             trains a detection model of your own classes for a T31-class camera
 ```
 
 ## Cameras this brings up
